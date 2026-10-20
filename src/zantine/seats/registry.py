@@ -5,7 +5,7 @@ seat, or a single name used for all seats. Examples::
 
     scripted
     scripted*9,idle
-    live:claude-fable-5-1,scripted*9      # once a live harness registers "live"
+    live:claude-fable-5-1,scripted*9      # live Seats: only via `zantine play --live`
 
 Register new kinds with ``@register_controller("name")``. Factories receive the
 seat's own ``GameRng`` fork and the optional ``arg``. Controllers that call a
@@ -67,3 +67,5 @@ def make_controllers(spec: str, num_seats: int, rng: GameRng) -> list[SeatContro
 
 register_controller("scripted")(lambda rng, arg: ScriptedBot(rng))
 register_controller("idle")(lambda rng, arg: IdleBot())
+
+from zantine.seats import live as _live  # noqa: E402, F401  (registers "live")

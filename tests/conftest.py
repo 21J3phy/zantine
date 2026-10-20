@@ -9,11 +9,15 @@ import pytest
 LIVE = os.environ.get("ZANTINE_LIVE") == "1"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption("--live", action="store_true", help="run tests that call paid APIs")
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
-    """Tests marked ``live`` may call a paid API; they run only with ZANTINE_LIVE=1."""
-    if LIVE:
+    """Tests marked ``live`` may call a paid API; they run only with ZANTINE_LIVE=1 and --live."""
+    if LIVE and config.getoption("--live"):
         return
-    skip = pytest.mark.skip(reason="live API test; set ZANTINE_LIVE=1 to run")
+    skip = pytest.mark.skip(reason="live API test; needs ZANTINE_LIVE=1 and pytest --live")
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip)
