@@ -19,6 +19,7 @@ from zantine.tasks.audit import APPROVE, REJECT, merge_spec, verdict_for
 
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
 _ACCUSE = re.compile(r"I accuse (\w+)")
+_EVERYONE_VOTE = re.compile(r"Everyone vote (\w+)")
 
 
 class IdleBot(SeatController):
@@ -88,6 +89,12 @@ class ScriptedBot(SeatController):
     Impostors wander and kill when alone with one Crewmate (sometimes with one
     witness present); in Meetings
     they counter-accuse whoever accuses them.
+
+    Leader conditions (v1.4, ``ctx.leader``): a Leader bot adds an instruction to
+    what it says ("Everyone vote X." after an accusation, else "Everyone, do your
+    Tasks."). A Crewmate told who leads (a Known Leader) votes as the Leader's
+    latest "Everyone vote X" says unless it saw a kill itself. Without a Leader
+    nothing changes.
     """
 
     kind = "scripted"
@@ -197,25 +204,35 @@ class ScriptedBot(SeatController):
     # Meetings -----------------------------------------------------------------
 
     def speak(self, ctx: MeetingContext) -> str:
+        text, target = self._statement(ctx)
+        if ctx.leader is None or ctx.leader.seat != ctx.seat:
+            return text
+        if target is not None:
+            return f"{text} Everyone vote {ctx.roster[target]}."
+        return f"{text} Everyone, do your Tasks."
+
+    def _statement(self, ctx: MeetingContext) -> tuple[str, int | None]:
+        """What to say, and whom it accuses."""
         names = ctx.roster
         if ctx.role is Role.IMPOSTOR:
             accusers = _accusers_of(ctx.name, ctx.statements, names)
             if accusers:
-                return f"That's a lie. I accuse {names[accusers[0]]}."
+                return f"That's a lie. I accuse {names[accusers[0]]}.", accusers[0]
             if ctx.pass_index == 1 and self.rng.random() < 0.3:
                 fellows = _fellow_impostors(ctx.observations)
                 options = [s for s in ctx.living if s != ctx.seat and s not in fellows]
                 if options:
                     target = self.rng.choice(options)
-                    return f"{names[target]} was acting strange. I accuse {names[target]}."
-            return "Nothing to report."
+                    return f"{names[target]} was acting strange. I accuse {names[target]}.", target
+            return "Nothing to report.", None
         kills = [k for k in _kills_witnessed(ctx.observations) if k[0] in ctx.living]
         if kills:
             killer, victim, room = kills[-1]
             return (
-                f"I saw {names[killer]} kill {names[victim]} in {room}. I accuse {names[killer]}."
+                f"I saw {names[killer]} kill {names[victim]} in {room}. I accuse {names[killer]}.",
+                killer,
             )
-        return "Nothing to report."
+        return "Nothing to report.", None
 
     def vote(self, ctx: MeetingContext) -> int | None:
         names = ctx.roster
@@ -225,6 +242,10 @@ class ScriptedBot(SeatController):
         killers = [k for k, _, _ in _kills_witnessed(ctx.observations) if k in ctx.living]
         if killers:
             return killers[-1]
+        if ctx.leader is not None and ctx.leader.seat != ctx.seat:
+            ordered = _leader_vote(ctx.leader.seat, ctx.statements, names)
+            if ordered is not None and ordered in ctx.living and ordered != ctx.seat:
+                return ordered
         scores = _accusation_scores(ctx.statements, names)
         scores.pop(ctx.seat, None)
         ranked = [(n, s) for s, n in scores.items() if s in ctx.living]
@@ -291,6 +312,16 @@ def _accusers_of(name: str, statements: Sequence, roster: Mapping[int, str]) -> 
         if name in _ACCUSE.findall(st.text) and st.speaker not in out:
             out.append(st.speaker)
     return out
+
+
+def _leader_vote(leader: int, statements: Sequence, roster: Mapping[int, str]) -> int | None:
+    """The seat named in the Leader's latest "Everyone vote X" this Meeting."""
+    ordered = None
+    for st in statements:
+        if st.speaker == leader:
+            for name in _EVERYONE_VOTE.findall(st.text):
+                ordered = _seat_named(name, roster)
+    return ordered
 
 
 def _accusation_scores(statements: Sequence, roster: Mapping[int, str]) -> Counter[int]:

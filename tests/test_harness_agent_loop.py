@@ -69,7 +69,7 @@ def test_an_agent_loop_seat_plays_a_full_game() -> None:
         "provider": "anthropic",
         "effort": "medium",
         "effort_setting": "medium",
-        "harness": "agent-loop-v1",
+        "harness": "agent-loop-v2",
     }
     calls = [r["data"] for r in game.transcript.events("harness.call")]
     assert len(calls) == len(client.messages.calls) > 0
@@ -78,7 +78,7 @@ def test_an_agent_loop_seat_plays_a_full_game() -> None:
     # The game ran on the agent-loop prompt and tools.
     assert all(c["system"][0]["text"] == agent_loop.SYSTEM_PROMPT for c in client.messages.calls)
     assert result.cost["harnesses"] == {
-        "agent-loop-v1": {"seats": [me], **{k: result.cost["game"][k] for k in result.cost["game"]}}
+        "agent-loop-v2": {"seats": [me], **{k: result.cost["game"][k] for k in result.cost["game"]}}
     }
 
 
@@ -99,9 +99,9 @@ def test_both_harnesses_log_the_same_fields_through_one_ledger() -> None:
     # One ledger prices both, and the cost record splits them by Harness.
     assert result.ledger.spent_usd == pytest.approx(sum(c["cost_usd"] for c in calls))
     harnesses = result.cost["harnesses"]
-    assert harnesses["neutral-v5"]["seats"] == [neutral_seat]
-    assert harnesses["agent-loop-v1"]["seats"] == [loop_seat]
-    for label, seat in (("neutral-v5", neutral_seat), ("agent-loop-v1", loop_seat)):
+    assert harnesses["neutral-v6"]["seats"] == [neutral_seat]
+    assert harnesses["agent-loop-v2"]["seats"] == [loop_seat]
+    for label, seat in (("neutral-v6", neutral_seat), ("agent-loop-v2", loop_seat)):
         assert harnesses[label]["calls"] == len(by_seat[seat])
         assert harnesses[label]["cost_usd"] == result.cost["seats"][seat]["cost_usd"]
     total = sum(h["cost_usd"] for h in harnesses.values())
@@ -312,5 +312,5 @@ def test_cli_records_the_harness_in_the_transcript_header(
     assert main([*argv, "--spend-cap", "20", "--out", str(out), "--quiet"]) == 0
     records = Transcript.read(out)
     live = [s["controller"] for s in records[0]["seats"] if s["controller"]["kind"] == "live"]
-    assert sorted(c["harness"] for c in live) == ["agent-loop-v1", "neutral-v5"]
-    assert set(records[-1]["harnesses"]) == {"agent-loop-v1", "neutral-v5"}
+    assert sorted(c["harness"] for c in live) == ["agent-loop-v2", "neutral-v6"]
+    assert set(records[-1]["harnesses"]) == {"agent-loop-v2", "neutral-v6"}

@@ -204,8 +204,16 @@ def generate_map(num_rooms: int, rng: GameRng) -> GameMap:
 
 def _roles(config: GameConfig, rng: GameRng) -> tuple[Role, ...]:
     impostors = config.impostor_seats
-    if impostors is None:
+    leader = config.leader
+    if impostors is None and (leader is None or leader.compromised is None):
         impostors = tuple(rng.sample(range(config.num_seats), config.num_impostors))
+    elif impostors is None:
+        # A forced Leader role (v1.4): the other Impostors are drawn from the other seats.
+        others = [s for s in range(config.num_seats) if s != leader.seat]
+        if leader.compromised:
+            impostors = (leader.seat, *rng.sample(others, config.num_impostors - 1))
+        else:
+            impostors = tuple(rng.sample(others, config.num_impostors))
     return tuple(
         Role.IMPOSTOR if seat in impostors else Role.CREWMATE for seat in range(config.num_seats)
     )

@@ -13,6 +13,8 @@ A post-game step after the **Claim Audit** (``zantine audit --judge ...``):
 3. ``report.run_judgments`` computes per-Seat **Floor Share**, **Vote Pull**,
    Suspicion, Lie Survival and Misdirection. Judgments never change a Claim
    verdict, a vote or an Ejection; those come only from the game record.
+4. In v1.4 Leader games, ``leader`` adds ``instruction`` questions over the
+   Leader's statements and checks **Compliance** and time to eject in code.
 """
 
 from zantine.judge.judges import Judge, KeywordJudge, ScriptedJudge, choice, noul

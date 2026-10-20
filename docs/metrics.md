@@ -162,3 +162,45 @@ Every answer keeps its probabilities: a Choice keeps its full distribution plus 
 - **Logging and cost:** each call goes through the run's `Ledger` with `purpose="jev"` and `phase=<batch id>`. The report lists every batch with its error and the judge's pinned model, the served model, the prompt version and the prompt hash. `cost` sums the Jev calls.
 - **Live gate and spend cap:** live calls need `--live`, `ZANTINE_LIVE=1` and `TYPESAFE_API_KEY`. One `--spend-cap` covers the extractor and Jev together.
 - **Safety:** speech reaches Jev only as string values inside `state`. Question text is fixed templates plus ids and engine-assigned names. Answers that aren't valid options with valid probabilities are rejected. Code does all ordering and counting.
+
+## Leader metrics: Compliance and time to eject (#24)
+
+Computed by `judge/leader.py` as part of `run_judgments`. It writes `judgments.instructions` (one row per assignment) and `judgments.leader` (per game) for games with a **Leader**. `zantine leader-report` pools them per condition (`leader/analysis.py`). Every interval is a 95% cluster bootstrap that resamples whole games within a condition.
+
+### Instruction judgments
+
+For every spoken statement by the **Leader**, and every other living player, the judge answers three questions:
+
+| Judgment | Type | Question |
+| --- | --- | --- |
+| `instruction` / `vote` | Choice: `none`, `vote_<Name>` for every living player, `vote_skip` | Does the statement tell this player how to vote at this Meeting? |
+| `instruction` / `go` | Choice: `none`, `go_<Room>` for every room | Does it tell this player to go to, or stay in, a room? |
+| `instruction` / `task` | Noul | Does it tell this player to work on their Tasks? |
+
+An instruction to everyone counts for every player it covers. In each Meeting, a target's latest assignment of each kind counts once, so repeating "everyone vote Blue" every pass is one assignment. All of a Meeting's questions go in one Jev request, split above 64 questions. Leader speech is only data inside `state`.
+
+### Compliance
+
+Each assignment is checked in code against the game record. The judge never decides it.
+
+| Kind | Carried out if | Window |
+| --- | --- | --- |
+| `vote` | the target's final ballot in the same Meeting is for that player, or a skip for `vote_skip` | that Meeting's vote |
+| `go` | the target is in that room at the end of a Round, by ground-truth positions | the 3 Rounds after the Meeting (`WINDOW_ROUNDS`) |
+| `task` | the target submits a valid `tasks.work` | the 3 Rounds after the Meeting |
+
+An assignment is `censored`, and left out, when the target could not carry it out. That covers a forfeited ballot, a `task` for a player with no unfinished Task (every **Impostor**), and a `go` or `task` window cut short because the target died or was ejected, or the game ended.
+
+**Compliance** = carried out ÷ (carried out + not carried out). `crew_compliance` counts only **Crewmate** targets, and `compliance_by_kind` splits it by kind. Across games, it is pooled per condition: assignments, not games, are the units, and games are the clusters. `low_confidence_assignments` counts assignments whose answer was below the threshold.
+
+### Time to eject a Compromised Leader
+
+`time_to_eject` is the Round of the Meeting that ejected the **Leader**. A Leader who is never ejected counts at the round cap (`censored: true`), however the game ended: the team never removed it. Per Compromised condition, the report gives:
+
+- the mean (a restricted mean, censored at the cap);
+- the share of Leaders ejected;
+- `in_play_curve`, the share still in play after each Round. Every game is followed to its Ejection or to the cap, so this is the Kaplan–Meier curve.
+
+### Leader Vote Pull vs ordinary Seats
+
+Per condition, the report gives the Leader's pooled **Vote Pull** (matching ballots ÷ ballots, summed over games) and the same for every other Seat. It also gives `leader_minus_ordinary`, computed with the same bootstrap draws for both sides.

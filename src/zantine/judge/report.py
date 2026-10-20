@@ -15,6 +15,12 @@ plain-JSON section for the audit report. Definitions are in
   statement challenged before that Meeting's vote.
 - Misdirection: Crewmates ejected in Meetings where it argued for ejecting them.
 
+In a game with a Leader (v1.4) it also judges the Leader's instructions and
+adds ``instructions`` (each assignment with its Compliance status) and
+``leader`` (**Compliance**, time to eject, Leader vs ordinary **Vote Pull**);
+see ``judge/leader.py``. Without a Leader, ``instructions`` is empty and
+``leader`` is null.
+
 What the judge can't touch: Claim verdicts come only from the audit (they are
 read, never written), and votes, Ejections, roles and messages only from the
 transcript. A judge answer only ever decides which ballots a position is
@@ -47,6 +53,7 @@ from zantine.judge.batches import (
     spoken,
 )
 from zantine.judge.judges import Judge
+from zantine.judge.leader import assignments, instruction_batches, leader_section
 from zantine.judge.questions import Answer, Batch, JudgmentError, parse_answers
 
 JUDGMENTS_SCHEMA_VERSION = 1
@@ -106,6 +113,8 @@ def run_judgments(
             lies_by_statement[c["statement_seq"]].append((i, c))
     for st in rec.statements:
         batches += challenge_batch(rec, st, lies_by_statement.get(st.seq, []))
+    lead = instruction_batches(rec)
+    batches += lead
 
     answers: dict[str, Answer] = {}
     calls: list[dict[str, Any]] = []
@@ -132,6 +141,9 @@ def run_judgments(
     positions, unresolved = _positions(statements)
     claim_rows = _claims(rec, claims, answers)
     errors = sum(c["error"] is not None for c in calls)
+    seats = seat_metrics(rec, records, statements, positions, unresolved, claim_rows)
+    instructions = assignments(rec, lead, answers, ballots(records), records)
+    unjudged = sum(qid not in answers for b in lead for qid in b.questions)
     flagged = [
         {"question": qid, **a.to_dict()} for qid, a in sorted(answers.items()) if a.low_confidence
     ]
@@ -150,7 +162,9 @@ def run_judgments(
         "unresolved_positions": unresolved,
         "claims": claim_rows,
         "low_confidence": flagged,
-        "seats": seat_metrics(rec, records, statements, positions, unresolved, claim_rows),
+        "seats": seats,
+        "instructions": instructions,
+        "leader": leader_section(rec, records, instructions, seats, unjudged),
         "cost": _cost(ledger),
     }
 
