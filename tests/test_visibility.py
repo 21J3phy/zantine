@@ -80,8 +80,13 @@ def test_events_in_other_rooms_are_invisible() -> None:
 def test_only_impostors_learn_who_the_impostors_are() -> None:
     game = make_game()
     game.start()
-    assert obs_of(game, 0, "role_assigned") == [{"role": "impostor", "fellow_impostors": [1]}]
-    assert obs_of(game, 5, "role_assigned") == [{"role": "crewmate", "fellow_impostors": []}]
+    count = "0 to 2 Impostors"
+    assert obs_of(game, 0, "role_assigned") == [
+        {"role": "impostor", "fellow_impostors": [1], "impostor_count": count}
+    ]
+    assert obs_of(game, 5, "role_assigned") == [
+        {"role": "crewmate", "fellow_impostors": [], "impostor_count": count}
+    ]
     ctx = game.action_context(game.state.player(5))
     assert ctx.kill_cooldown is None
 

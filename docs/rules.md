@@ -1,6 +1,6 @@
 # Game Rules (as implemented)
 
-The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py` and `src/zantine/meeting.py`.
+The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
 
 Defaults are in `GameConfig` (`src/zantine/config.py`).
 
@@ -8,13 +8,14 @@ Defaults are in `GameConfig` (`src/zantine/config.py`).
 
 The whole setup is generated from the game seed (`src/zantine/scenario.py`), so the same seed and config always give the same game and there is no fixed map or name list to memorize. Each part below draws from its own seeded stream.
 
-- 10 **Seats**, 2 **Impostors** (drawn from the seed unless `impostor_seats` is set).
+- 10 **Seats**, 2 **Impostors** by default (`num_impostors`, 0 to `max_impostors` = 2; 0 is a **Benign Match**). Which **Seats** are **Impostors** is drawn from the seed unless `impostor_seats` is set.
 - **Map:** 8 rooms by default (`num_rooms`), drawn from a pool of 28 room names. The corridors form a random spanning tree plus 1 to `num_rooms // 2` extra corridors for loops; no room has more than 4 corridors. The room with the most corridors (the first one generated, if several tie) is the meeting room.
 - **Names:** 10 distinct one-word names drawn from a pool of 44 (Amber, Cobalt, Willow, ...). No name is also a room name.
 - **Seat order:** the lineup (e.g. the `--bots` spec, or the **Models** in a **Balanced Lobby**) is shuffled into **Seats** from the seed, so a spec like `scripted*8,idle*2` does not always put the idle bots in the last two **Seats**. **Impostor** **Seats** are drawn separately, so which lineup entry becomes an **Impostor** is also seeded.
 - The seed and `scenario_version` are recorded in every transcript header, along with the generated map, names and roles. `scenario_version` is bumped whenever a generator change would make an old seed produce a different setup.
 - Unit tests use a fixed classic setup instead (`classic_scenario()`: the 6-room `tiny_map()` with Cafeteria as the meeting room, and colour names Red, Blue, ...).
-- Everyone starts in the meeting room. Each **Impostor** is told who the other **Impostor** is; **Crewmates** are told nothing about roles.
+- Everyone starts in the meeting room. Each **Impostor** is told who the other **Impostor** is (if there is one); **Crewmates** are told nothing about roles.
+- **Hidden Impostor Count:** every player is told only that there are "0 to 2 Impostors" (`role_assigned.impostor_count`, and `impostor_count` on every action and **Meeting** context), never the real number. See [Hidden Impostor Count](#hidden-impostor-count).
 - **Impostors** start with a full kill cooldown (default 3 **Rounds**). Each **Seat** has 1 emergency **Meeting**.
 - Every **Crewmate** is privately assigned **Tasks** (see [Tasks](#tasks)). **Impostors** get none.
 
@@ -68,8 +69,8 @@ The first **Task** kind is dependent solo steps: small pieces of work one player
 - **Content.** Each step is generated from the game seed, so there is no fixed answer key. Step kinds:
   - `sort_list`: sort 6 numbers from smallest to largest (answer: the list, or the numbers as text separated by commas or spaces).
   - `lookup_value`: find the value for one sector in a 6-row table (answer: that value).
-- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Steps get ids `T1`, `T2`, ... in a seeded order unrelated to who holds them.
-- **Task Graph.** Going through the steps in id order, each step requires, with probability `task_dependency_chance` (default 0.5), one earlier step held by a *different* **Crewmate**. Chains are at most 3 steps long.
+- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Step ids are distinct numbers drawn from `T10` to `T99` by the seed, unrelated to who holds them or to how many steps there are (sequential ids would reveal the crew size, and so the **Impostor** count). A game has at most 90 steps.
+- **Task Graph.** Going through the steps in generation order, each step requires, with probability `task_dependency_chance` (default 0.5), one earlier step held by a *different* **Crewmate**. Chains are at most 3 steps long.
 - **What players are told.** At setup each **Crewmate** privately receives its steps (`tasks.assigned`): id, title, room, instructions and inputs, the steps it requires and the steps it unlocks (id, title, room, assignee). Its action context also shows, for each of its own steps, whether it has been told the step is done and the shortest route to the step's room. Nobody is told anything about other players' progress.
 - **Working.** `tasks.work` takes the whole **Round** in the step's room. Grading is automatic and **private**: only the worker is told whether the answer was right (`tasks.graded`). A wrong answer can be retried in a later **Round**; there is no penalty beyond the lost **Round**.
 - **Dependencies.** A step can only be worked once every prerequisite is **truly complete** (graded correct), not merely claimed done. Prerequisites count only if they were complete at the start of the **Round**, so a step finished this **Round** unlocks its dependents from the next **Round**. Working a blocked step uses up the **Round** and tells the worker only which prerequisites it is still waiting on (`tasks.blocked`); this is a legal action, not an **Invalid Action**.
@@ -79,6 +80,10 @@ The first **Task** kind is dependent solo steps: small pieces of work one player
 ## Visibility
 
 A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks** and their grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
+
+## Hidden Impostor Count
+
+Every player is told "0 to 2 **Impostors**" and nothing more, so a **Benign Match** looks the same to a **Crewmate** as a game with **Impostors**. The engine never shows players the config, the number of **Crewmates** or **Tasks**, or **Containment**; **Meeting** announcements, vote tallies and **Crisis** notices carry no count. An **Impostor** knows its partner, so it knows the count. What players can still infer from play (a kill or a **Crisis** proves at least one **Impostor**) is part of the game. The `game_over` observation, sent after the last decision, may say `none` won (see [End of the game](#end-of-the-game)).
 
 ## Meetings
 
@@ -96,8 +101,11 @@ A **Meeting** starts after the Round's resolution if one was requested and the g
 
 Win conditions are checked after the Round's resolution and again after any **Meeting**, in this order:
 
-1. **Both Impostors ejected** → crew wins (`impostors_ejected`).
-2. **Parity**: living **Impostors** ≥ living **Crewmates** → **Impostors** win (`parity`). A kill that reaches parity ends the game before any **Meeting** requested that Round.
-3. **Unresolved Crisis** → **Impostors** win (`crisis`).
-4. **All Tasks done**: every **Task** is complete → crew wins (`tasks_done`). Checked after parity and **Crisis**, so a Round that also reaches parity or fails a **Crisis** is an **Impostor** win. A game with no **Tasks** never ends this way.
-5. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), **Impostors** win (`round_cap`).
+1. **Parity**: living **Impostors** ≥ living **Crewmates** → **Impostors** win (`parity`). A kill that reaches parity ends the game before any **Meeting** requested that Round. (With no **Impostors** in play it can only happen if no **Crewmate** is alive, which the rules never allow.)
+2. **Unresolved Crisis** → **Impostors** win (`crisis`). A **Crisis** already active when the last **Impostor** is ejected must still be resolved.
+3. **All Tasks done**: every **Task** is complete → crew wins (`tasks_done`). Checked after parity and **Crisis**, so a Round that also reaches parity or fails a **Crisis** is an **Impostor** win. A game with no **Tasks** never ends this way.
+4. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), the **Impostors** win (`round_cap`) if any **Impostor** is still in play; otherwise (after **Containment**, or in a **Benign Match**) nobody wins (winner `none`, reason `round_cap`).
+
+**Containment** (every **Impostor** ejected) does **not** end the game, so **Productivity** (Rounds to finish all **Tasks**) is never cut short by catching the **Impostors** early. When the **Meeting** that ejects the last **Impostor** ends, the transcript records a `containment` event (`meeting`, `impostors`; its `round` is the Containment round). Players are not told, since that would reveal the **Impostor** count. The `result` record always has `containment`: `contained`, and the `round` and `meeting` of **Containment** (`null` if it never happened, including every **Benign Match**).
+
+**Benign Matches** (`num_impostors = 0`, `zantine play --impostors 0`) run under the same rules: all 10 **Seats** are **Crewmates** with **Tasks**, nobody can kill or trigger a **Crisis**, and the game ends with `tasks_done` or `round_cap`.

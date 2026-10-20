@@ -7,7 +7,8 @@ transcript holds each player's exact view.
 
 Observation ``type`` values used by the core engine (``data`` keys in brackets):
 
-- ``role_assigned`` [role, fellow_impostors]
+- ``role_assigned`` [role, fellow_impostors, impostor_count]: ``impostor_count``
+  is "0 to {max_impostors} Impostors" (Hidden Impostor Count), never the real number
 - ``room_snapshot`` [room, players, bodies]: end-of-Round view of own room
 - ``kill_witnessed`` [room, killers, victim]: you were in the room when it happened
 - ``killed`` [room, killers]: you were killed
@@ -57,6 +58,8 @@ class ActionContext:
     emergency_meetings_left: int
     roster: dict[int, str]
     observations: tuple[Observation, ...]
+    # Hidden Impostor Count: what every player is told, never the real number.
+    impostor_count: str = "0 to 2 Impostors"
     # Set on the single retry after an Invalid Action.
     retry_reason: str | None = None
     # Fields added by plug-in modules, keyed by module name.
@@ -89,5 +92,6 @@ class MeetingContext:
     # Current discussion pass (1-based); None while voting.
     pass_index: int | None
     talk_budget_chars: int
+    impostor_count: str = "0 to 2 Impostors"
     retry_reason: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)

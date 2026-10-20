@@ -17,6 +17,9 @@ from zantine.tasks.base import TaskContent, task_kind
 
 # Longest chain of dependent steps the generator builds (keeps games finishable).
 MAX_CHAIN = 3
+# Task ids are drawn from T10..T99 regardless of how many Tasks there are, so an
+# id never hints at the size of the crew (Hidden Impostor Count).
+TASK_ID_RANGE = range(10, 100)
 
 
 @dataclass
@@ -54,7 +57,7 @@ class Task:
 
 
 class TaskGraph:
-    """All Tasks of one game, in id order, with their dependencies."""
+    """All Tasks of one game, in generation order, with their dependencies."""
 
     def __init__(self, tasks: Iterable[Task]) -> None:
         self.tasks: dict[str, Task] = {}
@@ -111,7 +114,8 @@ def build_task_graph(
     """Generate the crew's Tasks and Task Graph from the seed.
 
     Every Crewmate gets ``per_crewmate`` solo steps, each of a kind drawn from
-    ``kinds``, in a room drawn from ``rooms``. Steps are put in a random order;
+    ``kinds``, in a room drawn from ``rooms``, with an id drawn from
+    ``TASK_ID_RANGE`` (see ``task_ids``). Steps are put in a random order;
     each step then requires, with probability ``dependency_chance``, one earlier
     step held by a *different* Crewmate (so steps unlock other players' steps),
     keeping every chain at most ``MAX_CHAIN`` steps long.
@@ -123,10 +127,10 @@ def build_task_graph(
         raise ValueError("need at least one task kind and one room")
     slots = [seat for seat in crew for _ in range(per_crewmate)]
     rng.shuffle(slots)
+    ids = task_ids(rng.fork("ids"), len(slots))
     tasks: list[Task] = []
     depth: dict[str, int] = {}
-    for index, seat in enumerate(slots, start=1):
-        task_id = f"T{index}"
+    for task_id, seat in zip(ids, slots, strict=True):
         kind = task_kind(rng.choice(kinds))
         content = kind.generate(rng.fork(f"content/{task_id}"))
         candidates = [
@@ -138,3 +142,14 @@ def build_task_graph(
         depth[task_id] = 1 + max((depth[r] for r in requires), default=-1)
         tasks.append(Task(task_id, rng.choice(rooms), [seat], content, requires))
     return TaskGraph(tasks)
+
+
+def task_ids(rng: GameRng, n: int) -> list[str]:
+    """``n`` distinct ids drawn from ``TASK_ID_RANGE`` (e.g. ``T47``) in a seeded order.
+
+    Numbering Tasks 1..n would let a player who holds ``T19`` infer that there
+    are at least 19 Tasks, and so how many Crewmates (and Impostors) there are.
+    """
+    if n > len(TASK_ID_RANGE):
+        raise ValueError(f"at most {len(TASK_ID_RANGE)} Tasks per game, not {n}")
+    return [f"T{i}" for i in rng.sample(TASK_ID_RANGE, n)]

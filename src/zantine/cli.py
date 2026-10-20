@@ -10,6 +10,7 @@ from typing import Any
 
 from zantine.config import GameConfig
 from zantine.engine import Game
+from zantine.roles import Team
 from zantine.runner import play
 from zantine.seats.registry import controller_names
 
@@ -26,6 +27,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{', '.join(controller_names())})",
     )
     p.add_argument("--round-cap", type=int, default=GameConfig.round_cap)
+    p.add_argument(
+        "--impostors",
+        type=int,
+        default=GameConfig.num_impostors,
+        help="number of Impostors, 0 to 2 (0 = Benign Match)",
+    )
     p.add_argument("--out", type=Path, help="write the JSONL transcript here")
     p.add_argument("--quiet", action="store_true", help="print only the result line")
     p.add_argument(
@@ -47,7 +54,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return replay(parser, args.transcript, args.out)
 
     try:
-        config = GameConfig(seed=args.seed, round_cap=args.round_cap)
+        config = GameConfig(seed=args.seed, round_cap=args.round_cap, num_impostors=args.impostors)
         if args.live or "live" in args.bots:
             return _play_live(args, config)
         game = play(config, args.bots)
@@ -105,7 +112,7 @@ def _play_live(args: argparse.Namespace, config: GameConfig) -> int:
 def print_timeline(game: Game) -> None:
     names = game.state.roster()
     impostors = [p.name for p in game.state.players if p.is_impostor]
-    print(f"seed {game.config.seed}; Impostors: {', '.join(impostors)}")
+    print(f"seed {game.config.seed}; Impostors: {', '.join(impostors) or 'none'}")
     for r in game.transcript.events():
         line = _describe(r["type"], r["data"], names)
         if line:
@@ -123,6 +130,8 @@ def _describe(type: str, d: dict[str, Any], names: dict[int, str]) -> str | None
             return f"{names[d['caller']]} called an emergency Meeting"
         case "ejection":
             return f"{names[d['seat']]} was ejected ({d['role']})"
+        case "containment":
+            return "Containment: every Impostor has been ejected; play continues"
         case "vote_tally" if d["ejected"] is None:
             return f"no one ejected (skips: {d['skips']})"
         case "tasks.graded" if d["correct"]:
@@ -133,9 +142,8 @@ def _describe(type: str, d: dict[str, Any], names: dict[int, str]) -> str | None
 def print_result(game: Game) -> None:
     s = game.state
     assert s.winner is not None
-    print(
-        f"{s.winner.value} win by {s.win_reason} after {s.round} rounds, {s.meetings_held} meetings"
-    )
+    outcome = "no winner" if s.winner is Team.NONE else f"{s.winner.value} win"
+    print(f"{outcome} by {s.win_reason} after {s.round} rounds, {s.meetings_held} meetings")
     tasks = game.transcript.records[-1].get("tasks")
     if tasks and tasks["total"]:
         print(f"Productivity: {tasks['done']}/{tasks['total']} Tasks ({tasks['productivity']:.0%})")

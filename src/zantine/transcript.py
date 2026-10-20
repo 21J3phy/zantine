@@ -22,7 +22,9 @@ from typing import Any
 
 from zantine.observations import Observation
 
-SCHEMA_VERSION = 1
+# 2: Containment no longer ends the game (no `impostors_ejected` reason); result
+# `winner` may be `none`; result `containment`; `role_assigned.impostor_count`.
+SCHEMA_VERSION = 2
 
 
 class Transcript:

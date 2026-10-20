@@ -265,7 +265,7 @@ class _Builder:
         winner = self.result.get("winner")
         reason = self.result.get("reason")
         rounds = self.result.get("rounds")
-        text = f"{str(winner).capitalize()} win"
+        text = _outcome(winner)
         if reason:
             text += f" by {reason}"
         if rounds is not None:
@@ -405,10 +405,14 @@ class _Builder:
                             self.pos[s] = self.meeting_room
                 item["detail"] = True
                 _text(item, f"Meeting {data.get('meeting')} ended; everyone returns")
+            case "containment":
+                # Saying so would tell viewers the ejected players were Impostors.
+                item.update(category="game")
+                item["text"] = "Containment: every Impostor has been ejected; play continues"
+                item["public"] = None
             case "game_over":
                 item.update(category="game")
-                winner = str(data.get("winner")).capitalize()
-                _text(item, f"Game over: {winner} win ({data.get('reason')})")
+                _text(item, f"Game over: {_outcome(data.get('winner'))} ({data.get('reason')})")
             case _:
                 return _generic_item(r, self.names)
         return item
@@ -546,6 +550,10 @@ def _generic_item(r: dict[str, Any], names: dict[int, str]) -> dict[str, Any]:
         fields = ", ".join(f"{k}={_fmt(k, v, names)}" for k, v in sorted(rest.items()))
         item["public"] = None if _has_spoiler(rest) else f"{type_}: {fields}" if fields else type_
     return item
+
+
+def _outcome(winner: Any) -> str:
+    return "No winner" if winner == "none" else f"{str(winner).capitalize()} win"
 
 
 def _impostor_hint(kind: Any) -> bool:

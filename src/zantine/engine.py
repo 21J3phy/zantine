@@ -13,6 +13,7 @@ from zantine.roles import Team
 from zantine.rules import Rules, default_rules
 from zantine.rules.actions import Action, Wait
 from zantine.rules.registry import RoundContext
+from zantine.rules.win import round_cap
 from zantine.scenario import SCENARIO_VERSION, Scenario, build_scenario
 from zantine.seats.base import SeatController
 from zantine.state import GameState, PlayerState
@@ -103,7 +104,13 @@ class Game:
         impostors = [p.seat for p in state.players if p.is_impostor]
         for p in state.players:
             fellows = [s for s in impostors if s != p.seat] if p.is_impostor else []
-            self.observe(p.seat, "role_assigned", role=p.role.value, fellow_impostors=fellows)
+            self.observe(
+                p.seat,
+                "role_assigned",
+                role=p.role.value,
+                fellow_impostors=fellows,
+                impostor_count=self.config.impostor_count_text,
+            )
         emit_room_snapshots(self)
 
     def run(self) -> GameState:
@@ -131,7 +138,7 @@ class Game:
             run_meeting(self, rc.meeting)
             self._check_win()
         if not state.over and state.round >= self.config.round_cap:
-            self._end(Team.IMPOSTORS, "round_cap")
+            self._end(*round_cap(self))
         if state.over:
             self._finish()
 
@@ -251,6 +258,7 @@ class Game:
             emergency_meetings_left=player.emergency_meetings_left,
             roster=state.roster(),
             observations=self.observations_of(player.seat),
+            impostor_count=self.config.impostor_count_text,
             retry_reason=retry_reason,
             extra=self._extra(player.seat),
         )
@@ -277,6 +285,7 @@ class Game:
             observations=self.observations_of(seat),
             pass_index=pass_index,
             talk_budget_chars=self.config.talk_budget_chars,
+            impostor_count=self.config.impostor_count_text,
             retry_reason=retry_reason,
             extra=self._extra(seat),
         )

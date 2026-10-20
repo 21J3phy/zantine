@@ -30,8 +30,15 @@ def test_scripted_game_runs_to_completion(seed: int) -> None:
 
 
 def test_all_end_states_are_reachable_with_scripted_bots() -> None:
-    reasons = {play(GameConfig(seed=s)).state.win_reason for s in range(100)}
-    assert reasons == {"parity", "round_cap", "impostors_ejected", "tasks_done"}
+    games = [play(GameConfig(seed=s)) for s in range(100)]
+    assert {g.state.win_reason for g in games} == {"parity", "round_cap", "tasks_done"}
+    # Containment happens in some games, and play goes on after it.
+    contained = [g for g in games if g.transcript.records[-1]["containment"]["contained"]]
+    assert contained
+    for g in contained:
+        assert g.state.win_reason in ("tasks_done", "round_cap")
+        when = g.transcript.records[-1]["containment"]["round"]
+        assert when < g.state.round or g.state.round == g.config.round_cap
 
 
 def test_same_seed_gives_identical_transcript() -> None:
