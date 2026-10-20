@@ -284,7 +284,7 @@ class Game:
             statements=tuple(statements),
             observations=self.observations_of(seat),
             pass_index=pass_index,
-            talk_budget_chars=self.config.talk_budget_chars,
+            talk_budget_chars=self.config.talk_budget(seat),
             impostor_count=self.config.impostor_count_text,
             retry_reason=retry_reason,
             extra=self._extra(seat),
