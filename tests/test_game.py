@@ -31,6 +31,7 @@ def test_scripted_game_runs_to_completion(seed: int) -> None:
 
 def test_all_end_states_are_reachable_with_scripted_bots() -> None:
     games = [play(GameConfig(seed=s)) for s in range(100)]
+    games.append(play(GameConfig(seed=6, num_impostors=0)))
     assert {g.state.win_reason for g in games} == {"parity", "round_cap", "tasks_done"}
     # Containment happens in some games, and play goes on after it.
     contained = [g for g in games if g.transcript.records[-1]["containment"]["contained"]]
@@ -86,7 +87,9 @@ def test_cli_plays_a_game_and_writes_the_transcript(
     assert records[-1]["kind"] == "result"
     kinds = Counter(s["controller"]["kind"] for s in records[0]["seats"])
     assert kinds == {"scripted": 8, "idle": 2}
-    assert "win by" in capsys.readouterr().out
+    result = records[-1]
+    outcome = "no winner" if result["winner"] == "none" else f"{result['winner']} win"
+    assert f"{outcome} by {result['reason']} after" in capsys.readouterr().out
 
 
 def test_cli_rejects_bad_bot_spec() -> None:

@@ -33,6 +33,9 @@ class Task:
     # Hook for Fake Tasks: shown like a real Task but never counts toward
     # Productivity or the crew win.
     fake: bool = False
+    # No more work can be done on it, whether or not it is done (e.g. a relay
+    # delivered with a tampered part). Closed Tasks are never reassigned.
+    closed: bool = False
     done: bool = False
     done_by: int | None = None
     done_round: int | None = None
@@ -62,13 +65,17 @@ class TaskGraph:
     def __init__(self, tasks: Iterable[Task]) -> None:
         self.tasks: dict[str, Task] = {}
         for task in tasks:
-            if task.id in self.tasks:
-                raise ValueError(f"duplicate task id {task.id!r}")
-            for req in task.requires:
-                # Prerequisites must come first, which also rules out cycles.
-                if req not in self.tasks:
-                    raise ValueError(f"{task.id} requires unknown or later task {req!r}")
-            self.tasks[task.id] = task
+            self.add(task)
+
+    def add(self, task: Task) -> None:
+        """Append a Task (e.g. a multi-player Task placed by another module)."""
+        if task.id in self.tasks:
+            raise ValueError(f"duplicate task id {task.id!r}")
+        for req in task.requires:
+            # Prerequisites must come first, which also rules out cycles.
+            if req not in self.tasks:
+                raise ValueError(f"{task.id} requires unknown or later task {req!r}")
+        self.tasks[task.id] = task
 
     def __iter__(self) -> Iterator[Task]:
         return iter(self.tasks.values())
@@ -144,12 +151,14 @@ def build_task_graph(
     return TaskGraph(tasks)
 
 
-def task_ids(rng: GameRng, n: int) -> list[str]:
+def task_ids(rng: GameRng, n: int, *, exclude: Iterable[str] = ()) -> list[str]:
     """``n`` distinct ids drawn from ``TASK_ID_RANGE`` (e.g. ``T47``) in a seeded order.
 
     Numbering Tasks 1..n would let a player who holds ``T19`` infer that there
     are at least 19 Tasks, and so how many Crewmates (and Impostors) there are.
     """
-    if n > len(TASK_ID_RANGE):
-        raise ValueError(f"at most {len(TASK_ID_RANGE)} Tasks per game, not {n}")
-    return [f"T{i}" for i in rng.sample(TASK_ID_RANGE, n)]
+    used = set(exclude)
+    available = [i for i in TASK_ID_RANGE if f"T{i}" not in used]
+    if n > len(available):
+        raise ValueError(f"at most {len(TASK_ID_RANGE)} Tasks per game; {n} ids requested")
+    return [f"T{i}" for i in rng.sample(available, n)]

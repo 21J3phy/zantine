@@ -42,6 +42,9 @@ class TaskKind(ABC):
     name: ClassVar[str] = ""
     # How many players a Task of this kind is assigned to (Shared Tasks > 1).
     seats: ClassVar[int] = 1
+    # Action kinds that work a Task of this kind. Kinds with their own actions
+    # (e.g. a relay's handoffs) leave out ``tasks.work``, which then rejects them.
+    work_actions: ClassVar[tuple[str, ...]] = ("tasks.work",)
 
     @abstractmethod
     def generate(self, rng: GameRng) -> TaskContent:

@@ -38,7 +38,7 @@ from zantine.rules.actions import Action, Invalid
 from zantine.rules.registry import Rules
 
 HARNESS_NAME = "neutral"
-HARNESS_VERSION = 3
+HARNESS_VERSION = 4
 MEMORY_BLOCK_LINES = 8
 
 SYSTEM_PROMPT = """\

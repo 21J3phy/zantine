@@ -22,7 +22,7 @@ from zantine.roles import Role
 
 T = TypeVar("T")
 
-SCENARIO_VERSION = 2
+SCENARIO_VERSION = 3
 
 # Single words only: scripted bots and transcripts refer to players by name.
 NAME_POOL = (
