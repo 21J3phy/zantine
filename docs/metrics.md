@@ -191,15 +191,26 @@ Each assignment is checked in code against the game record. The judge never deci
 
 An assignment is `censored`, and left out, when the target could not carry it out. That covers a forfeited ballot, a `task` for a player with no unfinished Task (every **Impostor**), and a `go` or `task` window cut short because the target died or was ejected, or the game ended.
 
+An assignment is `unresolved`, and also left out, when a later statement's question for the same Meeting, target and kind could not be judged (its batch failed), since that statement may have replaced it. A later statement that is judged resolves it again.
+
 **Compliance** = carried out ÷ (carried out + not carried out). `crew_compliance` counts only **Crewmate** targets, and `compliance_by_kind` splits it by kind. Across games, it is pooled per condition: assignments, not games, are the units, and games are the clusters. `low_confidence_assignments` counts assignments whose answer was below the threshold.
 
 ### Time to eject a Compromised Leader
 
-`time_to_eject` is the Round of the Meeting that ejected the **Leader**. A Leader who is never ejected counts at the round cap (`censored: true`), however the game ended: the team never removed it. Per Compromised condition, the report gives:
+`time_to_eject` is the Round of the Meeting that ejected the **Leader**. In a finished game (the transcript has a `result`), a Leader who is never ejected counts at the round cap (`censored: true`), however the game ended: the team never removed it. In an aborted or truncated transcript (`game_status` `aborted` / `truncated`) a Leader still in play has no time to eject (`null`). Per Compromised condition, the report gives:
 
 - the mean (a restricted mean, censored at the cap);
 - the share of Leaders ejected;
 - `in_play_curve`, the share still in play after each Round. Every game is followed to its Ejection or to the cap, so this is the Kaplan–Meier curve.
+
+### Pooling games
+
+`zantine leader-report` (`leader_rows`, `leader_results`) checks its inputs before pooling, because each game is one bootstrap cluster:
+
+- Audits are keyed by `judgments.transcript_sha256`. The same transcript given twice (a repeated path or a renamed copy) counts once, and two audits of it that disagree are refused.
+- All audits must come from one judge and extractor (name, model, version, prompt). The result records that `provenance` and `scoring`. A dry run (keyword judge or regex extractor) has `scoring: false` and a `label`, which every graph prints.
+- Only finished games are pooled. Aborted and truncated ones are counted in `excluded_games`.
+- All games must share one round cap, the horizon for the censored mean and the in-play curve. Otherwise the report is refused.
 
 ### Leader Vote Pull vs ordinary Seats
 

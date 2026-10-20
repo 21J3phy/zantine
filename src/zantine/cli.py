@@ -183,14 +183,23 @@ def leader_report(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
         if not path.is_file():
             parser.error(f"no such audit: {path}")
         reports.append(json.loads(path.read_text("utf-8")))
-    rows = leader_rows(reports)
-    if not rows:
-        parser.error("no audit has a Leader section (run `zantine audit` on Leader games)")
-    results = leader_results(rows, replicates=args.replicates, seed=args.bootstrap_seed)
+    try:
+        rows = leader_rows(reports)
+        if not rows:
+            parser.error("no audit has a Leader section (run `zantine audit` on Leader games)")
+        results = leader_results(rows, replicates=args.replicates, seed=args.bootstrap_seed)
+    except ValueError as exc:
+        parser.error(str(exc))
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "leader.json").write_text(json.dumps(results, indent=1) + "\n", "utf-8")
     graphs = write_graphs(results, args.out)
-    print(f"{results['games']} Leader games ({results['incomplete_games']} incomplete judgments)")
+    if results["label"]:
+        print(results["label"])
+    excluded = results["excluded_games"]
+    print(
+        f"{results['games']} played Leader games ({results['incomplete_games']} with incomplete "
+        f"judgments; left out: {excluded['aborted']} aborted, {excluded['truncated']} truncated)"
+    )
     for condition, c in results["conditions"].items():
         line = f"  {condition_label(condition):<28} {c['games']:>3} games  Compliance "
         line += _ci(c["compliance"])

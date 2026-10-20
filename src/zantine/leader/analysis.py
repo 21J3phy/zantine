@@ -13,10 +13,26 @@ games, 95% percentile intervals). Results are graphed, never ranked.
   of the share still in play after each Round.
 - **Vote Pull** per condition: the Leader's pooled Vote Pull, ordinary Seats'
   pooled Vote Pull, and Leader minus ordinary (same draws, so paired).
+
+Inputs are checked before pooling, since each game is one bootstrap cluster:
+
+- **One cluster per game.** Audits are keyed by ``judgments.transcript_sha256``;
+  the same transcript given twice counts once, and two audits of it that
+  disagree are refused.
+- **One scoring cohort.** Every audit must come from the same judge and
+  extractor (name, model, version, prompt); mixing them is refused. The result
+  carries that provenance and ``scoring``, which is false for dry runs (keyword
+  judge or regex extractor); graphs of dry runs are labelled as such.
+- **Played games only.** A game whose transcript has no ``result`` (aborted by
+  the spend cap or a provider error, or truncated) is left out and counted
+  in ``excluded_games``.
+- **One round cap.** Time to eject is censored at the cap, so games with
+  different caps have no common horizon and are refused.
 """
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from typing import Any
 
@@ -30,25 +46,44 @@ from zantine.leader.bootstrap import (
 from zantine.leader.schedule import CONDITIONS
 from zantine.rng import GameRng
 
-RESULTS_VERSION = 1
+RESULTS_VERSION = 2
+DRY_RUN_LABEL = "DRY RUN, not for scoring (judge: {judge})"
+# What identifies a judge or extractor run (not per-call details such as ``served``).
+_IDENTITY = ("name", "model", "version", "revision", "prompt_version", "prompt_sha256")
+
+
+def _identity(info: dict[str, Any] | None) -> dict[str, Any]:
+    info = info or {}
+    return {k: info.get(k) for k in _IDENTITY} | {"scoring": bool(info.get("scoring"))}
 
 
 def leader_rows(reports: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """One row per audited Leader game; reports without a Leader are skipped."""
-    rows = []
+    """One row per audited Leader game, one per transcript; reports without a Leader are skipped.
+
+    Raises ``ValueError`` for an audit without a transcript digest, or for two
+    audits of the same transcript that disagree.
+    """
+    rows: dict[str, dict[str, Any]] = {}
     for report in reports:
         judgments = report.get("judgments") or {}
         leader = judgments.get("leader")
         if leader is None:
             continue
-        rows.append(
-            {
-                "seed": (report.get("game") or {}).get("seed"),
-                "complete": bool(report.get("complete")) and bool(judgments.get("complete")),
-                **leader,
-            }
-        )
-    return rows
+        digest = judgments.get("transcript_sha256")
+        if not digest:
+            raise ValueError("an audit has no judgments.transcript_sha256; re-run zantine audit")
+        row = {
+            "transcript_sha256": digest,
+            "seed": (report.get("game") or {}).get("seed"),
+            "complete": bool(report.get("complete")) and bool(judgments.get("complete")),
+            "judge": _identity(judgments.get("judge")),
+            "extractor": _identity(report.get("extractor")),
+            **leader,
+        }
+        if digest in rows and rows[digest] != row:
+            raise ValueError(f"conflicting audits of the same transcript {digest[:12]}")
+        rows[digest] = row
+    return list(rows.values())
 
 
 def leader_results(
@@ -57,15 +92,37 @@ def leader_results(
     replicates: int = DEFAULT_REPLICATES,
     seed: int = DEFAULT_SEED,
 ) -> dict[str, Any]:
-    by_condition = {c: [r for r in rows if r["condition"] == c] for c in CONDITIONS}
+    """Per-condition estimates; raises ``ValueError`` for inputs that can't be pooled."""
+    if len({r["transcript_sha256"] for r in rows}) != len(rows):
+        raise ValueError("the same transcript appears more than once; use leader_rows")
+    cohorts = {json.dumps([r["judge"], r["extractor"]], sort_keys=True) for r in rows}
+    if len(cohorts) > 1:
+        raise ValueError(
+            "audits come from different judges or extractors; report each cohort separately"
+        )
+    played = [r for r in rows if r.get("game_status") == "finished"]
+    caps = {r["round_cap"] for r in played}
+    if len(caps) > 1:
+        raise ValueError(f"games have different round caps {sorted(caps)}; report them separately")
+    judge, extractor = (rows[0]["judge"], rows[0]["extractor"]) if rows else ({}, {})
+    scoring = bool(rows) and judge["scoring"] and extractor["scoring"]
+    by_condition = {c: [r for r in played if r["condition"] == c] for c in CONDITIONS}
     root = GameRng(seed).fork("leader-bootstrap")
     out: dict[str, Any] = {
         "kind": "leader_results",
         "version": RESULTS_VERSION,
+        "scoring": scoring,
+        "label": None if scoring else DRY_RUN_LABEL.format(judge=judge.get("name")),
+        "provenance": {"judge": judge, "extractor": extractor},
         "replicates": replicates,
         "bootstrap_seed": seed,
-        "games": len(rows),
-        "incomplete_games": sum(not r["complete"] for r in rows),
+        "games": len(played),
+        "round_cap": next(iter(caps), None),
+        "excluded_games": {
+            status: sum(r.get("game_status") == status for r in rows)
+            for status in ("aborted", "truncated")
+        },
+        "incomplete_games": sum(not r["complete"] for r in played),
         "conditions": {},
     }
     for condition, games in by_condition.items():
@@ -113,12 +170,16 @@ def leader_results(
 def in_play_curve(games: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Share of Leaders not yet ejected after each Round 0..cap (never-ejected = censored at cap).
 
-    Every game runs to its Ejection or is censored at the cap, so no Leader is
-    lost to follow-up before then and the plain share is the Kaplan-Meier curve.
+    Every game is a finished game with the same cap (``leader_results`` checks
+    both), so each runs to its Ejection or is censored at that cap; no Leader
+    leaves follow-up early and the plain share is the Kaplan-Meier curve.
     """
     if not games:
         return []
-    cap = max(int(r["round_cap"]) for r in games)
+    caps = {int(r["round_cap"]) for r in games}
+    if len(caps) > 1:
+        raise ValueError(f"games have different round caps {sorted(caps)}")
+    cap = caps.pop()
     n = len(games)
     return [
         {

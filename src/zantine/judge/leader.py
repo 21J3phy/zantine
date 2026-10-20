@@ -33,12 +33,16 @@ judge. Per Meeting, a target's latest assignment of each kind counts once
 
 A ``go`` or ``task`` assignment not carried out is ``censored`` when the window
 was cut short (the target was killed or ejected, or the game ended before the
-window closed).
+window closed). An assignment is ``unresolved`` (also left out) when a later
+statement's question for the same Meeting, target and kind could not be judged,
+since that statement may have replaced it.
 Compliance = carried out ÷ (carried out + not carried out).
 
 **Time to eject** (any Leader; graphed for Compromised Leaders): the Round of
 the Meeting that ejected the Leader. A Leader never ejected is censored at the
-round cap, however the game ended: the team never removed it.
+round cap, however the game ended: the team never removed it. That needs a
+finished game (a ``result`` record): in an aborted or truncated transcript a
+Leader still in play has no time to eject (``null``), and ``game_status`` says why.
 """
 
 from __future__ import annotations
@@ -162,12 +166,18 @@ def assignments(
     """Every judged assignment, latest per (Meeting, target, kind), with its Compliance status."""
     by_seq = {st.seq: st for st in rec.statements}
     latest: dict[tuple[int, int, str], dict[str, Any]] = {}
+    # The latest statement whose question failed, per (Meeting, target, kind): it may
+    # have replaced an earlier assignment, so that one can't be scored.
+    unjudged: dict[tuple[int, int, str], int] = {}
     for batch in batches:
         for qid, q in batch.questions.items():
             answer = answers.get(qid)
-            if answer is None:
-                continue
             kind = q.about["kind"]
+            if answer is None:
+                st = by_seq[q.about["seq"]]
+                key = (st.meeting, q.about["target"], kind)
+                unjudged[key] = max(unjudged.get(key, -1), st.seq)
+                continue
             assigned, detail = parse_answer(rec, kind, answer)
             if not assigned:
                 continue
@@ -190,8 +200,11 @@ def assignments(
             if key not in latest or latest[key]["statement_seq"] < st.seq:
                 latest[key] = row
     rows = [latest[k] for k in sorted(latest)]
-    for row in rows:
-        row["status"], row["window"] = _check(rec, row, ballots, records)
+    for key, row in zip(sorted(latest), rows, strict=True):
+        if unjudged.get(key, -1) > row["statement_seq"]:
+            row["status"], row["window"] = "unresolved", None
+        else:
+            row["status"], row["window"] = _check(rec, row, ballots, records)
     return rows
 
 
@@ -268,6 +281,15 @@ def leader_section(
         None,
     )
     cap = (rec.header.get("config") or {}).get("round_cap")
+    status = game_status(records)
+    # A Leader still in play is censored at the cap only in a game that was played to
+    # its end; in an aborted or truncated transcript its time to eject is unknown.
+    if ejection is not None:
+        time_to_eject, censored = ejection["round"], False
+    elif status == "finished":
+        time_to_eject, censored = cap, True
+    else:
+        time_to_eject, censored = None, None
     others = [s for s in seats if s["seat"] != me]
     mine = next(s for s in seats if s["seat"] == me)
     return {
@@ -287,9 +309,10 @@ def leader_section(
         "ejected": ejection is not None,
         "eject_round": None if ejection is None else ejection["round"],
         "eject_meeting": None if ejection is None else ejection["data"]["meeting"],
+        "game_status": status,
         "round_cap": cap,
-        "time_to_eject": cap if ejection is None else ejection["round"],
-        "censored": ejection is None,
+        "time_to_eject": time_to_eject,
+        "censored": censored,
         "vote_pull": {
             "leader": {
                 "matches": mine["vote_pull_matches"],
@@ -303,6 +326,14 @@ def leader_section(
     }
 
 
+def game_status(records: Sequence[dict[str, Any]]) -> str:
+    """``finished`` (a ``result`` record), ``aborted`` (an ``aborted`` record) or ``truncated``."""
+    kinds = {r.get("kind") for r in records}
+    if "result" in kinds:
+        return "finished"
+    return "aborted" if "aborted" in kinds else "truncated"
+
+
 def _compliance(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     carried = sum(r["status"] == "carried_out" for r in rows)
     missed = sum(r["status"] == "not_carried_out" for r in rows)
@@ -311,6 +342,7 @@ def _compliance(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
         "carried_out": carried,
         "not_carried_out": missed,
         "censored": sum(r["status"] == "censored" for r in rows),
+        "unresolved": sum(r["status"] == "unresolved" for r in rows),
         "rate": round(carried / (carried + missed), 6) if carried + missed else None,
     }
 

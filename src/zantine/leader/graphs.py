@@ -11,7 +11,9 @@ cluster-bootstrap interval:
 
 Colors follow the reference categorical order (slot 1 blue, slot 2 orange),
 with separate light and dark steps; values and labels use text colors, and
-every mark has a hover title. Results are graphs, never rankings.
+every mark has a hover title. Results are graphs, never rankings. Results from
+a dry run (``results["scoring"]`` false) carry their label in every figure's
+corner, title and description, so they can't pass for scored results.
 """
 
 from __future__ import annotations
@@ -43,7 +45,16 @@ STYLE = """
 </style>"""
 
 
-def _svg(title: str, subtitle: str, body: Sequence[str], desc: str) -> str:
+def _svg(
+    title: str, subtitle: str, body: Sequence[str], desc: str, label: str | None = None
+) -> str:
+    if label:
+        title, desc = f"{title} [{label}]", f"{label}. {desc}"
+        body = [
+            *body,
+            f'<text class="title" x="{W - RIGHT}" y="{H - 12}" text-anchor="end" '
+            f'style="font-size:12px">{escape(label)}</text>',
+        ]
     return "\n".join(
         [
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" '
@@ -107,6 +118,7 @@ def dot_chart(
     series: Sequence[tuple[str, str, Sequence[dict[str, Any]]]],
     *,
     pct: bool = True,
+    label: str | None = None,
 ) -> str:
     """Dots with CI whiskers: ``groups`` on x, one dot per series (name, css class, estimates)."""
     lo, hi = 0.0, 1.0
@@ -149,13 +161,14 @@ def dot_chart(
         for name, _, est in series
         for g in range(len(groups))
     )
-    return _svg(title, subtitle, body, desc)
+    return _svg(title, subtitle, body, desc, label)
 
 
 def curve_chart(
     title: str,
     subtitle: str,
     series: Sequence[tuple[str, str, Sequence[dict[str, Any]]]],
+    label: str | None = None,
 ) -> str:
     """Step curves of the share still in play by Round: (name, css class, curve points)."""
     cap = max((p["round"] for _, _, pts in series for p in pts), default=1) or 1
@@ -191,12 +204,13 @@ def curve_chart(
         for name, _, pts in series
         if pts
     )
-    return _svg(title, subtitle, body, desc)
+    return _svg(title, subtitle, body, desc, label)
 
 
 def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     c = results["conditions"]
+    label = results.get("label")
     roles = ("crew", "compromised")
     by = {known: [c[f"{known}_{role}"] for role in roles] for known in ("known", "hidden")}
     paths = []
@@ -211,6 +225,7 @@ def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
                 ("Known Leader", "s1", [s["compliance"] for s in by["known"]]),
                 ("Hidden Leader", "s2", [s["compliance"] for s in by["hidden"]]),
             ],
+            label=label,
         ),
         encoding="utf-8",
     )
@@ -230,6 +245,7 @@ def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
                 )
                 for k, cls in (("known", "s1"), ("hidden", "s2"))
             ],
+            label=label,
         ),
         encoding="utf-8",
     )
@@ -246,6 +262,7 @@ def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
                 ("Leader", "s1", [c[k]["vote_pull"]["leader"] for k in conditions]),
                 ("Ordinary Seats", "s2", [c[k]["vote_pull"]["ordinary"] for k in conditions]),
             ],
+            label=label,
         ),
         encoding="utf-8",
     )

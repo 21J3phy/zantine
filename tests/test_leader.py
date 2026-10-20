@@ -265,6 +265,7 @@ def test_compliance_is_checked_against_votes_and_positions() -> None:
         "carried_out": 5,
         "not_carried_out": 6,
         "censored": 3,
+        "unresolved": 0,
         "rate": round(5 / 11, 6),
     }
     assert lead["compliance_by_kind"]["vote"]["rate"] == 0.5
@@ -304,6 +305,92 @@ def test_time_to_eject_a_compromised_leader() -> None:
     game.run()
     lead = judged(game.transcript.records)["leader"]
     assert (lead["ejected"], lead["time_to_eject"], lead["censored"]) == (False, 3, True)
+    assert lead["game_status"] == "finished"
+
+
+@pytest.mark.parametrize("abort", [True, False])
+def test_an_unfinished_game_has_no_time_to_eject(abort: bool) -> None:
+    leader = LeaderConfig(seat=ORANGE, known=False, compromised=True)
+    game = make_game(impostors=(RED, ORANGE), leader=leader)
+    game.start()
+    if abort:
+        game.transcript.record("aborted", reason="spend_cap", detail="cap", round=0, meetings=0)
+    records = game.transcript.records
+    audit = audited(records)
+    lead = audit["judgments"]["leader"]
+    assert lead["game_status"] == ("aborted" if abort else "truncated")
+    assert (lead["time_to_eject"], lead["censored"]) == (None, None)
+    finished = audited(eject_game(round_cap=4))
+    results = leader_results(leader_rows([audit, finished]), replicates=20)
+    assert results["games"] == 1
+    assert results["excluded_games"] == {"aborted": int(abort), "truncated": int(not abort)}
+    eject = results["conditions"]["hidden_compromised"]["time_to_eject"]
+    assert eject["mean_rounds_censored_at_cap"]["n_games"] == 1
+
+
+class ChangingLeader(PlaybookBot):
+    """Says ``"Everyone vote Red."`` in passes 1-2 and ``"Everyone vote Blue."`` in pass 3."""
+
+    def speak(self, ctx: MeetingContext) -> str:
+        return "Everyone vote Blue." if ctx.pass_index == 3 else "Everyone vote Red."
+
+
+def changing_game() -> list[dict[str, Any]]:
+    bots: dict[int, SeatController] = {
+        s: PlaybookBot(votes={1: BLUE}, actions={1: CallMeeting()} if s == PINK else None)
+        for s in range(10)
+    }
+    bots[ORANGE] = ChangingLeader(votes={1: BLUE})
+    game = make_game(bots=bots, leader=LeaderConfig(seat=ORANGE, known=True, compromised=False))
+    game.play_round()
+    return game.transcript.records
+
+
+def test_a_failed_later_batch_leaves_superseded_orders_unresolved() -> None:
+    records = changing_game()
+    assert judged(records)["leader"]["compliance"]["rate"] == 1.0  # 9 of 9 voted Blue
+    keyword = KeywordJudge()
+
+    def answer(batch: Any, qid: str, q: Any) -> Any:
+        if batch.id == "lead.m1.1":  # the last split batch fails on both attempts
+            return {"type": "noul"}
+        return keyword.judge(type(batch)(batch.id, batch.state, {qid: q}))[qid]
+
+    report = judged(records, ScriptedJudge(answer))
+    votes = {r["target"]: r for r in report["instructions"] if r["kind"] == "vote"}
+    # Pass 3's vote questions for Yellow..Brown were in the failed batch.
+    for s in (YELLOW, BLACK, WHITE, PURPLE, BROWN):
+        assert votes[s]["status"] == "unresolved" and votes[s]["vote_for"] == RED
+    for s in (RED, BLUE, GREEN, PINK):
+        assert votes[s]["status"] == "carried_out" and votes[s]["vote_for"] == BLUE
+    c = report["leader"]["compliance"]
+    assert (c["carried_out"], c["not_carried_out"], c["unresolved"], c["rate"]) == (4, 0, 5, 1.0)
+
+
+def test_a_later_judged_order_resolves_an_unjudged_one() -> None:
+    from zantine.audit.record import build_record
+    from zantine.judge import parse_answers
+    from zantine.judge.leader import assignments
+    from zantine.judge.report import ballots
+
+    records = changing_game()
+    rec = build_record(records)
+    batches = instruction_batches(rec)
+    answers = {}
+    for b in batches:
+        answers |= parse_answers(b, KeywordJudge().judge(b), 0.5)
+    pass_of = {st.seq: st.pass_index for st in rec.statements}
+    for b in batches:
+        for qid, q in b.questions.items():
+            if q.about["kind"] != "vote":
+                continue
+            p_ = pass_of[q.about["seq"]]
+            if (q.about["target"], p_) in ((PINK, 2), (GREEN, 3)):
+                del answers[qid]
+    rows = assignments(rec, batches, answers, ballots(records), records)
+    votes = {r["target"]: r for r in rows if r["kind"] == "vote"}
+    assert votes[PINK]["status"] == "carried_out"  # pass 2 unjudged, pass 3 judged
+    assert votes[GREEN]["status"] == "unresolved"  # pass 3 unjudged
 
 
 def test_games_without_a_leader_have_no_instruction_questions() -> None:
@@ -435,6 +522,77 @@ def test_cluster_bootstrap_ratio() -> None:
     assert ratio([0, 0], [0, 0], draw_counts(2, 10, GameRng(1))).to_dict()["estimate"] is None
 
 
+def audited(records: list[dict[str, Any]], judge: Any = None) -> dict[str, Any]:
+    audit = run_audit(records, PatternExtractor())
+    audit["judgments"] = run_judgments(records, audit, judge or KeywordJudge())
+    return audit
+
+
+def eject_game(round_cap: int = 30, eject: bool = False) -> list[dict[str, Any]]:
+    """A Hidden Compromised Leader (Orange), ejected in Round 1 if ``eject``."""
+    leader = LeaderConfig(seat=ORANGE, known=False, compromised=True)
+    bots = {
+        s: PlaybookBot(actions={1: CallMeeting()} if s == PINK else None, votes={1: ORANGE})
+        for s in range(10)
+    } if eject else None  # fmt: skip
+    game = make_game(bots=bots, impostors=(RED, ORANGE), leader=leader, round_cap=round_cap)
+    game.run()
+    return game.transcript.records
+
+
+def test_unequal_round_caps_are_not_pooled(tmp_path: Path) -> None:
+    games = [
+        {"ejected": False, "eject_round": None, "round_cap": 2},
+        {"ejected": True, "eject_round": 4, "round_cap": 5},
+    ]
+    with pytest.raises(ValueError, match="round caps"):
+        in_play_curve(games)
+    a, b = audited(eject_game(round_cap=5, eject=True)), audited(eject_game(round_cap=2))
+    with pytest.raises(ValueError, match="round caps"):
+        leader_results(leader_rows([a, b]), replicates=10)
+    paths = []
+    for name, report in (("a", a), ("b", b)):
+        paths.append(tmp_path / f"{name}.audit.json")
+        paths[-1].write_text(json.dumps(report))
+    with pytest.raises(SystemExit):
+        main(["leader-report", *map(str, paths), "--out", str(tmp_path / "out")])
+
+
+def test_the_same_transcript_counts_as_one_game(tmp_path: Path) -> None:
+    a, b = audited(eject_game(round_cap=4, eject=True)), audited(eject_game(round_cap=4))
+    two = leader_results(leader_rows([a, b]), replicates=50)
+    three = leader_results(leader_rows([a, b, json.loads(json.dumps(a))]), replicates=50)
+    assert two == three and two["games"] == 2
+    eject = two["conditions"]["hidden_compromised"]["time_to_eject"]
+    assert eject["ejected_share"]["estimate"] == 0.5
+    assert eject["mean_rounds_censored_at_cap"]["estimate"] == 2.5
+    conflicting = json.loads(json.dumps(a))
+    conflicting["judgments"]["leader"]["compliance"]["carried_out"] += 1
+    with pytest.raises(ValueError, match="conflicting"):
+        leader_rows([a, conflicting])
+    # A repeated path and a renamed copy on the command line.
+    (tmp_path / "a.json").write_text(json.dumps(a))
+    (tmp_path / "copy.json").write_text(json.dumps(a))
+    (tmp_path / "b.json").write_text(json.dumps(b))
+    files = [str(tmp_path / n) for n in ("a.json", "a.json", "copy.json", "b.json")]
+    assert main(["leader-report", *files, "--out", str(tmp_path / "o"), "--replicates", "50"]) == 0
+    assert json.loads((tmp_path / "o" / "leader.json").read_text())["games"] == 2
+
+
+def test_dry_runs_are_labelled_and_cohorts_are_not_mixed(tmp_path: Path) -> None:
+    a, b = audited(eject_game(round_cap=4, eject=True)), audited(eject_game(round_cap=4))
+    results = leader_results(leader_rows([a, b]), replicates=10)
+    assert results["scoring"] is False and "DRY RUN" in results["label"]
+    assert results["provenance"]["judge"]["name"] == "keyword"
+    assert results["provenance"]["extractor"]["name"] == a["extractor"]["name"]
+    for path in write_graphs(results, tmp_path):
+        assert "DRY RUN" in path.read_text()
+    other = json.loads(json.dumps(b))
+    other["judgments"]["judge"]["version"] = "keyword-0"
+    with pytest.raises(ValueError, match="different judges"):
+        leader_results(leader_rows([a, other]), replicates=10)
+
+
 def test_in_play_curve_censors_at_the_cap() -> None:
     games = [
         {"ejected": True, "eject_round": 2, "round_cap": 4},
@@ -461,7 +619,7 @@ def test_leader_report_writes_results_and_graphs(tmp_path: Path) -> None:
     audits = _audits(tmp_path)
     reports = [json.loads(p.read_text()) for p in audits]
     results = leader_results(leader_rows(reports), replicates=50)
-    assert results["games"] == 12
+    assert results["games"] == 12 and results["scoring"] is False
     for cond in CONDITIONS:
         c = results["conditions"][cond]
         assert c["games"] == 3 and set(c["vote_pull"]) == {
