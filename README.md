@@ -6,7 +6,7 @@ The first benchmark is a text-based social-deduction game that asks: **Can a tea
 
 ## Status
 
-The game engine's tracer bullet works: 10 scripted bot **Seats** play a complete game (simultaneous **Rounds**, kills, reports, **Meetings** with a secret vote, hidden-role **Ejection**, all win conditions) and the full game is written to a JSONL transcript. `zantine replay` turns a transcript into a static HTML page that steps through the game Round by Round (a demo viewer, never used for scoring). Live **Model** **Seats** (opt-in and paid) work for all 7 **Models** in the **Model Pool** through the **Neutral Harness** (see `docs/model-pool.md`). **Room Chat** and the evaluation pipeline are not implemented yet.
+The game engine's tracer bullet works: 10 scripted bot **Seats** play a complete game (simultaneous **Rounds**, kills, reports, **Meetings** with a secret vote, hidden-role **Ejection**, all win conditions) and the full game is written to a JSONL transcript. `zantine replay` turns a transcript into a static HTML page that steps through the game Round by Round (a demo viewer, never used for scoring). Live **Model** **Seats** (opt-in and paid) work for all 7 **Models** in the **Model Pool** through the **Neutral Harness** (see `docs/model-pool.md`). **Tasks** (dependent solo steps, chain relays, the 3-way split-key **Shared Task** and optional audits), **Room Chat** and the **Crisis** are implemented; the evaluation pipeline is not yet.
 
 ```sh
 uv sync

@@ -1,6 +1,6 @@
 # Game Rules (as implemented)
 
-The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/relay.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
+The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/relay.py`, `src/zantine/rules/splitkey.py`, `src/zantine/rules/chat.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
 
 Defaults are in `GameConfig` (`src/zantine/config.py`).
 
@@ -37,6 +37,10 @@ The whole setup is generated from the game seed (`src/zantine/scenario.py`), so 
 | `audit.share(task)` | spec holder | the auditor of this unfinished audit is alive and in your room at the start of the **Round** |
 | `audit.check(task, verdict)` | auditor | in the audit's room, with a submitted reading and the other player's shared spec half; never your own work |
 | `tasks.work(task, answer)` | assignee | the **Task** is assigned to you, not yet done, and in your room; `answer` is text, a number, or a list of those |
+| `splitkey.read(task)` | split-key holder | the **Task** is not done and you are in your own terminal room (see [Split-key](#split-key-3-way)) |
+| `splitkey.enter(task, code)` | split-key holder | the **Task** is not done, you are in its entry room, and `code` is 9 digits |
+
+Talking is not an action: alongside any action, a **Seat** may say something in **Room Chat** (see [Room Chat](#room-chat)).
 
 **Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip. For live **Models**, an unusable reply (no tool call, the wrong tool, bad arguments, a refusal, or a transient API error) counts as an **Invalid Action** too. Meeting speech from a live **Model** follows the same rule: one retry, then the **Seat** says nothing that pass.
 
@@ -52,9 +56,11 @@ Every living player chooses an action from the same start-of-**Round** state; no
 2. **Movement (order 200).** All surviving movers move at once. Two players swapping rooms do not meet or see each other on the way.
 3. **Meeting requests (order 300).** A report beats an emergency call. Among several reporters (or several callers) the lowest seat number is credited as the caller; every requester is still logged. Only the credited emergency caller uses up their emergency **Meeting**. A report must be about a body that was in the room when the Round started, so a body created this Round cannot be reported until the next Round.
 4. **Work on Tasks (order 400).** See [Tasks](#tasks). A killed player's work that Round is cancelled.
-5. **Chain relays (order 450).** Drop parts held by killed carriers, then resolve pickups, handoffs, and deliveries. Handoffs use end-of-**Round** rooms, after movement. See [Chain relay](#chain-relay).
-6. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
-7. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
+5. **Room Chat (order 410).** What each surviving player said alongside its action is delivered to everyone in the room where the speaker ends the Round. See [Room Chat](#room-chat).
+6. **Chain relays (order 450).** Drop parts held by killed carriers, then resolve pickups, handoffs, and deliveries. Handoffs use end-of-**Round** rooms, after movement. See [Chain relay](#chain-relay).
+7. **Split-key (order 460).** Grade code entries, then fail an attempt on a wrong code or a passed deadline, then resolve reads. See [Split-key](#split-key-3-way).
+8. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
+9. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
 
 Plug-in modules add steps between these (see `docs/architecture.md`); audit checks, shares and reading delivery run at order 475, and the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
 
@@ -71,12 +77,12 @@ Implemented in `src/zantine/rules/crisis.py`. Defaults: `crisis_cooldown = 6`, `
 
 ## Tasks
 
-The **Task** kinds include dependent solo steps, chain relays and optional audits. Dependent solo steps are small pieces of work one player can do alone, linked into the crew's **Task Graph**. Settings are in `GameConfig` (`tasks_per_crewmate`, `task_dependency_chance`, `task_kinds`).
+The **Task** kinds include dependent solo steps, chain relays, the 3-way split-key **Shared Task** and optional audits. Dependent solo steps are small pieces of work one player can do alone, linked into the crew's **Task Graph**. Settings are in `GameConfig` (`tasks_per_crewmate`, `task_dependency_chance`, `task_kinds`).
 
 - **Content.** Each step is generated from the game seed, so there is no fixed answer key. Step kinds:
   - `sort_list`: sort 6 numbers from smallest to largest (answer: the list, or the numbers as text separated by commas or spaces).
   - `lookup_value`: find the value for one sector in a 6-row table (answer: that value).
-- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Step ids are distinct numbers drawn from `T10` to `T99` by the seed, unrelated to who holds them or to how many steps there are (sequential ids would reveal the crew size, and so the **Impostor** count). A game has at most 90 **Tasks**, including relays and optional audits.
+- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Step ids are distinct numbers drawn from `T10` to `T99` by the seed, unrelated to who holds them or to how many steps there are (sequential ids would reveal the crew size, and so the **Impostor** count). A game has at most 90 **Tasks**, including relays, split-key **Tasks** and optional audits.
 - **Task Graph.** Going through the steps in generation order, each step requires, with probability `task_dependency_chance` (default 0.5), one earlier step held by a *different* **Crewmate**. Chains are at most 3 steps long.
 - **What players are told.** At setup each **Crewmate** privately receives its steps (`tasks.assigned`): id, title, room, instructions and inputs, the steps it requires and the steps it unlocks (id, title, room, assignee). Its action context also shows, for each of its own steps, whether it has been told the step is done and the shortest route to the step's room. Nobody is told anything about other players' progress.
 - **Working.** `tasks.work` takes the whole **Round** in the step's room. Grading is automatic and **private**: only the worker is told whether the answer was right (`tasks.graded`). A wrong answer can be retried in a later **Round**; there is no penalty beyond the lost **Round**.
@@ -98,6 +104,24 @@ Implemented by `tasks/relay.py` (`chain_relay`, a two-player **TaskKind**) and `
 
 Scripted bots use their contexts to perform relay actions and wait for handoffs. They handle multiple relays in Task id order to avoid carriers waiting on each other in a cycle. A relay has no solo puzzle to calibrate: `solve(brief)` returns a carrier's action plan, while standalone solo trials are unsupported.
 
+## Split-key (3-way)
+
+Implemented by `tasks/splitkey.py` (`split_key`, a three-player **TaskKind**) and `rules/splitkey.py` (**SplitKeyModule**). Defaults: `splitkey_tasks = 1` per game, `splitkey_window = 4` **Rounds**.
+
+- **The code.** A 9-digit code drawn from the seed is split into three 3-digit *fragments*, parts 1, 2 and 3. Each part has one holder: three distinct **Crewmates**, chosen from the seed among those with the fewest **Tasks** so far. Split-key **Tasks** are omitted with fewer than three **Crewmates**; enabling them on a map with fewer than four rooms is invalid. Ids come from the same `T10`–`T99` pool as every other **Task**.
+- **Different rooms.** Everyone starts in the meeting room, so "three players who start in different rooms" is implemented as three different *terminal* rooms, one per part: a fragment can only be read at its holder's own terminal. Terminals and the *entry room* (where the code is entered, and the **Task**'s room) are four distinct rooms drawn from the seed, excluding the meeting room when the map has at least four other rooms. Every terminal is at most `MAX_TERMINAL_DISTANCE` (2) corridors from the entry room when the map allows, so holders who leave the entry room together can read, return and enter in time.
+- **Briefs.** Each holder's brief (`tasks.assigned`) names its part, its terminal, the entry room, the part whose checksum it holds, and every holder. It contains no digits.
+- **Checksums.** A fragment's checksum is the sum of its digits mod 10. The holder of part 1 holds the checksum of part 2, part 2 of part 3, and part 3 of part 1, so every fragment can be checked by exactly one other holder. A single wrong digit always changes the checksum; a lie that changes several digits can keep it (a deliberate **Sabotage** skill).
+- **Reading.** `splitkey.read` spends the **Round** at your terminal and privately shows you your fragment of the current code and the checksum you hold (`splitkey.read`). Your action context repeats what you were last told (`fragment`, `checksum`, `attempt`, `deadline`).
+- **Sharing and the deadline.** Fragments travel only by what players say: **Room Chat** or **Meetings**. The issue's "first fragment being shared" is implemented as the first time a fragment of the current code enters play, i.e. its first read: an explicit, checkable action (free talk could not start a clock without parsing text, and could not have been talked about before the read). The first read in **Round** *r* opens the code: its deadline is **Round** *r* + `splitkey_window`, and every living holder is told (`splitkey.opened`). Later reads do not move it. **Meetings** neither pause nor extend it.
+- **Entering.** `splitkey.enter` spends the **Round** in the entry room with the whole code (text with optional spaces, dashes or commas; a number, zero-padded; or a list of the three fragments). A code that is not 9 digits is an **Invalid Action**, not a wrong code. Entries are graded against the code as it stood at the start of the **Round**, and only the enterer is told its grade (`tasks.graded`). An entry in the deadline **Round** counts. Task Graph prerequisites apply to reads and entries as to solo steps.
+- **Success.** A correct code completes the **Task** (it counts once toward the crew's total) and every living holder is told (`splitkey.completed`). Every holder who read a fragment of that code, and the enterer, get completion credit.
+- **Failure and retry.** A wrong code, or the end of the deadline **Round** without a correct entry, fails the attempt: the code is replaced by a fresh one from the seed, every fragment must be read again, and the next first read opens a new deadline. Every living holder is told why (`splitkey.reset`: `reason` `wrong_code` or `deadline`, the new `attempt`, and for a wrong code the code(s) `entered`). With the entered code and their checksums, holders can tell which fragment was wrong. Failing never blocks the **Task**, so the crew win stays reachable.
+- **Dead holders.** A killed or ejected holder's part is reassigned when the **Meeting** ends, by the normal reassignment rule; the new holder is told the part, the attempt and any open deadline (`splitkey.took_over`), and the other holders who replaced whom (`splitkey.holder_replaced`). The new holder must read the fragment itself.
+- **Lying.** The rules never check what a holder says, or its role. A holder who states a wrong fragment makes any code built from it fail; the holder of that part's checksum can see that the stated fragment does not match. **Impostors** hold no fragments today; **Sabotage** (#8) can give them one (see `docs/architecture.md`).
+
+Scripted bots, using only their contexts: holders with no open solo step go to the entry room; when every holder is there at the start of a **Round**, all of them leave to read, come back, and say `"T47 part 2 is 315."` every **Round** they end in the entry room. A holder enters the code once it knows all three fragments and the fragment it can check passes; otherwise it says `"T47 part 3 from Amber fails my checksum."` and waits. After a code opens, a holder that has not read goes straight to its terminal while a read would still beat the deadline.
+
 ## Audit Tasks
 
 Implemented in `tasks/audit.py` and `rules/audit.py`. `audit_tasks` (default 4, 0 to disable) caps the number of optional audits placed at setup on auditable **Tasks**, subject to available ids and independent players. Each audit gets a seeded unused `T10`–`T99` id, a room, an auditor and a different spec holder. Neither assignee holds the submitted **Task**. The built-in solo steps support audits; other kinds can opt in through the Task-kind registry.
@@ -110,9 +134,19 @@ Implemented in `tasks/audit.py` and `rules/audit.py`. `audit_tasks` (default 4, 
 - **Reassignment.** After a **Meeting**, dead assignees and assignees who now hold the submitted **Task** are replaced by living **Crewmates**, excluding its current holders, every recorded submission author and the other audit assignee. Replacement uses the least unfinished work, with seeded ties. New partners are announced privately. A new auditor receives only its own half and the latest reading; a changed holder must share again. If there is no eligible replacement, the optional audit remains unavailable.
 - **Transcript.** Ground-truth events record placement (`audit.placed`, full spec), every delivered share (`audit.shared`, sender, recipient, half), every check (`audit.checked`, target, submission, author, answer, received half, verdict and true outcome), and reassignment (`audit.reassigned`). Observations record exactly what each recipient was told, including private outcomes. Rejected attempts also appear in the ordinary action/Invalid Action records. Scripted bots share halves, check readings using only observed specs, and travel to the audit room when needed.
 
+## Room Chat
+
+Implemented in `src/zantine/rules/chat.py`. Defaults: `room_chat_budget_chars = 200`.
+
+- **Talking costs no Round.** Every **Round**, alongside its action, a **Seat** may say something (`SeatController.say`; for live **Models**, the `say` argument of whichever action tool it calls). There is no separate talk action. A **Seat** whose **Round** is forfeited after two **Invalid Actions** says nothing.
+- **Who hears.** A message is heard at the end of the **Round**, after kills and movement: by every living player in the room where the speaker ends the **Round**, the speaker included. These are exactly the players in the speaker's end-of-**Round** room snapshot. A player who walks in that **Round** hears it; one who walks out does not; nobody in another room ever does. A player killed that **Round** neither speaks (its message is dropped) nor hears.
+- **Talk Budget.** Each **Seat** may say up to its Room Chat **Talk Budget** per **Round**, in characters; longer speech is cut off, as in **Meetings**. The budget is `room_chat_budget_chars` (default 200) scaled by the **Seat**'s **Meeting** Talk Budget relative to `talk_budget_chars`, rounded down (`GameConfig.room_chat_budget`). By default every **Seat** gets 200; under the speed experiment's per-**Seat** tiers (`talk_budgets`) a fast **Seat** (1,000 per Meeting pass) gets 400 and a slow one (250) gets 100, so one tier draw sets both. Each **Seat** is shown only its own budget, in its action context (`extra["chat"]["round_talk_budget_chars"]`). A message that is blank, or empty after truncation, is not delivered; `room_chat_budget_chars = 0` disables Room Chat.
+- **Privacy.** Room Chat is private, room-scoped information: it is never treated as a public announcement by the Neutral Harness summarizer, so it is never condensed.
+- The result records each **Seat**'s message count, characters and truncations (`result["chat"]`), for **Floor Share**.
+
 ## Visibility
 
-A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks**, audit briefs, shared spec halves, readings and private grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
+A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, **Room Chat** said in the room it ended the Round in, and what is said in **Meetings**, plus its own **Tasks**, audit briefs, shared spec halves, readings and private grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
 
 ### Neutral Harness memory
 
@@ -131,7 +165,7 @@ A **Meeting** starts after the Round's resolution if one was requested and the g
 1. Every living player is told the reason (report or emergency), who called it, whose body was found and where (for reports), and the list of everyone dead so far (killed or ejected, without saying which).
 2. All bodies on the map are cleared.
 3. **Discussion:** 3 passes. Each pass the speaking order of the living players is re-shuffled from the seed. Each player speaks once per pass and sees everything said before it. Speech longer than the speaker's **Talk Budget** (default 500 characters per pass) is truncated. Every statement is heard by every living player.
-   - **Per-Seat Talk Budgets** (the v1.5 speed experiment). `GameConfig.talk_budgets` gives each **Seat** its own budget (one entry per Seat); `None`, the default, gives every Seat `talk_budget_chars`. `GameConfig.talk_budget(seat)` is the one place the budget is read. A player is told only its own budget (`talk_budget_chars` in its **Meeting** context, rendered by the **Neutral Harness** as "at most N characters"); it never learns anyone else's budget or tier. The tiers (`talk_tiers`, e.g. `fast` / `normal` / `slow`) and budgets are recorded in the transcript header's `config`, which no player sees. **Room Chat** (#4) is not implemented yet; when it lands, its per-**Seat** limit should reuse the same tiers through `talk_budget(seat)` rather than a second setting.
+   - **Per-Seat Talk Budgets** (the v1.5 speed experiment). `GameConfig.talk_budgets` gives each **Seat** its own budget (one entry per Seat); `None`, the default, gives every Seat `talk_budget_chars`. `GameConfig.talk_budget(seat)` is the one place the budget is read. A player is told only its own budget (`talk_budget_chars` in its **Meeting** context, rendered by the **Neutral Harness** as "at most N characters"); it never learns anyone else's budget or tier. The tiers (`talk_tiers`, e.g. `fast` / `normal` / `slow`) and budgets are recorded in the transcript header's `config`, which no player sees. **Room Chat** reuses the same tiers: its per-**Round** budget is scaled from `talk_budget(seat)` (see [Room Chat](#room-chat)), so there is no second setting.
 4. **Vote:** secret and simultaneous. Each living player votes for a living player (self allowed) or skips, seeing the discussion but no one's vote.
 5. **Tally:** the player with the most votes is ejected only if they have strictly more votes than anyone else **and** strictly more than the number of skips. Any tie for first, or skips matching or beating the leader, ejects nobody. Players are told only the anonymous counts per player and the number of skips, never who voted for whom.
 6. **Ejection:** the ejected player is announced; their role is **never** revealed to players. (The ground-truth transcript records it.)
