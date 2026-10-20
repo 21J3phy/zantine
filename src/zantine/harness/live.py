@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zantine.config import GameConfig
 from zantine.engine import Game
@@ -32,6 +32,9 @@ from zantine.scenario import build_scenario
 from zantine.seats.base import SeatController
 from zantine.seats.live import HarnessSeat, parse_live_arg
 from zantine.seats.registry import make_controller, parse_spec
+
+if TYPE_CHECKING:
+    from zantine.stylemask import StyleMask
 
 LIVE_ENV = "ZANTINE_LIVE"
 
@@ -101,6 +104,7 @@ def play_live(
     models: dict[str, ModelSpec] | None = None,
     ledger: Ledger | None = None,
     effort: str | None = None,
+    style_mask: StyleMask | None = None,
 ) -> LiveRun:
     """Play one game in which ``live:<model>`` seats are played by Models.
 
@@ -110,6 +114,8 @@ def play_live(
     ``effort`` (``low`` / ``medium`` / ``high``) overrides every live Model's
     configured level, as ``live:<model>?effort=<level>`` does for one Model;
     each adapter sends its lab's own setting for that level.
+    With ``config.style_mask`` on, pass ``style_mask`` (built on the same ``ledger``)
+    for a model masker; without it the game uses the free dry-run mask.
     """
     models = load_models() if models is None else models
     entries = parse_spec(bots, config.num_seats)
@@ -147,7 +153,7 @@ def play_live(
             controllers.append(seat_class(adapters[arg], ledger))
         else:
             controllers.append(make_controller(entry, seats_rng.fork(f"seat-{seat}")))
-    game = Game(config, controllers, rng=rng, scenario=scenario)
+    game = Game(config, controllers, rng=rng, scenario=scenario, style_mask=style_mask)
     for c in controllers:
         if isinstance(c, HarnessSeat):
             c.rules = game.rules

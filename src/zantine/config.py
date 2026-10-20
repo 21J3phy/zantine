@@ -59,6 +59,9 @@ class GameConfig:
     # Visual Task, whose real completion everyone else in its room sees. Impostors
     # get ``tasks_per_crewmate`` Fake Tasks each.
     visual_task_chance: float = 0.25
+    # Style Mask: every public message is rewritten in a neutral style (and its
+    # meaning checked) before other players see it (stylemask/).
+    style_mask: bool = False
     # Fixed Impostor seats (tests, and scheduled runs: runs.game_setup). None = drawn
     # from the seed.
     impostor_seats: tuple[int, ...] | None = None

@@ -1,5 +1,5 @@
 """Command-line interface: ``zantine play ...``, ``replay``, ``schedule``, ``run``,
-``report``, ``calibrate``, ``audit``."""
+``report``, ``calibrate``, ``audit``, ``stylemask``."""
 
 from __future__ import annotations
 
@@ -58,6 +58,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="reasoning effort for every live seat, mapped to each lab's own setting "
         "(default: the level in models.toml, medium)",
     )
+    p.add_argument(
+        "--style-mask",
+        metavar="MASKER",
+        help="Style Mask condition: 'neutral' (free rule-based rewrite) or an id from "
+        "stylemask/maskers.toml (paid; needs --live and ZANTINE_LIVE=1). Off by default",
+    )
+    p.add_argument(
+        "--mask-extractor",
+        default="pattern",
+        help="Claim extractor for the Style Mask meaning check: 'pattern' (free) or an id "
+        "from audit/extractors.toml (paid)",
+    )
+    p.add_argument(
+        "--mask-judge",
+        default="keyword",
+        choices=("keyword", "jev"),
+        help="judge for the meaning check's accusation target: 'keyword' (free) or 'jev' (paid)",
+    )
     r = sub.add_parser("replay", help="write a static HTML replay of a transcript (not scored)")
     r.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
     r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
@@ -92,7 +110,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     a.add_argument(
         "--spend-cap", type=float, default=2.0, help="USD cap on extractor plus Jev spend"
     )
+    sm = sub.add_parser("stylemask", help="Style Mask reports")
+    sm_sub = sm.add_subparsers(dest="stylemask_command", required=True)
+    ev = sm_sub.add_parser(
+        "eval", help="style classifier: can the source Model be told from original vs masked text?"
+    )
+    ev.add_argument("paths", nargs="+", type=Path, help="transcripts or directories of them")
+    ev.add_argument("--folds", type=int, default=5, help="cross-validation folds (default 5)")
+    ev.add_argument("--out", type=Path, help="write the JSON report here")
     args = parser.parse_args(argv)
+    if args.command == "stylemask":
+        return stylemask_eval(parser, args)
     if args.command == "report":
         return report.command(parser, args)
     if args.command == "replay":
@@ -105,8 +133,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return audit(parser, args)
 
     try:
-        config = GameConfig(seed=args.seed, round_cap=args.round_cap, num_impostors=args.impostors)
-        if args.live or "live" in args.bots:
+        config = GameConfig(
+            seed=args.seed,
+            round_cap=args.round_cap,
+            num_impostors=args.impostors,
+            style_mask=args.style_mask is not None,
+        )
+        paid_mask = config.style_mask and (
+            args.style_mask != "neutral"
+            or args.mask_extractor != "pattern"
+            or args.mask_judge != "keyword"
+        )
+        if args.live or "live" in args.bots or paid_mask:
             return _play_live(args, config)
         game = play(config, args.bots)
     except ValueError as exc:
@@ -254,6 +292,47 @@ def audit(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     return 0 if complete else 1
 
 
+def stylemask_eval(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    import json
+
+    from zantine.stylemask.classifier import evaluate
+
+    if args.folds < 2:
+        parser.error("--folds must be at least 2")
+    for path in args.paths:
+        if not path.exists():
+            parser.error(f"no such file or directory: {path}")
+    report = evaluate(args.paths, folds=args.folds)
+    print(
+        f"style classifier {report['classifier']['name']}: {report['transcripts']} transcripts, "
+        f"{report['masked_games']} with a Style Mask"
+    )
+    for key, label in (
+        ("original_all", "original, all games"),
+        ("original", "original, masked games"),
+        ("masked", "masked"),
+    ):
+        print(f"  {label:<23} {_classifier_line(report[key])}")
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(report, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        print(f"report: {args.out}")
+    return 0
+
+
+def _classifier_line(r: dict[str, Any]) -> str:
+    if r["balanced_accuracy"] is None:
+        return f"{r['messages']} messages: {r['note']}"
+    lo, hi = r["balanced_accuracy_ci95"]
+    alo, ahi = r["accuracy_ci95"]
+    return (
+        f"{r['messages']} messages, {len(r['models'])} Models: balanced accuracy "
+        f"{r['balanced_accuracy']:.0%} [{lo:.0%}, {hi:.0%}] vs chance "
+        f"{r['chance_balanced_accuracy']:.0%}; accuracy {r['accuracy']:.0%} [{alo:.0%}, "
+        f"{ahi:.0%}] vs majority {r['chance_accuracy']:.0%} (p={r['p_value_vs_chance']:.3g})"
+    )
+
+
 def print_audit(report: dict[str, Any]) -> None:
     ex = report["extractor"]
     scoring = "" if ex.get("scoring") else " (dry run, not for scoring)"
@@ -310,10 +389,29 @@ def _write(game: Game, out: Path) -> None:
 
 
 def _play_live(args: argparse.Namespace, config: GameConfig) -> int:
+    from zantine.harness.ledger import Ledger
     from zantine.harness.live import play_live
+    from zantine.stylemask import build_style_mask
 
+    # One ledger: Seats, the masker and its meaning check share the spend cap.
+    ledger = Ledger(args.spend_cap)
+    style_mask = None
+    if config.style_mask:
+        style_mask = build_style_mask(
+            args.style_mask,
+            args.mask_extractor,
+            args.mask_judge,
+            ledger=ledger,
+            live=args.live,
+        )
     run = play_live(
-        config, args.bots, spend_cap_usd=args.spend_cap, live=args.live, effort=args.effort
+        config,
+        args.bots,
+        spend_cap_usd=args.spend_cap,
+        live=args.live,
+        effort=args.effort,
+        ledger=ledger,
+        style_mask=style_mask,
     )
     game = run.game
     if not args.quiet:
