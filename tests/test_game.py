@@ -77,7 +77,8 @@ def test_cli_plays_a_game_and_writes_the_transcript(
     assert main(["play", "--seed", "5", "--bots", "scripted*8,idle*2", "--out", str(out)]) == 0
     records = Transcript.read(out)
     assert records[-1]["kind"] == "result"
-    assert [s["controller"]["kind"] for s in records[0]["seats"]][-2:] == ["idle", "idle"]
+    kinds = Counter(s["controller"]["kind"] for s in records[0]["seats"])
+    assert kinds == {"scripted": 8, "idle": 2}
     assert "win by" in capsys.readouterr().out
 
 

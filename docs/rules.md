@@ -6,8 +6,14 @@ Defaults are in `GameConfig` (`src/zantine/config.py`).
 
 ## Setup
 
+The whole setup is generated from the game seed (`src/zantine/scenario.py`), so the same seed and config always give the same game and there is no fixed map or name list to memorize. Each part below draws from its own seeded stream.
+
 - 10 **Seats**, 2 **Impostors** (drawn from the seed unless `impostor_seats` is set).
-- The map is a hard-coded 6-room map (`tiny_map()`): Cafeteria, Weapons, Navigation, Storage, Electrical, Medbay. Cafeteria is the meeting room. Seeded map generation comes with issue #2.
+- **Map:** 8 rooms by default (`num_rooms`), drawn from a pool of 28 room names. The corridors form a random spanning tree plus 1 to `num_rooms // 2` extra corridors for loops; no room has more than 4 corridors. The room with the most corridors (the first one generated, if several tie) is the meeting room.
+- **Names:** 10 distinct one-word names drawn from a pool of 44 (Amber, Cobalt, Willow, ...). No name is also a room name.
+- **Seat order:** the lineup (e.g. the `--bots` spec, or the **Models** in a **Balanced Lobby**) is shuffled into **Seats** from the seed, so a spec like `scripted*8,idle*2` does not always put the idle bots in the last two **Seats**. **Impostor** **Seats** are drawn separately, so which lineup entry becomes an **Impostor** is also seeded.
+- The seed and `scenario_version` are recorded in every transcript header, along with the generated map, names and roles. `scenario_version` is bumped whenever a generator change would make an old seed produce a different setup.
+- Unit tests use a fixed classic setup instead (`classic_scenario()`: the 6-room `tiny_map()` with Cafeteria as the meeting room, and colour names Red, Blue, ...).
 - Everyone starts in the meeting room. Each **Impostor** is told who the other **Impostor** is; **Crewmates** are told nothing about roles.
 - **Impostors** start with a full kill cooldown (default 3 **Rounds**). Each **Seat** has 1 emergency **Meeting**.
 

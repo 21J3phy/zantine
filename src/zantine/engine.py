@@ -13,7 +13,7 @@ from zantine.roles import Team
 from zantine.rules import Rules, default_rules
 from zantine.rules.actions import Action, Wait
 from zantine.rules.registry import RoundContext
-from zantine.scenario import Scenario, build_scenario
+from zantine.scenario import SCENARIO_VERSION, Scenario, build_scenario
 from zantine.seats.base import SeatController
 from zantine.state import GameState, PlayerState
 from zantine.transcript import Transcript
@@ -36,7 +36,10 @@ class Game:
         self.rng = rng or GameRng(config.seed)
         self.rules = rules or default_rules()
         self.controllers = list(controllers)
+        # Controllers are already in seat order; runner.new_game applies the
+        # scenario's seat order to a lineup before constructing the Game.
         scenario = scenario or build_scenario(config, self.rng.fork("scenario"))
+        self.scenario = scenario
         players = [
             PlayerState(
                 seat=seat,
@@ -81,6 +84,7 @@ class Game:
         state = self.state
         self.transcript.header(
             seed=self.config.seed,
+            scenario_version=SCENARIO_VERSION,
             config=self.config.to_dict(),
             map=state.map.to_dict(),
             modules=[m.name for m in self.rules.modules],
