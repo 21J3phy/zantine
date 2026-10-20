@@ -181,6 +181,8 @@ class SoloSolver:
                     purpose=PURPOSE,
                     phase=self.kind,
                     attempt=attempt,
+                    harness=SOLO_HARNESS_NAME,
+                    harness_version=SOLO_HARNESS_VERSION,
                     on_start=started,
                 )
             except ProviderError as exc:
