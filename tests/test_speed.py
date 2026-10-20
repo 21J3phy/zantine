@@ -12,7 +12,7 @@ import pytest
 from helpers import events, make_game
 from zantine import speed
 from zantine.analysis.report import write_report
-from zantine.analysis.speed import digest, speed_seats
+from zantine.analysis.speed import digest, speed_seats, tier_section
 from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.harness import neutral
@@ -57,13 +57,20 @@ def test_bad_talk_budgets_are_refused(kw: dict) -> None:
         GameConfig(**kw)
 
 
-def _meeting_game() -> tuple:
-    """Round 1: an emergency Meeting where every Seat says 200 characters, then votes."""
+def _meeting_game(
+    speech: dict[int, str] | None = None,
+    tiers: tuple[str, ...] = TIER_LABELS,
+    meeting: bool = True,
+) -> tuple:
+    """Round 1: an emergency Meeting (unless ``meeting`` is False) where every Seat says
+    ``speech[seat]`` (default 200 characters), then votes."""
     votes = {seat: 5 for seat in range(10)}
     votes[5] = 0
-    bots = {seat: PlaybookBot(votes={1: v}, speech={1: "x" * 200}) for seat, v in votes.items()}
-    bots[4].actions[1] = CallMeeting()
-    game = make_game(bots=bots, talk_budgets=BUDGETS, talk_tiers=TIER_LABELS)
+    said = {seat: "x" * 200 for seat in range(10)} | (speech or {})
+    bots = {seat: PlaybookBot(votes={1: v}, speech={1: said[seat]}) for seat, v in votes.items()}
+    if meeting:
+        bots[4].actions[1] = CallMeeting()
+    game = make_game(bots=bots, talk_budgets=BUDGETS, talk_tiers=tiers)
     game.play_round()
     return game, bots
 
@@ -233,10 +240,81 @@ def test_judged_positions_are_used_when_bound_to_the_transcript(tmp_path: Path) 
     assert (rows[6].pull_matches, rows[6].pull_ballots) == (0, 9)
     assert rows[2].positions == 0 and rows[2].vote_pull is None
 
-    audit["judgments"]["transcript_sha256"] = "0" * 64  # made from another transcript
-    path.with_suffix(".audit.json").write_text(json.dumps(audit), encoding="utf-8")
-    rows = {r.seat: r for r in speed_seats(PLANNED, records, path)}
-    assert rows[3].pull_source == "proxy" and rows[2].pull_ballots == 8
+    # Made from another transcript, or not bound to any: the own-vote proxy is used.
+    for bound in ("0" * 64, None, "", "missing"):
+        judgments = {"positions": positions}
+        if bound != "missing":
+            judgments["transcript_sha256"] = bound
+        path.with_suffix(".audit.json").write_text(
+            json.dumps({"judgments": judgments}), encoding="utf-8"
+        )
+        rows = {r.seat: r for r in speed_seats(PLANNED, records, path)}
+        assert rows[3].pull_source == "proxy", bound
+        assert (rows[3].pull_matches, rows[3].pull_ballots) == (8, 8)  # voted 5, as did 8
+        assert rows[2].pull_ballots == 8
+
+
+SPEED_TIERS = ("fast", "normal", "slow", "fast", "normal", "slow", "fast", "normal", "slow", "fast")
+
+
+def test_silent_games_leave_speech_shares_undefined(tmp_path: Path) -> None:
+    blank = {seat: "   " for seat in range(10)}
+    for game, _ in (
+        _meeting_game(speech=blank, tiers=SPEED_TIERS),  # everyone blank
+        _meeting_game(tiers=SPEED_TIERS, meeting=False),  # no Meeting at all
+    ):
+        rows = speed_seats(PLANNED, game.transcript.records, tmp_path / "g1.jsonl")
+        assert all(r.messages == 0 for r in rows)
+        assert all(r.floor_share is None and r.char_share is None for r in rows)
+        section = tier_section(rows, "random", replicates=50, seed=0)
+        assert section is not None and section["games_without_speech"] == 1
+        for key in ("floor_share", "char_share"):
+            for est in section["metrics"][key]["per_tier"].values():
+                assert est["estimate"] is None and est["n_units"] == 0 and est["n_games"] == 0
+
+    # Some Seats silent: they hold a defined share of 0; a silent game adds nothing.
+    mixed = {seat: "" for seat in (0, 3, 6)}
+    spoke = speed_seats(
+        PLANNED, _meeting_game(speech=mixed, tiers=SPEED_TIERS)[0].transcript.records, tmp_path
+    )
+    assert [r.floor_share for r in spoke if r.seat in mixed] == [0.0, 0.0, 0.0]
+    assert sum(r.floor_share for r in spoke) == pytest.approx(1.0)
+    silent = speed_seats(
+        dict(PLANNED, id="g2"),
+        _meeting_game(speech=blank, tiers=SPEED_TIERS)[0].transcript.records,
+        tmp_path,
+    )
+    alone = tier_section(spoke, "random", replicates=50, seed=0)
+    both = tier_section(spoke + silent, "random", replicates=50, seed=0)
+    assert both["games"] == 2 and both["games_without_speech"] == 1
+    for key in ("floor_share", "char_share"):
+        for tier in speed.TIERS:
+            a = alone["metrics"][key]["per_tier"][tier]
+            b = both["metrics"][key]["per_tier"][tier]
+            assert b["estimate"] == pytest.approx(a["estimate"])
+            assert (b["n_units"], b["n_games"]) == (a["n_units"], a["n_games"])
+
+
+def test_report_survives_estimates_without_finite_replicates(tmp_path: Path) -> None:
+    """A defined estimate whose every replicate is undefined has null bounds; the
+    report must still render (Astra's repro: seed 47, two lobbies, 1 replicate)."""
+    run_dir = tmp_path / "sparse"
+    create_run(run_dir, speed.make_speed_manifest(POOL, 47))
+    execute(run_dir, mode="dry")
+    keep = {"b01-lobby-00", "b01-lobby-01"}
+    for path in (run_dir / "games").glob("*.jsonl"):
+        if path.stem not in keep:
+            path.unlink()
+    out, report = write_report(run_dir, replicates=1, seed=3)
+    assert (out / "metrics.json").is_file() and (out / "speed_pull.svg").is_file()
+    tiers = report["speed"]["modes"]["random"]["metrics"]
+    nulls = [
+        e
+        for m in tiers.values()
+        for e in m["per_tier"].values()
+        if e["estimate"] is not None and e["ci_low"] is None
+    ]
+    assert nulls, "the regression no longer exercises a defined point with null bounds"
 
 
 def test_dry_run_speed_experiment_end_to_end(tmp_path: Path) -> None:

@@ -65,8 +65,9 @@ class SpeedSeat:
     messages: int = 0
     chars: int = 0
     truncated: int = 0
-    floor_share: float = 0.0
-    char_share: float = 0.0
+    # None when nobody spoke in the game (0/0): undefined, left out of the tier means.
+    floor_share: float | None = None
+    char_share: float | None = None
     pull_source: str = "proxy"  # judged (#15) / proxy (own votes)
     positions: int = 0
     pull_matches: int = 0
@@ -110,8 +111,10 @@ def judged_positions(
     judgments = data.get("judgments") if isinstance(data, dict) else None
     if not isinstance(judgments, dict) or not isinstance(judgments.get("positions"), list):
         return None
+    # Only an audit bound to exactly this transcript counts; an unbound one (no,
+    # null or empty digest) could be from any game.
     bound = judgments.get("transcript_sha256")
-    if bound is not None and bound != digest(records):
+    if not isinstance(bound, str) or bound != digest(records):
         return None
     out = []
     for p in judgments["positions"]:
@@ -178,8 +181,8 @@ def speed_seats(
     messages = sum(r.messages for r in rows.values())
     chars = sum(r.chars for r in rows.values())
     for row in rows.values():
-        row.floor_share = row.messages / messages if messages else 0.0
-        row.char_share = row.chars / chars if chars else 0.0
+        row.floor_share = row.messages / messages if messages else None
+        row.char_share = row.chars / chars if chars else None
 
     votes = ballots(records)
     positions = judged_positions(transcript, records)
@@ -247,18 +250,19 @@ TIER_METRICS: tuple[TierMetric, ...] = (
         "Floor Share",
         "share of a game's spoken Meeting statements (mean per Seat)",
         "Spoken statements by the Seat / all spoken statements in the game, averaged over "
-        "the tier's Seats.",
+        "the tier's Seats; games where nobody spoke are left out (0/0 is undefined).",
         lambda s: s.floor_share,
-        lambda s: 1.0,
+        lambda s: None if s.floor_share is None else 1.0,
     ),
     TierMetric(
         "char_share",
         "Share of Meeting characters",
         "share of a game's spoken characters (mean per Seat)",
         "Characters the Seat spoke in Meetings / all characters spoken in the game, averaged "
-        "over the tier's Seats. This is what a Talk Budget caps directly.",
+        "over the tier's Seats (games where nobody spoke left out). This is what a Talk "
+        "Budget caps directly.",
         lambda s: s.char_share,
-        lambda s: 1.0,
+        lambda s: None if s.char_share is None else 1.0,
     ),
     TierMetric(
         "vote_pull",
@@ -353,6 +357,9 @@ def tier_section(
         "label": MODES[mode],
         "games": len(games),
         "seats": len(seats),
+        # Games with no spoken Meeting statement: Floor Share and character share are
+        # undefined there and those games are left out of both.
+        "games_without_speech": len({s.game for s in seats if s.floor_share is None}),
         "strata": sorted(set(kinds.values())),
         "pull_source": source,
         "judged_games": len(judged),

@@ -506,7 +506,11 @@ def speed_pull(report: dict[str, Any], mode: str) -> Figure:
     Vote Pull that pushed a Crewmate are highlighted."""
     speed = report["speed"]
     section = speed["modes"][mode]
-    seats = [s for s in speed["seats"] if s["mode"] == mode and s["vote_pull"] is not None]
+    seats = [
+        s
+        for s in speed["seats"]
+        if s["mode"] == mode and s["vote_pull"] is not None and s["char_share"] is not None
+    ]
     fig = Figure(figsize=(10, 6))
     ax = fig.add_axes((0.08, 0.17, 0.62, 0.73))
     ax.set_title(
@@ -558,12 +562,13 @@ def speed_pull(report: dict[str, Any], mode: str) -> Figure:
         if xe["estimate"] is None or ye["estimate"] is None:
             continue
         at_x, at_y = np.array([xe["estimate"]]), np.array([ye["estimate"]])
-        interval_bars(
-            ax, at_y, np.array([xe["ci_low"]]), np.array([xe["ci_high"]]), horizontal=True, lw=1.4
+        # A defined estimate can have no finite replicate (null bounds): draw the point only.
+        xlo, xhi, ylo, yhi = (
+            np.array([np.nan if v is None else v], dtype=float)
+            for v in (xe["ci_low"], xe["ci_high"], ye["ci_low"], ye["ci_high"])
         )
-        interval_bars(
-            ax, at_x, np.array([ye["ci_low"]]), np.array([ye["ci_high"]]), horizontal=False, lw=1.4
-        )
+        interval_bars(ax, at_y, xlo, xhi, horizontal=True, lw=1.4)
+        interval_bars(ax, at_x, ylo, yhi, horizontal=False, lw=1.4)
         ax.scatter(at_x, at_y, marker=TIER_MARKERS[tier], s=70, color=DOT, zorder=4)
     ax.legend(fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
     caption(
