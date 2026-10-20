@@ -13,12 +13,14 @@ import pytest
 from fake_provider import FakeClient, fake_factory
 from zantine import runs
 from zantine.cli import main
+from zantine.harness.ledger import Ledger
 from zantine.harness.live import LiveDisabled
 from zantine.harness.pricing import load_models
 from zantine.rng import GameRng
 from zantine.roles import Role
 from zantine.runner import new_game
 from zantine.runs import (
+    RunLocked,
     create_run,
     execute,
     game_setup,
@@ -225,7 +227,7 @@ def test_a_live_run_stops_at_the_spend_cap_and_resumes_with_a_higher_cap(
     spent = spent_usd(run_dir)
     assert 0 < spent <= 1.0 and report.spent_usd == pytest.approx(spent)
     calls = read_jsonl(run_dir / "spend.jsonl")
-    assert {(c["game"], c["attempt"]) for c in calls} == {(first, 1)}
+    assert {(c["game"], c["game_attempt"]) for c in calls} == {(first, 1)}
 
     # The cap is for the whole run: the same cap does not buy a fresh $1.
     report = live(run_dir, cap=1.0)
@@ -268,3 +270,148 @@ def test_a_run_directory_holds_one_mode(tmp_path: Path) -> None:
     execute(run_dir, mode="dry", max_games=1)
     with pytest.raises(ValueError, match="cannot add live"):
         live(run_dir, cap=100.0)
+
+
+# Crash recovery and concurrent invocations --------------------------------------------------
+
+
+class Crash(Exception):
+    """Stands in for the process dying at an exact point."""
+
+
+def play_mode(run_dir: Path, mode: str, **kw: Any) -> runs.RunReport:
+    return live(run_dir, cap=1000.0, **kw) if mode == "live" else execute(run_dir, mode="dry", **kw)
+
+
+def crash_before_indexing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The next attempt's transcript is written, then the process dies before its index line."""
+    real = runs._append_line
+
+    def append(path: Path, record: dict[str, Any]) -> None:
+        if path.name == "index.jsonl":
+            raise Crash
+        real(path, record)
+
+    monkeypatch.setattr(runs, "_append_line", append)
+
+
+def test_a_call_that_dies_before_it_is_journaled_counts_at_its_worst_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = schedule(tmp_path, config={"round_cap": 2})
+    real = Ledger._record
+
+    def die_after_the_response(self: Ledger, *args: Any, **kwargs: Any) -> None:
+        real(self, *args, **kwargs)  # billed, priced and sent to the transcript sink ...
+        raise Crash  # ... but the process dies before the spend log is settled
+
+    monkeypatch.setattr(Ledger, "_record", die_after_the_response)
+    with pytest.raises(Crash):
+        live(run_dir, cap=1000.0)
+    monkeypatch.undo()
+    [reserved] = read_jsonl(run_dir / "spend.jsonl")
+    worst = reserved["reserved_usd"]
+    assert reserved["kind"] == "reserve" and worst > 0
+    assert spent_usd(run_dir) == pytest.approx(worst)
+
+    # The unsettled call fills a cap of its worst case: nothing more is admitted.
+    report = live(run_dir, cap=worst)
+    assert report.stopped == "spend_cap" and spent_usd(run_dir) == pytest.approx(worst)
+    assert len(read_jsonl(run_dir / "spend.jsonl")) == 1
+
+    report = live(run_dir, cap=1000.0, max_games=1)
+    assert report.stopped is None
+    settled = [r for r in read_jsonl(run_dir / "spend.jsonl") if r["kind"] == "call"]
+    total = worst + sum(r["cost_usd"] for r in settled)
+    assert spent_usd(run_dir) == pytest.approx(total) == pytest.approx(report.spent_usd)
+
+
+def test_a_torn_last_line_does_not_swallow_the_next_record(tmp_path: Path) -> None:
+    run_dir = schedule(tmp_path, config={"round_cap": 2})
+    (run_dir / "spend.jsonl").write_text('{"game": "interrupted"')
+    (run_dir / "index.jsonl").write_text('{"game": "interr')
+    for played in (1, 2):
+        report = live(run_dir, cap=1000.0, max_games=1)
+        index = read_jsonl(run_dir / "index.jsonl")
+        assert [r["status"] for r in index] == ["complete"] * played
+        spend = read_jsonl(run_dir / "spend.jsonl")
+        calls = [r for r in spend if r["kind"] == "call"]
+        assert len(calls) == len(spend) // 2 and {r["call_attempt"] for r in calls} <= {1, 2}
+        assert 0 < spent_usd(run_dir) == pytest.approx(sum(r["cost_usd"] for r in index))
+        assert report.spent_usd == pytest.approx(spent_usd(run_dir))
+    for name, torn in (
+        ("spend.jsonl", '{"game": "interrupted"'),
+        ("index.jsonl", '{"game": "interr'),
+    ):
+        assert (run_dir / name).read_text().splitlines()[0] == torn  # kept, on its own line
+
+
+@pytest.mark.parametrize("forget_mode", [False, True], ids=["run.json", "no-run.json"])
+@pytest.mark.parametrize("first,other", [("dry", "live"), ("live", "dry")])
+def test_a_game_lost_from_the_index_cannot_change_the_run_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: str, other: str, forget_mode: bool
+) -> None:
+    run_dir = schedule(tmp_path, config={"round_cap": 2})
+    games = load_manifest(run_dir)["games"]
+    crash_before_indexing(monkeypatch)
+    with pytest.raises(Crash):
+        play_mode(run_dir, first)
+    monkeypatch.undo()
+    assert complete(run_dir) == [games[0]["id"]] and read_jsonl(run_dir / "index.jsonl") == []
+    if forget_mode:  # the mode is then read from the transcripts' own Seats
+        (run_dir / "run.json").unlink()
+
+    with pytest.raises(ValueError, match=f"cannot add {other}"):
+        play_mode(run_dir, other, max_games=1)
+    assert read_jsonl(run_dir / "index.jsonl") == []
+    assert play_mode(run_dir, first, max_games=1).played == [games[1]["id"]]
+    index = read_jsonl(run_dir / "index.jsonl")
+    assert [(r["game"], r["mode"], r.get("recovered", False)) for r in index] == [
+        (games[0]["id"], first, True),
+        (games[1]["id"], first, False),
+    ]
+    assert json.loads((run_dir / "run.json").read_text()) == {"mode": first}
+
+
+def test_an_aborted_attempt_lost_from_the_index_keeps_its_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_dir = schedule(tmp_path, config={"round_cap": 2})
+    first = load_manifest(run_dir)["games"][0]["id"]
+    assert live(run_dir, cap=1.0).stopped == "spend_cap"  # attempt 1, indexed
+    crash_before_indexing(monkeypatch)
+    with pytest.raises(Crash):
+        live(run_dir, cap=1.0)  # attempt 2: aborted transcript saved, index line lost
+    monkeypatch.undo()
+    aborted = {n: (run_dir / "aborted" / f"{first}.{n}.jsonl").read_bytes() for n in (1, 2)}
+
+    assert live(run_dir, cap=1000.0, max_games=1).played == [first]
+    index = read_jsonl(run_dir / "index.jsonl")
+    assert [(r["game"], r["attempt"], r["status"], r.get("recovered", False)) for r in index] == [
+        (first, 1, "aborted", False),
+        (first, 2, "aborted", True),
+        (first, 3, "complete", False),
+    ]
+    assert index[1]["abort_reason"] == "spend_cap"
+    for n, data in aborted.items():
+        assert (run_dir / "aborted" / f"{first}.{n}.jsonl").read_bytes() == data
+    spend = read_jsonl(run_dir / "spend.jsonl")
+    assert {r["game_attempt"] for r in spend} == {1, 3}
+
+
+def test_a_run_directory_is_used_by_one_invocation_at_a_time(tmp_path: Path) -> None:
+    run_dir = schedule(tmp_path, config={"round_cap": 2})
+    overlapped: list[str] = []
+
+    def overlap(line: dict[str, Any]) -> None:
+        for second in (lambda: execute(run_dir, mode="dry"), lambda: live(run_dir, cap=1000.0)):
+            with pytest.raises(RunLocked, match="in use"):
+                second()
+        overlapped.append(line["game"])
+
+    report = live(run_dir, cap=1000.0, max_games=2, progress=overlap)
+    assert overlapped == report.played and len(overlapped) == 2
+    index = read_jsonl(run_dir / "index.jsonl")
+    assert [(r["game"], r["attempt"]) for r in index] == [(g, 1) for g in overlapped]
+    assert spent_usd(run_dir) == pytest.approx(sum(r["cost_usd"] for r in index))
+    assert live(run_dir, cap=1000.0, max_games=1).played  # released afterwards
