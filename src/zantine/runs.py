@@ -43,6 +43,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from zantine import speed
 from zantine.config import GameConfig
 from zantine.harness.ledger import Ledger
 from zantine.harness.live import LiveRun, play_live, require_live
@@ -72,16 +73,21 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
 
     The scenario (names, seat order, map) comes from the game seed as usual; the
     Impostor Seats are then fixed to wherever the seed seats the lineup entries of
-    the scheduled Impostor Models (``schedule.seat_lineup``).
+    the scheduled Impostor Models (``schedule.seat_lineup``). A speed-experiment
+    game also gets its per-Seat Talk Budgets (``speed.talk_config``).
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     entries, impostor_positions = seat_lineup(game)
     config = GameConfig(seed=game["seed"], **{**manifest.get("config", {}), **game["config"]})
-    if impostor_positions:
+    if impostor_positions or game.get("talk"):
         scenario = build_scenario(config, GameRng(config.seed).fork("scenario"))
         seats = tuple(s for s, pos in enumerate(scenario.seat_order) if pos in impostor_positions)
-        config = replace(config, impostor_seats=seats)
+        config = replace(
+            config,
+            impostor_seats=seats if impostor_positions else config.impostor_seats,
+            **speed.talk_config(manifest, game, scenario.seat_order),
+        )
     return config, ",".join(f"{mode}:{model}" for model in entries)
 
 
@@ -242,6 +248,7 @@ def execute(
     manifest = load_manifest(run_dir)
     _check_versions(manifest, mode)
     if mode == "live":
+        speed.check_live(manifest)
         if spend_cap_usd is None:
             raise ValueError("live runs need an explicit --spend-cap (USD for the whole run)")
         if adapter_factory is None:
@@ -488,8 +495,25 @@ def _locked(run_dir: Path) -> Iterator[None]:
 def add_commands(sub: Any) -> None:
     """``zantine schedule`` and ``zantine run``."""
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
-    s.add_argument("--blocks", type=int, default=12, help="blocks of 28 games (default 12)")
+    s.add_argument(
+        "--experiment",
+        choices=("v1", speed.EXPERIMENT),
+        default="v1",
+        help="v1 (default), or speed: random per-Seat Talk Budget tiers plus a realism check",
+    )
+    s.add_argument(
+        "--blocks",
+        type=int,
+        help=f"blocks of 28 games (default 12; {speed.TIER_BLOCKS} for --experiment speed)",
+    )
     s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model")
+    s.add_argument(
+        "--realism-games",
+        type=int,
+        default=speed.REALISM_GAMES,
+        help=f"speed only: games whose budgets follow Model throughput "
+        f"(default {speed.REALISM_GAMES})",
+    )
     s.add_argument(
         "--master-seed",
         type=int,
@@ -521,14 +545,28 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 def _schedule(args: argparse.Namespace) -> int:
     master_seed = args.master_seed if args.master_seed is not None else secrets.randbits(63)
     config = {"round_cap": args.round_cap} if args.round_cap is not None else {}
-    manifest = make_manifest(
-        load_pool(), master_seed, blocks=args.blocks, mirror=args.mirror, config=config
-    )
+    if args.experiment == speed.EXPERIMENT:
+        if args.mirror:
+            raise ValueError("the speed experiment has no Mirror Matches")
+        manifest = speed.make_speed_manifest(
+            load_pool(),
+            master_seed,
+            blocks=speed.TIER_BLOCKS if args.blocks is None else args.blocks,
+            realism_games=args.realism_games,
+            config=config,
+        )
+        text = speed.summary(manifest)
+    else:
+        blocks = 12 if args.blocks is None else args.blocks
+        manifest = make_manifest(
+            load_pool(), master_seed, blocks=blocks, mirror=args.mirror, config=config
+        )
+        text = summary(manifest)
     if args.out is None:
         print(json.dumps(manifest, indent=1, sort_keys=True))
         return 0
     path = create_run(args.out, manifest)
-    print(f"{summary(manifest)}\nmanifest: {path}")
+    print(f"{text}\nmanifest: {path}")
     return 0
 
 

@@ -62,8 +62,9 @@ def run_meeting(game: Game, request: MeetingRequest) -> None:
             ctx = game.meeting_context(seat, meeting, statements, pass_index)
             raw = game.controllers[seat].speak(ctx)
             text = raw if isinstance(raw, str) else ""
-            truncated = len(text) > config.talk_budget_chars
-            text = text[: config.talk_budget_chars]
+            budget = config.talk_budget(seat)
+            truncated = len(text) > budget
+            text = text[:budget]
             stmt = Statement(meeting, pass_index, position, seat, text)
             statements.append(stmt)
             game.event(
