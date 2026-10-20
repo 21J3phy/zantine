@@ -119,4 +119,4 @@ Moved up on 2026-10-20 so Zantine tests a defense, not only a diagnosis. It answ
 ## Openness & contamination
 
 - **Open engine, generated content.** Engine and rules are open source. Tasks, codes, maps and player names are procedurally generated from a seed for each game, so there is no fixed answer key to memorize.
-- Sample transcripts are published; seeds for official runs stay private.
+- **Reproducibility in three layers** (decided 2026-10-20, see `adr/0001-...`): a **Public Seed Set** anyone can rerun; a **Seed Commitment** for every official run, published before its results; and official seeds plus transcripts released when a version is retired. The website has a "Reproduce this" page with a one-line command.

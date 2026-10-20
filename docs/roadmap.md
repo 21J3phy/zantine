@@ -165,7 +165,8 @@ One seat's prompt tells it that it is the **Leader**. It gets no extra powers.
 - [x] **Claim extractor:** a fixed-weight open-weight model from outside the pool. Which one is chosen using **Planted Claims**.
 - [x] **Teamwork metric:** **Disclosure Rate** and **Disclosure Lag**.
 - [x] **Model pool checks:** verified 2026-10-20 (see `model-pool.md`).
-- [x] **Publishing:** open engine; tasks, maps and names generated from a seed for each game; official seeds private; graphs only, no leaderboard.
+- [x] **Publishing:** open engine; tasks, maps and names generated from a seed for each game; graphs only, no leaderboard.
+- [x] **Reproducibility:** **Public Seed Set** + **Seed Commitments** + official seeds released when a version is retired (`adr/0001`).
 - [ ] **Transfer workflow:** which realistic workflow to use for v1.2, and how to measure sabotage in it.
 - [x] **Labelers:** an AI **Label Panel** replaces human labelers. Which three judges is decided with the extractor choice (#19).
 

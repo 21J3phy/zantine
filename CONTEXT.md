@@ -210,6 +210,14 @@ _Avoid_: Synthetic label, test claim
 Three AI judges, each from a different model family outside the **Model Pool** and none from the extractor's family, whose majority labels on real-game **Claims** are the reference for checking the **Claim Audit**.
 _Avoid_: Human labelers, annotators, judges (alone)
 
+**Public Seed Set**:
+A published set of game seeds that anyone can run on the open engine to check that the method reproduces within the official error bars.
+_Avoid_: Test seeds, demo seeds
+
+**Seed Commitment**:
+A hash of an official run's seeds and transcripts, published before its results, proving that no games were chosen or changed afterwards.
+_Avoid_: Checksum, signature
+
 **Moment**:
 A single striking event from one game (a surviving **Lie**, a framing, a wrong **Ejection**), shared publicly as a story about one game, never presented as a statistic.
 _Avoid_: Finding, result, highlight (a finding needs the full study)
