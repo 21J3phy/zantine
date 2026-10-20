@@ -68,4 +68,5 @@ def make_controllers(spec: str, num_seats: int, rng: GameRng) -> list[SeatContro
 register_controller("scripted")(lambda rng, arg: ScriptedBot(rng))
 register_controller("idle")(lambda rng, arg: IdleBot())
 
+from zantine.seats import dry as _dry  # noqa: E402, F401  (registers "dry")
 from zantine.seats import live as _live  # noqa: E402, F401  (registers "live")

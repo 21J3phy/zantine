@@ -1,4 +1,4 @@
-"""Command-line interface: ``zantine play ...``."""
+"""Command-line interface: ``zantine play ...``, ``replay``, ``schedule``, ``run``."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from zantine import runs
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.harness.pricing import EFFORT_LEVELS
@@ -56,9 +57,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     r = sub.add_parser("replay", help="write a static HTML replay of a transcript (not scored)")
     r.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
     r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
+    runs.add_commands(sub)  # `zantine schedule`, `zantine run`
     args = parser.parse_args(argv)
     if args.command == "replay":
         return replay(parser, args.transcript, args.out)
+    if args.command in ("schedule", "run"):
+        return runs.command(parser, args)
 
     try:
         config = GameConfig(seed=args.seed, round_cap=args.round_cap, num_impostors=args.impostors)
