@@ -405,6 +405,12 @@ class _Builder:
                             self.pos[s] = self.meeting_room
                 item["detail"] = True
                 _text(item, f"Meeting {data.get('meeting')} ended; everyone returns")
+            case "harness.notes":
+                # A Seat's private notepad (agent-loop Harness): never speech, and it
+                # may name roles, so only shown with roles revealed and details on.
+                item.update(category="notes", detail=True)
+                item["text"] = f"{n(data.get('seat'))}'s private notes: {data.get('text', '')}"
+                item["public"] = None
             case "containment":
                 # Saying so would tell viewers the ejected players were Impostors.
                 item.update(category="game")

@@ -25,7 +25,7 @@ from zantine.harness.provider import ProviderAdapter, ProviderError, make_adapte
 from zantine.rng import GameRng
 from zantine.scenario import build_scenario
 from zantine.seats.base import SeatController
-from zantine.seats.live import HarnessSeat
+from zantine.seats.live import HarnessSeat, parse_live_arg
 from zantine.seats.registry import make_controller, parse_spec
 
 LIVE_ENV = "ZANTINE_LIVE"
@@ -43,14 +43,12 @@ def require_live(flag: bool) -> None:
 
 
 def live_models(entries: Sequence[str]) -> list[str]:
-    """Model IDs of the ``live:<model>`` entries in a parsed bot spec."""
+    """Model IDs of the ``live:<model>[@<harness>]`` entries in a parsed bot spec."""
     out = []
     for entry in entries:
         name, _, arg = entry.partition(":")
         if name == "live":
-            if not arg:
-                raise ValueError("live seats need a model, e.g. live:claude-fable-5-1")
-            out.append(arg)
+            out.append(parse_live_arg(arg)[0])
     return out
 
 
@@ -80,6 +78,8 @@ def play_live(
 ) -> LiveRun:
     """Play one game in which ``live:<model>`` seats are played by Models.
 
+    ``live:<model>@<harness>`` picks the Seat's Harness (default ``neutral``);
+    every Harness shares the adapters, pricing, ``ledger`` and spend cap.
     Pass a shared ``ledger`` to make several games draw on one spend cap.
     ``effort`` (``low`` / ``medium`` / ``high``) overrides every live Model's
     configured level; each adapter sends its lab's own setting for that level.
@@ -112,7 +112,8 @@ def play_live(
     for seat, entry in enumerate(scenario.seat(entries)):
         name, _, arg = entry.partition(":")
         if name == "live":
-            controllers.append(HarnessSeat(adapters[arg], ledger))
+            model_id, seat_class = parse_live_arg(arg)
+            controllers.append(seat_class(adapters[model_id], ledger))
         else:
             controllers.append(make_controller(entry, seats_rng.fork(f"seat-{seat}")))
     game = Game(config, controllers, rng=rng, scenario=scenario)
@@ -148,7 +149,7 @@ def play_live(
 def cost_report(
     game: Game, ledger: Ledger, records: Sequence[CallRecord], aborted: str | None
 ) -> dict[str, Any]:
-    """Per-Seat and per-Model tokens (incl. thinking), dollars and Invalid Actions for one game."""
+    """Per-Seat, per-Model and per-Harness tokens (incl. thinking), dollars and Invalid Actions."""
     invalid = {seat: 0 for seat in range(game.config.num_seats)}
     forfeits = dict(invalid)
     for r in game.transcript.records:
@@ -172,6 +173,16 @@ def cost_report(
         }
         for model_id, spec in specs.items()
     }
+    live_seats = [(s, c) for s, c in enumerate(game.controllers) if isinstance(c, HarnessSeat)]
+    harnesses = {
+        label: {
+            "seats": [s for s, c in live_seats if c.harness_label() == label],
+            **summarize(
+                r for r in records if f"{r.harness}-v{r.harness_version}" == label and r.harness
+            ),
+        }
+        for label in sorted({c.harness_label() for _, c in live_seats})
+    }
     seats = []
     for seat, controller in enumerate(game.controllers):
         mine = [r for r in records if r.seat == seat]
@@ -188,6 +199,7 @@ def cost_report(
         "complete": aborted is None,
         "seats": seats,
         "models": models,
+        "harnesses": harnesses,
         "game": summarize(records),
         "spend_cap_usd": ledger.spend_cap_usd,
         "run_spent_usd": round(ledger.spent_usd, 6),

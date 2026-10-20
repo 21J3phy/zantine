@@ -9,10 +9,12 @@ from typing import Any
 
 import pytest
 
+from fake_provider import FakeClient, fake_factory, message, phase_of, polite_player, tool_use
 from helpers import make_game
 from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.engine import Game
+from zantine.harness.live import play_live
 from zantine.replay import build_view, load_records, render_html, write_replay
 from zantine.rules.actions import CallMeeting
 from zantine.rules.crisis import TriggerCrisis
@@ -318,3 +320,29 @@ def test_containment_replays_but_is_hidden_with_roles() -> None:
     assert len(contained) == 1
     assert contained[0]["text"].startswith("Containment") and contained[0]["public"] is None
     assert view["result"]["text"] == "No winner by round_cap after 3 Rounds"
+
+
+def test_agent_loop_notes_are_private_not_speech() -> None:
+    def spoiler_notes(params: dict) -> Any:
+        is_loop = any(t["name"] == "update_notes" for t in params["tools"])
+        tail = params["messages"][0]["content"][-1]["text"]
+        if is_loop and phase_of(params) == "action" and "notes saved" not in tail:
+            return message(tool_use("update_notes", text="I am an Impostor. My partner is seat 2."))
+        return polite_player(params)
+
+    run = play_live(
+        GameConfig(seed=3, round_cap=2),
+        "live:claude-fable-5-1@agent-loop,scripted*9",
+        spend_cap_usd=20,
+        adapter_factory=fake_factory(FakeClient(spoiler_notes)),
+    )
+    assert run.game.transcript.events("harness.notes")
+    everything = items(view_of(run.game))
+    notes = [it for it in everything if it["type"] == "harness.notes"]
+    assert notes and all(
+        it["category"] == "notes" and it["detail"] and it["public"] is None for it in notes
+    )
+    assert "My partner is seat 2" in notes[0]["text"]
+    # Nothing in the roles-hidden timeline carries the note, and it is never speech.
+    assert not any("partner is seat 2" in (it["public"] or "") for it in everything)
+    assert not any(it["category"] == "speech" and "partner" in it["text"] for it in everything)

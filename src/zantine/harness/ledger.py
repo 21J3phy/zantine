@@ -60,6 +60,9 @@ class CallRecord:
     total_spent_usd: float
     # The provider's own charge for the call, where its API reports one (xAI).
     provider_cost_usd: float | None = None
+    # The Harness that built the request (``"neutral"``, 5); None for non-seat callers.
+    harness: str | None = None
+    harness_version: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -86,13 +89,26 @@ class Ledger:
         seat: int | None = None,
         round: int | None = None,
         attempt: int = 1,
+        harness: str | None = None,
+        harness_version: int | None = None,
     ) -> ProviderResponse:
-        """Make one metered call. Raises ``SpendCapReached`` or ``ProviderError``."""
+        """Make one metered call. Raises ``SpendCapReached`` or ``ProviderError``.
+
+        Seats pass their ``harness`` name and version, so calls made by different
+        Harnesses for the same Model are logged with the same fields side by side.
+        """
         model = adapter.model
         needed = model.worst_case_cost(request.text_size())
         if self.spent_usd + needed > self.spend_cap_usd:
             raise SpendCapReached(self.spent_usd, self.spend_cap_usd, needed)
-        meta = {"purpose": purpose, "phase": phase, "seat": seat, "round": round}
+        meta = {
+            "purpose": purpose,
+            "phase": phase,
+            "seat": seat,
+            "round": round,
+            "harness": harness,
+            "harness_version": harness_version,
+        }
         self._reserve(model, needed, attempt)
         try:
             response = adapter.send(request)
