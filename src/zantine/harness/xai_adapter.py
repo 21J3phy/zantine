@@ -25,6 +25,8 @@ from zantine.harness.provider import register_provider
 class XAIAdapter(OpenAIAdapter):
     provider = "xai"
     key_env = "XAI_API_KEY"
+    # ``reasoning.effort`` on Grok 4.7 (default high).
+    effort_settings = ("low", "medium", "high", "xhigh")
     base_url = "https://api.x.ai/v1"
     reasoning_in_output = False
 

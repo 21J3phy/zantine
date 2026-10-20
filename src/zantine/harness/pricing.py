@@ -6,7 +6,10 @@ bounds a call before it is made, so the spend cap can refuse it.
 Effort is a neutral level (``low`` / ``medium`` / ``high``) chosen per run;
 ``efforts`` maps each level to the lab's own setting, which adapters send as
 ``effort_setting``. ``at_effort(level)`` gives the same Model at another level
-(the effort sweep, #26). A ``long_context`` tier re-prices a whole call when its
+(the effort sweep, #26); a level the Model's ``efforts`` lacks is refused, never
+mapped to the nearest one, so a graph never labels one setting as another. A
+Seat spec can name a level per Model (``live:<model>?effort=high``,
+``split_effort``). A ``long_context`` tier re-prices a whole call when its
 prompt is longer than the tier's threshold, as xAI and Google bill.
 """
 
@@ -61,7 +64,10 @@ class ModelSpec:
     def __post_init__(self) -> None:
         if self.efforts and self.effort not in self.efforts:
             known = ", ".join(self.efforts)
-            raise ValueError(f"{self.id}: effort {self.effort!r} is not one of {known}")
+            raise ValueError(
+                f"{self.id}: effort {self.effort!r} is not one of {known} "
+                "(a level the lab lacks is refused, not mapped to the nearest one)"
+            )
 
     @property
     def effort_setting(self) -> str:
@@ -107,6 +113,25 @@ class ModelSpec:
             "effort": self.effort,
             "effort_setting": self.effort_setting,
         }
+
+
+def split_effort(arg: str) -> tuple[str, str | None]:
+    """``"<model>"`` or ``"<model>?effort=<level>"`` -> (model, level or None).
+
+    The level must be one of ``EFFORT_LEVELS``; whether the Model's lab offers it is
+    checked by ``ModelSpec.at_effort``.
+    """
+    model, sep, query = arg.partition("?")
+    if not sep:
+        return arg, None
+    key, eq, level = query.partition("=")
+    if key != "effort" or not eq:
+        raise ValueError(f"{arg!r}: the only Seat option is ?effort=<level>")
+    if level not in EFFORT_LEVELS:
+        raise ValueError(f"{arg!r}: effort must be one of {', '.join(EFFORT_LEVELS)}")
+    if not model:
+        raise ValueError(f"{arg!r}: no model before ?effort=")
+    return model, level
 
 
 def _spec(model_id: str, fields: dict[str, Any]) -> ModelSpec:

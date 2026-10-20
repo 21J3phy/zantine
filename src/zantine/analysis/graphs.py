@@ -18,6 +18,14 @@ Charts (each written as SVG with real text, and PNG):
 - ``cost_vs_metrics``: cost per game against a few metrics.
 - ``mirror``: Mirror Matches, separately labelled as descriptive self-play.
 
+The effort sweep (v1.6, #26; ``render_effort``) has its own charts, all of
+Mirror Matches and labelled as descriptive self-play, one column per Model:
+
+- ``effort_metrics``: each team metric against effort level (low, medium, high).
+- ``effort_resources``: thinking tokens per call and cost per game against effort level.
+- ``effort_vs_thinking`` / ``effort_vs_cost``: each team metric against the
+  level's thinking tokens per call / cost per game, points joined in level order.
+
 Interval bars are drawn from their bounds, never as distances from the estimate:
 a percentile interval need not contain its point estimate.
 """
@@ -25,6 +33,7 @@ a percentile interval need not contain its point estimate.
 from __future__ import annotations
 
 import math
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -426,4 +435,118 @@ def mirror(report: dict[str, Any]) -> Figure:
         interval_panel(ax, report["mirror"][key], models)
     fig.subplots_adjust(left=0.1, right=0.98, top=0.8, bottom=0.25, wspace=0.75)
     caption(fig, report)
+    return fig
+
+
+# Effort sweep (v1.6, #26) -----------------------------------------------------------
+
+LEVEL_MARK = {"low": "L", "medium": "M", "high": "H"}
+SELF_PLAY = (
+    "Mirror Matches: self-play, descriptive only (attackers and defenders are the same "
+    "Model at the same level)"
+)
+
+
+def render_effort(report: dict[str, Any], out: Path) -> list[Path]:
+    team = [k for k, m in report["metrics"].items() if m["group"] == "team"]
+    files: list[Path] = []
+    with rc_context(STYLE):
+        for name, fig in (
+            ("effort_metrics", effort_grid(report, team, None)),
+            ("effort_resources", effort_grid(report, ["thinking_per_call", "cost_per_game"], None)),
+            ("effort_vs_thinking", effort_grid(report, team, "thinking_per_call")),
+            ("effort_vs_cost", effort_grid(report, team, "cost_per_game")),
+        ):
+            files += save(fig, out / name)
+    return files
+
+
+def cell_values(
+    metric: dict[str, Any], model: str, levels: list[str]
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(estimate, low, high) arrays over the levels for one Model, NaN where not estimable."""
+
+    def arr(key: str) -> np.ndarray:
+        cells = metric["per_model"][model]
+        return np.array(
+            [np.nan if cells[lvl][key] is None else cells[lvl][key] for lvl in levels], dtype=float
+        )
+
+    return arr("estimate"), arr("ci_low"), arr("ci_high")
+
+
+def effort_grid(report: dict[str, Any], keys: list[str], x_key: str | None) -> Figure:
+    """Rows = metrics, columns = Models (alphabetical). x is the effort level, or, with
+    ``x_key``, that resource metric's estimate at each level (with its interval)."""
+    models = models_of(report)
+    levels = report["levels"]
+    metrics = report["metrics"]
+    rows, cols = len(keys), len(models)
+    width, height = 1.9 * cols + 1.6, 1.9 * rows + 1.5
+    fig = Figure(figsize=(width, height))
+    if x_key is None:
+        what = "against effort level"
+    else:
+        what = f"against {metrics[x_key]['label'].lower()} at each effort level"
+    fig.suptitle(f"Effort sweep: per-Model metrics {what}\n{SELF_PLAY}", color=INK, fontsize=10)
+    grid = fig.add_gridspec(
+        rows,
+        cols,
+        left=1.3 / width,
+        right=0.98,
+        top=1 - 0.85 / height,
+        bottom=0.95 / height,
+        hspace=0.55,
+        wspace=0.35,
+    )
+    positions = np.arange(len(levels), dtype=float)
+    for r, key in enumerate(keys):
+        metric = metrics[key]
+        first = None
+        for c, model in enumerate(models):
+            ax = fig.add_subplot(grid[r, c], sharey=first)
+            first = first or ax
+            est, lo, hi = cell_values(metric, model, levels)
+            if x_key is None:
+                x, xlo, xhi = positions, positions, positions
+                ax.set_xticks(positions, levels, fontsize=7)
+                ax.set_xlim(-0.5, len(levels) - 0.5)
+            else:
+                x, xlo, xhi = cell_values(metrics[x_key], model, levels)
+                ax.tick_params(axis="x", labelsize=6.5)
+            ax.grid(color=GRID, linewidth=0.5)
+            ax.tick_params(axis="y", labelsize=6.5, labelleft=c == 0)
+            ok = np.isfinite(est) & np.isfinite(x)
+            if ok.any():
+                ax.plot(x[ok], est[ok], color=PAIR, linewidth=0.9, zorder=1)
+                interval_bars(ax, np.where(ok, x, np.nan), lo, hi, horizontal=False, lw=0.8)
+                if x_key is not None:
+                    interval_bars(ax, np.where(ok, est, np.nan), xlo, xhi, horizontal=True, lw=0.8)
+                    for i in np.flatnonzero(ok):
+                        ax.annotate(
+                            LEVEL_MARK.get(levels[i], levels[i]),
+                            (x[i], est[i]),
+                            xytext=(3, 3),
+                            textcoords="offset points",
+                            fontsize=6.5,
+                            color=INK,
+                        )
+                ax.scatter(x[ok], est[ok], s=16, color=DOT, zorder=3)
+            else:
+                note(ax, "n/a")
+            if r == 0:
+                ax.set_title(model, fontsize=8, color=INK)
+            if c == 0:
+                label = textwrap.fill(f"{metric['label']} ({metric['unit']})", 30)
+                ax.set_ylabel(label, fontsize=6.5)
+            if r == rows - 1 and x_key is not None:
+                ax.set_xlabel(metrics[x_key]["unit"], fontsize=6.5)
+    extra = "n/a: not estimable from the games so far."
+    if x_key is not None:
+        extra += " Points: L, M, H = low, medium, high effort."
+    if dry_run(report):
+        extra += " Dry run: no thinking tokens or cost recorded."
+    if not report["run"]["medium_runs"]:
+        extra += " Medium effort: no v1 run given."
+    caption(fig, report, extra)
     return fig

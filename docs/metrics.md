@@ -76,6 +76,17 @@ min(T_g, L) = a_lineup(g) + Σ_m β_m · k_{g,m} + e_g
 
 Every chart carries the interval caption. `metrics.json` holds every number behind every chart (estimates, interval bounds and widths, counts, per-game and per-Seat rows, the map's pairs and clusters). It also holds the master seed and every game's seed, so it stays private ([`adr/0001`](adr/0001-layered-reproducibility-with-private-official-seeds.md)). `metrics.public.json` is the same without the seeds and the local run path; that is the file for the website (#48) to draw its own charts from.
 
+## Effort sweep (v1.6, #26)
+
+`zantine report <run-dir> [--medium <v1-run-dir> ...]` on a run scheduled with `zantine schedule --experiment effort` (10 **Mirror Matches** per Model at `low` and at `high` effort, 140 games) writes the effort report instead (`analysis/effort.py`) into the same `report/` files: `metrics.json`, `metrics.public.json` (no seeds, no run paths), `progress.md` (games per Model and level) and the graphs.
+
+- **Effort level** of a game: the `effort` every Seat's header `controller` records. A Seat with none (a dry Seat without `?effort=`) played the `models.toml` default, `medium`. Games whose Seats disagree are left out.
+- **Medium** comes from each `--medium` run's **Mirror Matches** (the v1 run: 6 per Model) at `medium`. Without one, the medium column is `n/a`. A `--medium` run of the other mode (dry vs live) is refused.
+- **Descriptive only.** Mirror Matches are self-play: attackers and defenders are the same Model at the same level, so nothing here measures defense, and every chart says so.
+- **Per (Model, level) cell**, pooled ratios as elsewhere: `productivity` (restricted mean completion time), `finished_share`, `impostors_ejected` (**Impostors** ejected / **Impostors**), `containment_time` (restricted mean `min(C, L)`), `correct_vote_share` (over the **Crewmate** Seats), `impostors_won` (share of games); and what the level costs: `thinking_per_call` (thinking tokens / paid calls over all ten Seats, each lab's own count) and `cost_per_game` (mean USD per game). `metrics.json` → `metrics.<key>.per_model.<model>.<level>`.
+- **Intervals**: the same game-level cluster bootstrap, stratified by (Model, level) cell, so every replicate keeps each cell's game count.
+- **Graphs**, Models in fixed alphabetical order as columns, one neutral colour: `effort_metrics` (each team metric against level), `effort_resources` (thinking tokens per call and cost per game against level), `effort_vs_thinking` and `effort_vs_cost` (each team metric against the level's thinking tokens per call / cost per game, points marked L, M, H and joined in level order, with intervals on both axes).
+
 ## Progress report (`progress.md`, `metrics.json` → `progress`)
 
 Blocks complete out of the fixed 12 (a block counts when all 28 of its games are complete), games in a partly finished block, **Mirror Matches** complete, spend (the whole run's, from `spend.jsonl` via `runs.spent_usd`, including aborted attempts; and the part in complete games' transcripts), and the current width of every interval. **Information only:** v1 is fixed at 12 blocks with no early stopping ([`sample-size.md`](sample-size.md)); the report makes no stop/continue suggestion.

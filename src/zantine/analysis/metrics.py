@@ -37,6 +37,7 @@ class SeatRow:
     seat: int
     model: str
     role: str  # "crewmate" / "impostor"
+    effort: str | None = None  # the Seat's effort level, when its header records one
     votes: int = 0  # Meeting votes cast (a forfeited vote counts as a skip, as in the engine)
     skips: int = 0
     accusations: int = 0  # non-skip votes
@@ -49,6 +50,8 @@ class SeatRow:
     tasks_assigned: int = 0
     tasks_done: int = 0
     cost_usd: float = 0.0
+    calls: int = 0  # paid calls (failed ones included), from the cost record
+    thinking_tokens: int = 0
     invalid_actions: int = 0
     forfeits: int = 0
     # Claim Audit (``<transcript>.claims.json``), when present.
@@ -183,6 +186,13 @@ def seat_model(controller: Any) -> str:
     return text.split(":", 1)[1] if ":" in text else text
 
 
+def seat_effort(controller: Any) -> str | None:
+    """The Seat's effort level (``low`` / ``medium`` / ``high``) if the header records one."""
+    if isinstance(controller, dict) and controller.get("effort"):
+        return str(controller["effort"])
+    return None
+
+
 def game_row(
     planned: dict[str, Any],
     records: list[dict[str, Any]],
@@ -202,6 +212,7 @@ def game_row(
             seat=s["seat"],
             model=seat_model(s["controller"]),
             role=s["role"],
+            effort=seat_effort(s["controller"]),
         )
         for s in header["seats"]
     ]
@@ -249,6 +260,8 @@ def game_row(
     for c in cost.get("seats", []):
         row = by_seat[c["seat"]]
         row.cost_usd = float(c.get("cost_usd") or 0.0)
+        row.calls = int(c.get("calls") or 0)
+        row.thinking_tokens = int(c.get("thinking_tokens") or 0)
         row.invalid_actions = int(c.get("invalid_actions") or 0)
         row.forfeits = int(c.get("forfeits") or 0)
 

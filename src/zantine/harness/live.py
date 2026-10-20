@@ -4,6 +4,11 @@
 plays one game. Real adapters are built only when ``live`` is true *and*
 ``ZANTINE_LIVE=1``; tests pass ``adapter_factory`` with a fake client instead.
 
+A live Seat can name its effort level, ``live:<model>[@<harness>]?effort=high``; the
+``effort`` argument sets it for every live Seat instead. A Model plays at one
+level per game. The level and the lab's own setting are in the header's Seat
+controllers and on every ``harness.call`` event.
+
 Every call is written to the transcript as a ``harness.call`` event. When the
 spend cap (or a fatal provider error) stops the game, the transcript so far is
 kept and gets an ``aborted`` record. Either way it ends with a ``cost`` record:
@@ -20,7 +25,7 @@ from typing import Any
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.harness.ledger import CallRecord, Ledger, SpendCapReached, summarize
-from zantine.harness.pricing import ModelSpec, load_models, model_spec
+from zantine.harness.pricing import ModelSpec, load_models, model_spec, split_effort
 from zantine.harness.provider import ProviderAdapter, ProviderError, make_adapter
 from zantine.rng import GameRng
 from zantine.scenario import build_scenario
@@ -42,14 +47,35 @@ def require_live(flag: bool) -> None:
         raise LiveDisabled(f"live Model seats need {LIVE_ENV}=1 in the environment")
 
 
-def live_models(entries: Sequence[str]) -> list[str]:
-    """Model IDs of the ``live:<model>[@<harness>]`` entries in a parsed bot spec."""
+def live_seats(entries: Sequence[str]) -> list[str]:
+    """The ``<model>[@<harness>][?effort=<level>]`` argument of each ``live:`` entry."""
     out = []
     for entry in entries:
         name, _, arg = entry.partition(":")
         if name == "live":
-            out.append(parse_live_arg(arg)[0])
+            parse_live_arg(split_effort(arg)[0])  # refuse a bad model or Harness early
+            out.append(arg)
     return out
+
+
+def live_models(entries: Sequence[str]) -> list[str]:
+    """Model IDs of the ``live:<model>[@<harness>][?effort=<level>]`` entries in a bot spec."""
+    return [parse_live_arg(split_effort(arg)[0])[0] for arg in live_seats(entries)]
+
+
+def seat_spec(arg: str, models: dict[str, ModelSpec], effort: str | None = None) -> ModelSpec:
+    """The ModelSpec a ``live:`` argument plays, at its effort level.
+
+    The level comes from the Seat's ``?effort=`` or else ``effort``; naming two
+    different levels is refused.
+    """
+    model_part, level = split_effort(arg)
+    model_id = parse_live_arg(model_part)[0]
+    if level is not None and effort is not None and level != effort:
+        raise ValueError(f"{arg!r} asks for effort {level!r} but the run sets {effort!r}")
+    spec = model_spec(model_id, models)
+    level = level or effort
+    return spec if level is None else spec.at_effort(level)
 
 
 @dataclass
@@ -82,27 +108,32 @@ def play_live(
     every Harness shares the adapters, pricing, ``ledger`` and spend cap.
     Pass a shared ``ledger`` to make several games draw on one spend cap.
     ``effort`` (``low`` / ``medium`` / ``high``) overrides every live Model's
-    configured level; each adapter sends its lab's own setting for that level.
+    configured level, as ``live:<model>?effort=<level>`` does for one Model;
+    each adapter sends its lab's own setting for that level.
     """
     models = load_models() if models is None else models
     entries = parse_spec(bots, config.num_seats)
-    wanted = live_models(entries)
+    wanted = live_seats(entries)
+    specs = {arg: seat_spec(arg, models, effort) for arg in wanted}
+    levels: dict[str, str] = {}
+    for spec in specs.values():
+        if levels.setdefault(spec.id, spec.effort) != spec.effort:
+            raise ValueError(f"{spec.id} is seated at two effort levels; use one per game")
     if adapter_factory is None:
         if wanted:
             require_live(live)
         adapter_factory = make_adapter
     ledger = ledger or Ledger(spend_cap_usd)
     adapters: dict[str, ProviderAdapter] = {}
-    for model_id in wanted:
-        if model_id not in adapters:
-            spec = model_spec(model_id, models)
-            if effort is not None:
-                spec = spec.at_effort(effort)
+    built: dict[str, ProviderAdapter] = {}
+    for arg, spec in specs.items():
+        if spec.id not in built:
             spec.check_price_current()
             try:
-                adapters[model_id] = adapter_factory(spec)
+                built[spec.id] = adapter_factory(spec)
             except ProviderError as exc:
-                raise ValueError(f"cannot start {model_id}: {exc}") from exc
+                raise ValueError(f"cannot start {spec.id}: {exc}") from exc
+        adapters[arg] = built[spec.id]
 
     # Same scenario, seating and RNG streams as runner.new_game, so bots behave alike.
     rng = GameRng(config.seed)
@@ -112,8 +143,8 @@ def play_live(
     for seat, entry in enumerate(scenario.seat(entries)):
         name, _, arg = entry.partition(":")
         if name == "live":
-            model_id, seat_class = parse_live_arg(arg)
-            controllers.append(seat_class(adapters[model_id], ledger))
+            _, seat_class = parse_live_arg(split_effort(arg)[0])
+            controllers.append(seat_class(adapters[arg], ledger))
         else:
             controllers.append(make_controller(entry, seats_rng.fork(f"seat-{seat}")))
     game = Game(config, controllers, rng=rng, scenario=scenario)
