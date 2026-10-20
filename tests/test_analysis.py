@@ -426,6 +426,26 @@ def test_report_renders_from_a_dry_run(dry_run: Path) -> None:
     assert any(v["estimate"] is not None for v in damage.values())
 
 
+def test_run_spend_comes_from_the_spend_log_and_mode_from_run_json(
+    dry_run: Path, tmp_path: Path
+) -> None:
+    run = tmp_path / "run"
+    shutil.copytree(dry_run, run, ignore=shutil.ignore_patterns("report"))
+    # An aborted attempt's settled call and a reservation a crash never settled
+    # count toward the run's spend, though no complete transcript records them.
+    lines = [
+        {"kind": "reserve", "reservation": 1, "reserved_usd": 0.5},
+        {"kind": "call", "reservation": 1, "cost_usd": 0.25},
+        {"kind": "reserve", "reservation": 2, "reserved_usd": 1.0},
+    ]
+    (run / "spend.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines), "utf-8")
+    out, report = write_report(run, replicates=20)
+    assert report["run"]["mode"] == "dry"
+    assert report["run"]["run_spend_usd"] == 1.25
+    assert report["run"]["total_cost_usd"] == 0
+    assert "Spend: $1.25 for the whole run" in (out / "progress.md").read_text("utf-8")
+
+
 def test_report_is_deterministic_for_a_seed(dry_run: Path, tmp_path: Path) -> None:
     a = build_report(load_run(dry_run), replicates=100, seed=9)
     b = build_report(load_run(dry_run), replicates=100, seed=9)
