@@ -1,5 +1,5 @@
 """Command-line interface: ``zantine play ...``, ``replay``, ``schedule``, ``run``,
-``report``, and ``repro`` / ``commit`` / ``verify`` / ``release``."""
+``report``, ``calibrate``, and ``repro`` / ``commit`` / ``verify`` / ``release``."""
 
 from __future__ import annotations
 
@@ -64,6 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     runs.add_commands(sub)  # `zantine schedule`, `zantine run`
     report.add_command(sub)  # `zantine report`
     repro.add_commands(sub)  # `zantine repro`, `commit`, `verify`, `release`
+    _add_calibrate_parser(sub)
     args = parser.parse_args(argv)
     if args.command == "report":
         return report.command(parser, args)
@@ -73,6 +74,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return runs.command(parser, args)
     if args.command in repro.COMMANDS:
         return repro.command(parser, args)
+    if args.command == "calibrate":
+        return calibrate(parser, args)
 
     try:
         config = GameConfig(seed=args.seed, round_cap=args.round_cap, num_impostors=args.impostors)
@@ -98,6 +101,77 @@ def replay(parser: argparse.ArgumentParser, transcript: Path, out: Path | None) 
     view = write_replay(transcript, out)
     print(f"replay: {out} ({len(view['rounds'])} frames, {len(view['meetings'])} Meetings)")
     return 0
+
+
+def _add_calibrate_parser(sub: Any) -> None:
+    c = sub.add_parser(
+        "calibrate", help="solo task calibration: each Task kind alone, N trials per Model"
+    )
+    c.add_argument("--models", required=True, help="comma-separated Model IDs (models.toml)")
+    c.add_argument("--kinds", help="comma-separated Task kinds (default: every registered kind)")
+    c.add_argument("--trials", type=int, default=60, help="trials per kind per Model (default 60)")
+    c.add_argument("--seed", type=int, default=0, help="master seed for the trial variants")
+    c.add_argument("--out", type=Path, default=Path("runs/calibration"), help="results directory")
+    mode = c.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run", action="store_true", help="use each kind's reference solver ($0, no API)"
+    )
+    mode.add_argument(
+        "--live", action="store_true", help="allow paid API calls (also needs ZANTINE_LIVE=1)"
+    )
+    c.add_argument(
+        "--spend-cap",
+        type=float,
+        default=5.0,
+        help="hard limit in USD on calibration spend recorded in --out, earlier runs "
+        "included (default 5)",
+    )
+
+
+def calibrate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from zantine import calibration as cal
+    from zantine.harness.ledger import Ledger
+    from zantine.harness.pricing import load_models, model_spec
+    from zantine.tasks import task_kind_names
+
+    models = _names(args.models)
+    kinds = task_kind_names() if args.kinds is None else _names(args.kinds)
+    try:
+        cal.check_selection("models", models)
+        cal.check_selection("kinds", kinds)
+        ledger = Ledger(args.spend_cap)
+        if args.dry_run:
+            pool = load_models()
+            for model_id in models:
+                model_spec(model_id, pool)  # unknown Models fail even at $0
+            solvers = cal.reference_solvers()
+        else:
+            # The cap covers the whole results directory, so resuming never resets it.
+            ledger.spent_usd = cal.spent_usd(args.out / cal.TRIALS_FILE)
+            solvers = cal.model_solvers(models, ledger, live=args.live)
+        run = cal.calibrate(
+            models,
+            kinds,
+            out=args.out,
+            solvers=solvers,
+            trials=args.trials,
+            seed=args.seed,
+            ledger=ledger,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(cal.render_markdown(run.summary), end="")
+    if not args.dry_run:
+        print(f"spent ${ledger.spent_usd:.4f} of ${ledger.spend_cap_usd:.2f} cap (all runs)")
+    print(f"results: {args.out / cal.TRIALS_FILE}, {args.out / cal.SUMMARY_MD}")
+    if run.aborted:
+        print(f"ABORTED ({run.aborted}): {run.detail}")
+        return 1
+    return 0
+
+
+def _names(text: str) -> list[str]:
+    return [name.strip() for name in text.split(",") if name.strip()]
 
 
 def _write(game: Game, out: Path) -> None:
