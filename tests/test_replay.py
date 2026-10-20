@@ -9,11 +9,14 @@ from typing import Any
 
 import pytest
 
+from helpers import make_game
 from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.replay import build_view, load_records, render_html, write_replay
+from zantine.rules.crisis import TriggerCrisis
 from zantine.runner import play
+from zantine.seats.bots import PlaybookBot
 
 SEEDS = range(12)
 
@@ -225,6 +228,22 @@ def test_unknown_types_render_generically() -> None:
         {"seat": 1, "room": "Hub"},
     ]
     assert view["seats"][1]["controller"] == "m-1"
+
+
+def test_crisis_replays_without_naming_the_trigger() -> None:
+    game = make_game(bots={1: PlaybookBot({1: TriggerCrisis()})}, crisis_cooldown=0)
+    game.run()
+    view = view_of(game)
+    started = next(
+        it for it in items(view) if it["type"] == "crisis.started" and it["kind"] == "event"
+    )
+    trigger = game.state.player(1).name
+    assert f"triggered_by=[{trigger}]" in started["text"]
+    assert trigger not in started["public"] and "deadline=" in started["public"]
+    action = next(
+        it for it in items(view) if it["type"] == "action" and "crisis.trigger" in it["text"]
+    )
+    assert action["public"] is None
 
 
 def test_transcript_without_header_still_replays() -> None:

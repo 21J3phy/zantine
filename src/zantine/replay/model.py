@@ -48,10 +48,14 @@ SEAT_KEYS = frozenset(
         "ejected",
         "members",
         "witnesses",
+        "triggered_by",
+        "fixers",
     }
 )
 # Data keys (at any depth) that reveal a role, directly or by naming an Impostor.
-SPOILER_KEYS = frozenset({"role", "roles", "killer", "killers", "fellow_impostors", "impostors"})
+SPOILER_KEYS = frozenset(
+    {"role", "roles", "killer", "killers", "fellow_impostors", "impostors", "triggered_by"}
+)
 # Observation types only Impostors, victims or witnesses get; they reveal roles.
 SPOILER_OBSERVATIONS = frozenset({"role_assigned", "killed", "kill_witnessed"})
 # Words in an action kind or event type that suggest only an Impostor could do it.
@@ -532,14 +536,15 @@ def _generic_item(r: dict[str, Any], names: dict[int, str]) -> dict[str, Any]:
     else:
         fields = ", ".join(f"{k}={_fmt(k, v, names)}" for k, v in sorted(data.items()))
         _text(item, f"{type_}: {fields}" if fields else type_)
-    if _has_spoiler(data):
-        item["public"] = None
-    elif _impostor_hint(type_):
-        # Keep the event but not who did it.
-        fields = ", ".join(
-            f"{k}={_fmt(k, v, names)}" for k, v in sorted(data.items()) if k not in SEAT_KEYS
-        )
-        item["public"] = f"{type_}: {fields}" if fields else type_
+    hint = _impostor_hint(type_)
+    if r.get("kind") == "observation" and _has_spoiler(data):
+        item["public"] = None  # a private view that gives a role away
+    elif hint or _has_spoiler(data):
+        # Keep the event but drop who did it.
+        hidden = SPOILER_KEYS | SEAT_KEYS if hint else SPOILER_KEYS
+        rest = {k: v for k, v in data.items() if k not in hidden}
+        fields = ", ".join(f"{k}={_fmt(k, v, names)}" for k, v in sorted(rest.items()))
+        item["public"] = None if _has_spoiler(rest) else f"{type_}: {fields}" if fields else type_
     return item
 
 
