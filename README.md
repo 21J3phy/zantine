@@ -1,6 +1,6 @@
-# r3nch
+# Zantine
 
-Benchmarks for AI agents and teams.
+**Zantine Labs** builds benchmarks for AI agents and teams. Its benchmarks are published as the **Zantine Index**.
 
 The first benchmark is a text-based social-deduction game that asks: **Can a team of agents notice and contain a compromised member while still getting its shared work done?** It measures productivity and vigilance separately, alongside cost and other behavioral metrics.
 

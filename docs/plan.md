@@ -6,7 +6,7 @@ Running log of decisions from design sessions. Terms are defined in `../CONTEXT.
 
 ## Vision
 
-Become the go-to benchmark brand for AI agents (single agents, multi-agent teams, harnesses, orchestration, reliability, safety). Start niche and novel with this impostor game as the first product. The brand is **r3nch**, covering the broader agent-evaluation vision beyond this first game.
+Become the go-to benchmark brand for AI agents (single agents, multi-agent teams, harnesses, orchestration, reliability, safety). Start niche and novel with this impostor game as the first product. The company is **Zantine Labs** and its benchmarks are published as the **Zantine Index**. Both names cover the broader agent-evaluation vision beyond this first game (working names).
 
 ## Claim
 
