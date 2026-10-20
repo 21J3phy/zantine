@@ -342,12 +342,15 @@ def test_provider_errors_leave_trials_unfinished_or_stop_the_run(tmp_path: Path)
     # The fake client raises a returned exception; the adapter passes ProviderError through.
     def flaky(params: dict[str, Any]) -> Any:
         flaky.n = getattr(flaky, "n", 0) + 1
-        return ProviderError("overloaded", fatal=False) if flaky.n == 1 else solves(params)
+        overloaded = ProviderError("overloaded (529)", fatal=False, status=529)
+        return overloaded if flaky.n == 1 else solves(params)
 
     result, _ = run(tmp_path, flaky, trials=2, kinds=["sort_list"])
     first = cal.read_trials(tmp_path / cal.TRIALS_FILE)[1]
     assert first["status"] == "call" and first["outcome"] == "provider_error"
     assert "overloaded" in first["error"] and first["attempt"] == 1 and not first["ok"]
+    # An HTTP error status is a rejection: nothing was billed, nothing is held.
+    assert first["cost_usd"] == 0 and first["held_usd"] == 0
     assert cell(result.summary, "sort_list")["n"] == 1
     assert result.summary["kinds"]["sort_list"]["decision"] == "incomplete"
     result, client = run(tmp_path, trials=2, kinds=["sort_list"])
@@ -493,6 +496,57 @@ def test_an_answer_received_before_a_crash_is_graded_without_a_new_call(
     assert cell(result.summary, "sort_list")["verdict"] == "pass"
 
 
+def test_a_call_lost_in_transit_holds_its_worst_case_now_and_after_resume(
+    tmp_path: Path,
+) -> None:
+    # No HTTP status: the request may have been accepted and billed upstream.
+    def timeout(params: dict[str, Any]) -> Any:
+        return ProviderError("APITimeoutError: Request timed out.", fatal=False)
+
+    # Worst case per Fable call is ~$0.80, so after one held call a second can't fit.
+    result, client = run(tmp_path, timeout, cap=1.40, trials=3, kinds=["sort_list"])
+    assert len(client.messages.calls) == 1 and result.aborted == "spend_cap"
+    started, lost = cal.read_trials(tmp_path / cal.TRIALS_FILE)
+    assert lost["outcome"] == "provider_error" and lost["cost_usd"] == 0
+    assert lost["held_usd"] == started["reserved_usd"] > 0
+    assert cal.spent_usd(tmp_path / cal.TRIALS_FILE) == pytest.approx(lost["held_usd"])
+    assert result.summary["models"][MODEL]["held_usd"] == pytest.approx(lost["held_usd"])
+    assert result.summary["run"]["spent_this_run_usd"] == pytest.approx(lost["held_usd"])
+
+    # A CLI-style restart restores the hold, so the same cap allows no further call.
+    client = FakeClient(timeout)
+    ledger = Ledger(1.40)
+    ledger.spent_usd = cal.spent_usd(tmp_path / cal.TRIALS_FILE)
+    solvers = cal.model_solvers([MODEL], ledger, adapter_factory=fake_factory(client))
+    result = cal.calibrate(
+        [MODEL], ["sort_list"], out=tmp_path, solvers=solvers, trials=3, seed=3, ledger=ledger
+    )
+    assert result.aborted == "spend_cap" and client.messages.calls == []
+
+
+LEGACY_ROWS = {
+    "aborted": {"status": "aborted", "cost_usd": 0.7, "kind": "sort_list", "model": MODEL},
+    "provider_error": {"status": "provider_error", "cost_usd": 0.2, "kind": "sort_list"},
+    "done": {"status": "done", "solver": "solo-v1", "master_seed": 3, "trial": 0, "cost_usd": 0.1},
+}
+
+
+@pytest.mark.parametrize("status", sorted(LEGACY_ROWS))
+def test_a_journal_from_an_older_format_is_refused_before_any_call(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], status: str
+) -> None:
+    path = tmp_path / cal.TRIALS_FILE
+    path.write_text(json.dumps(LEGACY_ROWS[status]) + "\n")
+    with pytest.raises(ValueError, match="journal version 1, not 2"):
+        cal.spent_usd(path)
+    with pytest.raises(ValueError, match="use a new --out directory"):
+        run(tmp_path, trials=1, kinds=["sort_list"])
+    with pytest.raises(SystemExit):
+        main(["calibrate", "--models", MODEL, "--out", str(tmp_path), "--dry-run"])
+    assert "journal version 1" in capsys.readouterr().err
+    assert path.read_text() == json.dumps(LEGACY_ROWS[status]) + "\n"  # left untouched
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -544,7 +598,8 @@ def test_a_torn_multibyte_tail_never_hides_intact_records(tmp_path: Path) -> Non
 
 def test_a_damaged_earlier_record_is_an_error(tmp_path: Path) -> None:
     path = tmp_path / cal.TRIALS_FILE
-    path.write_bytes(b'{"status": "done"}\n{"stat\xc3\n{"status": "done"}\n')
+    ok = b'{"journal_version": 2, "status": "done"}\n'
+    path.write_bytes(ok + b'{"stat\xc3\n' + ok)
     with pytest.raises(ValueError, match=":2: damaged record"):
         cal.read_trials(path)
 

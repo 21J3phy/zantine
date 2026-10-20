@@ -79,6 +79,8 @@ from zantine.rng import GameRng
 from zantine.tasks import task_kind
 
 CALIBRATION_VERSION = 1
+# Bump when the shape of journal records changes; older journals are refused.
+JOURNAL_VERSION = 2
 DEFAULT_TRIALS = 60
 TRIALS_FILE = "trials.jsonl"
 SUMMARY_JSON = "summary.json"
@@ -345,7 +347,7 @@ def calibrate(
         "aborted": run.aborted,
         "detail": run.detail,
         "new_trials": sum(r["status"] == "done" for r in run.new_records),
-        "spent_this_run_usd": round(sum(r["cost_usd"] for r in new_calls), 6),
+        "spent_this_run_usd": round(math.fsum(r["cost_usd"] + r["held_usd"] for r in new_calls), 6),
         "spent_in_out_dir_usd": round(spent_usd(path), 6),
         "spend_cap_usd": ledger.spend_cap_usd if ledger else None,
     }
@@ -391,6 +393,7 @@ def _run_trial(
                     "outcome": event["outcome"],
                     "answer": event["answer"],
                     "reason": event["reason"],
+                    "held_usd": round(event.get("held_usd", 0.0), 8),
                 }
                 calls.append(record)
             emit(record)
@@ -431,6 +434,7 @@ def call_totals(calls: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "calls": len(calls),
         "failed_calls": sum(not c["ok"] for c in calls),
         "cost_usd": round(math.fsum(c["cost_usd"] for c in calls), 6),
+        "held_usd": round(math.fsum(c["held_usd"] for c in calls), 6),
     }
     return out | {f: sum(c[f] or 0 for c in calls) for f in _TOKEN_FIELDS}
 
@@ -461,6 +465,7 @@ class _Appender:
         return self.write
 
     def write(self, record: dict[str, Any]) -> None:
+        record = {"journal_version": JOURNAL_VERSION, **record}
         self.file.write(json.dumps(record, sort_keys=True, ensure_ascii=True) + "\n")
         self.file.flush()
 
@@ -478,31 +483,39 @@ def _parse(line: bytes) -> dict[str, Any] | None:
 
 def read_trials(path: Path) -> list[dict[str, Any]]:
     """Every record in a results file. Only the last line may be torn (a crash
-    mid-write); it is skipped. A damaged earlier line is an error."""
+    mid-write); it is skipped. A damaged earlier line is an error, and so is a
+    record from another journal version (its charges could not be counted)."""
     if not path.exists():
         return []
     *lines, tail = path.read_bytes().split(b"\n")
+    numbered = [(number, line) for number, line in enumerate(lines, 1) if line.strip()]
+    if tail.strip() and _parse(tail) is not None:
+        numbered.append((len(lines) + 1, tail))
     records = []
-    for number, line in enumerate(lines, 1):
-        if not line.strip():
-            continue
+    for number, line in numbered:
         record = _parse(line)
         if record is None:
             raise ValueError(f"{path}:{number}: damaged record; only the last line may be torn")
+        if record.get("journal_version") != JOURNAL_VERSION:
+            raise ValueError(
+                f"{path}:{number}: written by calibration journal version "
+                f"{record.get('journal_version', 1)}, not {JOURNAL_VERSION}; its spend can't be "
+                "counted, so use a new --out directory"
+            )
         records.append(record)
-    last = _parse(tail) if tail.strip() else None
-    return records + ([last] if last is not None else [])
+    return records
 
 
 def spent_usd(path: Path) -> float:
     """Total spend journaled in a results file, every configuration included.
 
-    Each returned call counts at its actual cost; a call that started but never
+    Each returned call counts at its actual cost plus anything held for it (a
+    call lost in transit counts at its worst case); a call that started but never
     returned (the process died mid-call) counts at its worst-case reservation.
     """
     records = read_trials(path)
     returned = {r["call_id"] for r in records if r["status"] == "call"}
-    actual = math.fsum(r["cost_usd"] for r in records if r["status"] == "call")
+    actual = math.fsum(r["cost_usd"] + r["held_usd"] for r in records if r["status"] == "call")
     reserved = math.fsum(
         r["reserved_usd"]
         for r in records
@@ -650,8 +663,12 @@ def render_markdown(summary: Mapping[str, Any]) -> str:
     for kind, k in summary["kinds"].items():
         detail = k["reason"] or ", ".join(k["failing_models"]) or "-"
         lines.append(f"| {kind} | {k['decision']} | {detail} |")
-    lines += ["", "| Model | Calls | Cost (USD) |", "|---|---|---|"]
+    lines += [
+        "",
+        "| Model | Calls | Cost (USD) | Held for lost calls (USD) |",
+        "|---|---|---|---|",
+    ]
     for model, m in summary["models"].items():
-        lines.append(f"| {model} | {m['calls']} | {m['cost_usd']:.4f} |")
+        lines.append(f"| {model} | {m['calls']} | {m['cost_usd']:.4f} | {m['held_usd']:.4f} |")
     lines += ["", f"Total cost: ${summary['total_cost_usd']:.4f}", ""]
     return "\n".join(lines)

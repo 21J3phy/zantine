@@ -137,6 +137,8 @@ class SoloOutcome:
 # Receives {"event": "started", "attempt", "reserved_usd"} just before each call is
 # sent, and {"event": "call", "attempt", "call": CallRecord, "outcome", "answer",
 # "reason"} when it returns; outcome is "answer", "unusable" or "provider_error".
+# A provider error also has "held_usd": the worst case held against the cap when
+# the charge is unknown (no HTTP status: lost in transit), else 0.
 Journal = Callable[[Mapping[str, Any]], None]
 
 
@@ -164,7 +166,14 @@ class SoloSolver:
         note = journal or (lambda event: None)
         first = len(self.ledger.records)
         retry: str | None = history[-1] if history else None
+        reserved: list[float] = []  # this attempt's worst-case cost, once it is sent
         for attempt in range(len(history) + 1, MAX_ATTEMPTS + 1):
+            reserved.clear()
+
+            def started(needed: float, attempt: int = attempt) -> None:
+                reserved.append(needed)
+                note({"event": "started", "attempt": attempt, "reserved_usd": needed})
+
             try:
                 response = self.ledger.send(
                     self.adapter,
@@ -172,12 +181,16 @@ class SoloSolver:
                     purpose=PURPOSE,
                     phase=self.kind,
                     attempt=attempt,
-                    on_start=lambda needed, a=attempt: note(
-                        {"event": "started", "attempt": a, "reserved_usd": needed}
-                    ),
+                    on_start=started,
                 )
             except ProviderError as exc:
-                note(_call(attempt, self.ledger.records[-1], "provider_error", None, str(exc)))
+                # An HTTP error status is a rejection, never billed. Without one the
+                # request was lost in transit and may still have been billed: hold
+                # its worst case against the cap.
+                held = reserved[0] if exc.status is None and reserved else 0.0
+                self.ledger.hold(held)
+                call = _call(attempt, self.ledger.records[-1], "provider_error", None, str(exc))
+                note(call | {"held_usd": held})
                 raise
             answer, retry = parse_answer(response)
             outcome = "answer" if retry is None else "unusable"

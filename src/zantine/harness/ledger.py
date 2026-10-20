@@ -108,6 +108,11 @@ class Ledger:
         self._record(model, meta, attempt, response, error=None)
         return response
 
+    def hold(self, amount_usd: float) -> None:
+        """Count ``amount_usd`` against the cap with no call record: e.g. the worst
+        case of a call lost in transit, which the provider may still have billed."""
+        self.spent_usd += amount_usd
+
     def _record(
         self,
         model: ModelSpec,
