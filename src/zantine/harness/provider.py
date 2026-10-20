@@ -5,14 +5,17 @@ one API call for its lab and normalizes the reply into a ``ProviderResponse``
 with ``Usage`` (including cached and thinking tokens). Adapters know nothing
 about the game, and Harnesses know nothing about any lab's API.
 
-Adding a provider (issue #10): subclass ``ProviderAdapter`` in its own module
-under ``harness/``, register a factory with ``@register_provider("name")``, set
-``provider = "name"`` for its models in ``models.toml``, and import the module at
-the bottom of this file. Factories must read API keys from the environment only.
+Adding a provider: subclass ``ProviderAdapter`` in its own module under
+``harness/`` (set ``provider`` and ``key_env``), register a factory with
+``register_provider("name")``, set ``provider = "name"`` for its models in
+``models.toml``, and import the module at the bottom of this file. Factories
+get the key via ``live_api_key(key_env)``, which refuses unless ``ZANTINE_LIVE=1``;
+send the lab's own effort value, ``model.effort_setting``.
 """
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
@@ -105,10 +108,43 @@ class ProviderError(Exception):
         self.status = status
 
 
+# HTTP statuses that will fail the same way on every call: stop the run.
+FATAL_STATUSES = frozenset({400, 401, 403, 404, 413, 422})
+
+
+def status_error(name: str, status: int, message: str) -> ProviderError:
+    """A ``ProviderError`` for an HTTP error status, fatal if retrying can't help."""
+    return ProviderError(
+        f"{name} ({status}): {message}", fatal=status in FATAL_STATUSES, status=status
+    )
+
+
+def is_transport_error(exc: BaseException) -> bool:
+    """A network failure or timeout (``httpx``/``httpx2``/stdlib), worth another attempt."""
+    if isinstance(exc, ConnectionError | TimeoutError):
+        return True
+    return any(c.__name__ == "TransportError" for c in type(exc).__mro__)
+
+
+def live_api_key(env_var: str) -> str:
+    """The API key from ``env_var``, only when live calls are enabled (``ZANTINE_LIVE=1``).
+
+    Every real adapter factory calls this first, so no client is built otherwise.
+    """
+    if os.environ.get("ZANTINE_LIVE") != "1":
+        raise ProviderError("live calls are disabled; set ZANTINE_LIVE=1", fatal=True)
+    key = os.environ.get(env_var)
+    if not key:
+        raise ProviderError(f"{env_var} is not set", fatal=True)
+    return key
+
+
 class ProviderAdapter(ABC):
     """Sends one ``HarnessRequest`` to one Model and normalizes the reply."""
 
     provider: str = "abstract"
+    # Environment variable holding this provider's API key (keys come from env only).
+    key_env: str = ""
 
     def __init__(self, model: ModelSpec) -> None:
         self.model = model
@@ -143,3 +179,7 @@ def make_adapter(model: ModelSpec) -> ProviderAdapter:
 
 
 from zantine.harness import anthropic_adapter as _anthropic_adapter  # noqa: E402, F401
+from zantine.harness import google_adapter as _google_adapter  # noqa: E402, F401
+from zantine.harness import meta_adapter as _meta_adapter  # noqa: E402, F401
+from zantine.harness import openai_adapter as _openai_adapter  # noqa: E402, F401
+from zantine.harness import xai_adapter as _xai_adapter  # noqa: E402, F401

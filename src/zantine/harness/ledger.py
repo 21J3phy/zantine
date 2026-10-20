@@ -58,6 +58,8 @@ class CallRecord:
     thinking_tokens: int | None
     cost_usd: float
     total_spent_usd: float
+    # The provider's own charge for the call, where its API reports one (xAI).
+    provider_cost_usd: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -123,6 +125,7 @@ class Ledger:
             thinking_tokens=usage.thinking_tokens if usage else None,
             cost_usd=round(cost, 8),
             total_spent_usd=round(self.spent_usd, 8),
+            provider_cost_usd=response.raw.get("provider_cost_usd") if response else None,
             **meta,
         )
         self.records.append(record)

@@ -10,7 +10,7 @@ import pytest
 from fake_provider import FakeClient, message, tool_use
 from zantine.harness.anthropic_adapter import AnthropicAdapter
 from zantine.harness.ledger import Ledger, SpendCapReached, summarize
-from zantine.harness.pricing import load_models, model_spec
+from zantine.harness.pricing import PER_TOKEN, PriceTier, load_models, model_spec
 from zantine.harness.provider import HarnessRequest, ProviderError, Usage
 
 POOL = {
@@ -120,3 +120,25 @@ def test_worst_case_grows_with_request_size() -> None:
     assert fable.worst_case_cost(30_000) > fable.worst_case_cost(3_000)
     cheap = replace(fable, max_output_tokens=0)
     assert cheap.worst_case_cost(3_000_000) == pytest.approx(12.5)
+
+
+def test_effort_is_a_per_run_level_mapped_to_each_labs_setting() -> None:
+    for spec in load_models().values():
+        assert spec.effort == "medium"
+        assert set(spec.efforts) >= {"low", "medium", "high"}
+        for level in ("low", "medium", "high"):
+            assert spec.at_effort(level).effort_setting == spec.efforts[level]
+    with pytest.raises(ValueError, match="effort"):
+        model_spec("claude-fable-5-1").at_effort("turbo")
+
+
+def test_long_context_tier_reprices_the_whole_call() -> None:
+    tier = PriceTier(
+        above_input_tokens=1000, input=4.0, cached_input=1.0, cache_write=4.0, output=12.0
+    )
+    spec = replace(model_spec("grok-4.7"), long_context=tier)
+    short = Usage(input_tokens=600, cached_input_tokens=400, output_tokens=1_000_000)
+    long = Usage(input_tokens=600, cached_input_tokens=401, output_tokens=1_000_000)
+    assert spec.cost(short) == pytest.approx(spec.output + PER_TOKEN * (600 * 2.0 + 400 * 0.5))
+    assert spec.cost(long) == pytest.approx(12.0 + PER_TOKEN * (600 * 4.0 + 401 * 1.0))
+    assert spec.worst_case_cost(3 * 2000) > replace(spec, long_context=None).worst_case_cost(6000)

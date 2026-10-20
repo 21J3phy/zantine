@@ -18,7 +18,6 @@ The SDK is imported lazily, so the rest of the package works without it.
 
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
 from zantine.harness.provider import (
@@ -28,7 +27,9 @@ from zantine.harness.provider import (
     ProviderResponse,
     ToolCall,
     Usage,
+    live_api_key,
     register_provider,
+    status_error,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +40,7 @@ EPHEMERAL = {"type": "ephemeral"}
 
 class AnthropicAdapter(ProviderAdapter):
     provider = "anthropic"
+    key_env = "ANTHROPIC_API_KEY"
 
     def __init__(self, model: ModelSpec, client: Any) -> None:
         """``client`` is an ``anthropic.Anthropic`` (or a test fake with ``messages.create``)."""
@@ -47,11 +49,7 @@ class AnthropicAdapter(ProviderAdapter):
 
     @classmethod
     def from_env(cls, model: ModelSpec) -> AnthropicAdapter:
-        if os.environ.get("ZANTINE_LIVE") != "1":
-            raise ProviderError("live calls are disabled; set ZANTINE_LIVE=1", fatal=True)
-        key = os.environ.get("ANTHROPIC_API_KEY")
-        if not key:
-            raise ProviderError("ANTHROPIC_API_KEY is not set", fatal=True)
+        key = live_api_key(cls.key_env)
         import anthropic
 
         return cls(model, anthropic.Anthropic(api_key=key))
@@ -64,7 +62,7 @@ class AnthropicAdapter(ProviderAdapter):
         return {
             "model": self.model.id,
             "max_tokens": self.model.max_output_tokens,
-            "output_config": {"effort": self.model.effort},
+            "output_config": {"effort": self.model.effort_setting},
             "system": [{"type": "text", "text": request.system, "cache_control": EPHEMERAL}],
             "tools": [
                 {
@@ -123,20 +121,11 @@ def normalize(message: Any) -> ProviderResponse:
     )
 
 
-# HTTP statuses that will fail the same way on every call: stop the run.
-_FATAL_STATUSES = {400, 401, 403, 404, 413, 422}
-
-
 def _provider_error(exc: Exception) -> ProviderError:
     import anthropic
 
     if isinstance(exc, anthropic.APIStatusError):
-        status = exc.status_code
-        return ProviderError(
-            f"{type(exc).__name__} ({status}): {exc.message}",
-            fatal=status in _FATAL_STATUSES,
-            status=status,
-        )
+        return status_error(type(exc).__name__, exc.status_code, exc.message)
     if isinstance(exc, anthropic.APIConnectionError):
         return ProviderError(f"{type(exc).__name__}: {exc}", fatal=False)
     raise exc
