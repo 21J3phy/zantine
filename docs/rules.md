@@ -31,7 +31,7 @@ The whole setup is generated from the game seed (`src/zantine/scenario.py`), so 
 | `crisis.fix` | anyone | a **Crisis** is active and your room is one of its two stations |
 | `tasks.work(task, answer)` | assignee | the **Task** is assigned to you, not yet done, and in your room; `answer` is text, a number, or a list of those |
 
-**Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip.
+**Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip. For live **Models**, an unusable reply (no tool call, the wrong tool, bad arguments, a refusal, or a transient API error) counts as an **Invalid Action** too. Meeting speech from a live **Model** follows the same rule: one retry, then the **Seat** says nothing that pass.
 
 Dead and ejected players take no further part.
 

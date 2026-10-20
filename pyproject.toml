@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Among Us-style social-deduction benchmark for teams of AI agents"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "anthropic>=1.15.0",
+]
 
 [project.scripts]
 zantine = "zantine.cli:main"
@@ -23,7 +25,7 @@ dev = [
 testpaths = ["tests"]
 addopts = "-q"
 markers = [
-    "live: calls a paid model API; skipped unless ZANTINE_LIVE=1",
+    "live: calls a paid model API; skipped unless ZANTINE_LIVE=1 and pytest --live",
 ]
 
 [tool.ruff]
@@ -35,4 +37,4 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["zantine", "helpers"]
+known-first-party = ["zantine", "helpers", "fake_provider"]

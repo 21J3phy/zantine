@@ -11,6 +11,11 @@ uv run zantine play --seed 7 --bots 'scripted*8,idle*2' --out runs/seed-7.jsonl
 uv run zantine replay runs/seed-7.jsonl   # writes runs/seed-7.html (demo viewer, not scored)
 uv run pytest                             # all tests (no network)
 uv run ruff check && uv run ruff format --check
+
+# One live Claude Fable 5.1 Seat with 9 bots. Paid: needs both opt-ins and a key.
+ZANTINE_LIVE=1 ANTHROPIC_API_KEY=... uv run zantine play --seed 7 \
+    --bots 'live:claude-fable-5-1,scripted*9' --live --spend-cap 10 --out runs/live-7.jsonl
+ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test (also paid)
 ```
 
 ## Module map (`src/zantine/`)
@@ -42,8 +47,15 @@ uv run ruff check && uv run ruff format --check
 | `seats/base.py` | `SeatController`: the interface for scripted bots now and live Model Harnesses later. |
 | `seats/bots.py` | `ScriptedBot`, `IdleBot`, `PlaybookBot` (fixed script, for tests). |
 | `seats/registry.py` | Named controller factories and the `--bots` spec parser. |
+| `seats/live.py` | `HarnessSeat`: a Seat played by a live Model through the Neutral Harness. |
+| `harness/neutral.py` | **The Neutral Harness**: system prompt, tools, memory format, request building and reply parsing. Everything a Model sees is defined here. |
+| `harness/provider.py` | Provider-adapter interface: `HarnessRequest` → `ProviderResponse` with normalized `Usage`; `@register_provider`. |
+| `harness/anthropic_adapter.py` | Anthropic Messages API adapter (effort, prompt caching, usage incl. thinking tokens). |
+| `harness/models.toml`, `harness/pricing.py` | Model IDs, provider, effort and prices per 1M tokens; `ModelSpec.cost(usage)`. |
+| `harness/ledger.py` | `Ledger`: every paid call goes through `Ledger.send` (spend cap check, call, price, record). |
+| `harness/live.py` | `play_live(...)`: the live gate, wiring live Seats into a game, clean abort, the `cost` record. |
 | `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
-| `cli.py` | `zantine play`, `zantine replay`. |
+| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`. |
 | `replay/model.py` | Demo replay viewer: transcript records → Round-by-Round view model (map positions, moves, bodies, log, Meetings). Reads transcripts only. |
 | `replay/render.py`, `replay/viewer.html` | Writes the view model into one self-contained HTML page (inline JS/CSS, no network). |
 
@@ -82,6 +94,17 @@ Hooks for later rules: `Task.fake` marks a Fake Task (shown and worked like a re
 
 **New seat controllers (live Models, other Harnesses)**: subclass `SeatController` (`choose_action`, `speak`, `vote`, and `describe()` for the transcript header, e.g. the model ID). Put it in its own module under `seats/`, register a factory with `@register_controller("name")`, and import that module at the bottom of `seats/registry.py`; it then works as `--bots name:arg`. A Harness turns `ActionContext` / `MeetingContext` into a prompt and parses the reply with `game.rules.parse_action(dict)`; unparseable output should be returned as `Invalid(reason, raw)` so the engine's retry/forfeit applies and is logged.
 
+**Live Models (the Neutral Harness)**: four separate layers, so each can change alone.
+
+1. *Harness* (`harness/neutral.py`, model-agnostic). Builds a `HarnessRequest` from a context: `system` (the one `SYSTEM_PROMPT`), `tools` (one strict JSON-Schema tool per registered action kind, plus `speak`, `vote`, `skip_vote`; all offered on every call), `memory` and `tail`. Memory is the Seat's observations, one rendered line each (plug-in observation types get a generic `[Round r] type: {json}` line), cut into fixed blocks of `MEMORY_BLOCK_LINES`; full blocks never change, so they are a cacheable prefix. `tail` holds the unfinished block, the current state (incl. `ctx.extra` per module), any retry reason and the request. Replies are parsed into an `Action` / speech / vote; anything unusable becomes `Invalid(reason)`, so the engine's one retry then forfeit applies (speech, which the engine doesn't retry, gets the same rule inside `HarnessSeat` and is logged as `harness.invalid_speech`). A plug-in action can override its tool schema with a `tool_parameters` ClassVar; its tool description is its class docstring. Bump `HARNESS_VERSION` when anything a Model sees changes. An alternative Harness (#27) is another module producing `HarnessRequest`s, reusing layers 2–4. The engine-side log summarizer (#11) plugs into memory rendering (`memory_lines` / `split_memory`).
+2. *Provider adapters* (`harness/provider.py`). `ProviderAdapter.send(HarnessRequest) -> ProviderResponse` makes exactly one call and returns tool calls, text, a normalized `stop_reason` and `Usage(input_tokens, cached_input_tokens, cache_write_tokens, output_tokens, thinking_tokens)`. `input_tokens` excludes both cache fields and `output_tokens` includes thinking, so `cost` is a plain dot product; adapters for APIs that count differently (e.g. cached tokens inside prompt tokens) must convert. Errors become `ProviderError(fatal=...)`: fatal ones (bad key, unknown model, bad request) stop the run; transient ones (rate limit, overload, network, after the SDK's own retries) become an Invalid Action. New providers (#10): a module under `harness/`, `@register_provider("name")`, imported at the bottom of `provider.py`; keys from env vars only, and the factory must refuse unless `ZANTINE_LIVE=1`.
+3. *Pricing* (`harness/models.toml`). One entry per Model: `provider`, `effort`, `input`, `cached_input`, `cache_write`, `output` (USD per 1M tokens), `max_output_tokens`, optional `price_valid_until` (expired prices are refused). Effort sweeps (#26) vary `effort` here.
+4. *Ledger and spend cap* (`harness/ledger.py`). `Ledger.send(adapter, request, purpose=..., phase=..., seat=..., round=...)` refuses a call whose worst-case cost (whole request at the dearest input rate plus the full output cap) would take total spend past the cap, raising `SpendCapReached`; otherwise it calls, prices and records a `CallRecord`. Non-seat callers (Claim extractor #13, Jev #15, summarizer #11) use the same ledger with their own `purpose`, so one cap covers the whole run; pass one `Ledger` to several `play_live` calls to cap a multi-game run.
+
+`harness/live.py:play_live` builds the game exactly as `runner.new_game` does (same scenario, seat order and bot RNG streams), binds each `HarnessSeat` to the game's `Rules` and event recorder, and writes every `CallRecord` as a `harness.call` event. On `SpendCapReached` or a fatal `ProviderError` it stops cleanly: the transcript so far is kept, followed by an `aborted` record. It always ends with a `cost` record.
+
+Anthropic specifics (`anthropic_adapter.py`): `output_config.effort` from `models.toml` (Fable 5.1 at `medium`); `thinking` omitted (always on; disabling is a 400); `tool_choice` `auto` with parallel calls off (forced tool choice is a 400 on Fable 5.1, so the prompt asks for exactly one call and tools are `strict`); cache breakpoints at the end of the system prompt (covers tools + system, shared by every Seat on the Model) and on the last memory block; thinking tokens from `usage.output_tokens_details.thinking_tokens`. No refusal `fallbacks`: they would let a different Model play the Seat, so a refusal is an Invalid Action instead.
+
 **Setup generation**: `scenario.build_scenario(config, rng)` returns the `Scenario` (`map`, `names`, `roles`, `seat_order`); the engine only consumes it, via `Game(..., scenario=)` or by building one from `rng.fork("scenario")`. `Game` takes controllers already in seat order; `Scenario.seat(lineup)` rearranges a lineup (spec order) into seats, which `runner.new_game` does for you. Add new generated content (e.g. Task codes) with its own `rng.fork(...)` so existing parts of a seed stay unchanged, and bump `SCENARIO_VERSION` whenever a change alters what an existing seed generates. Tests that need known room names use `tests/helpers.make_game`, which plays on `classic_scenario()` (`tiny_map()`, colour names, identity seat order).
 
 **Analysis (Claim Audit, metrics, graphs)**: read transcripts; don't import engine internals. Ground truth is in `event` records, each seat's view in `observation` records.
@@ -98,6 +121,11 @@ JSON Lines, keys sorted, one record per line, each with `seq` and `kind`:
 - `result`: `winner`, `reason`, `rounds`, `meetings`, `killed`, `ejected`, `survivors`, plus one key per module with `result_extra`. `tasks`: `productivity` (team), `done`, `total`, and `seats` (per **Seat**: `assigned`, `done`, `wrong`, `blocked`, `productivity`).
 
 Task records: event `tasks.generated` (every Task with its answer key, at setup), `tasks.graded` (`seat`, `task`, `correct`, `fake`), `tasks.blocked` (`seat`, `task`, `waiting_on`), `tasks.reassigned` (`task`, `from_seat`, `to_seat`); observations `tasks.assigned` (`tasks`: the seat's briefs), `tasks.graded` (`task`, `correct`), `tasks.blocked` (`task`, `waiting_on`), `tasks.reassigned` (`task`, `previous_assignee`).
+- Live runs only (`harness/live.py`):
+  - event `harness.call`: one per model call: `model`, `purpose`, `phase`, `seat`, `round`, `attempt`, `ok`, `error`, `stop_reason`, `input_tokens`, `cached_input_tokens`, `cache_write_tokens`, `output_tokens`, `thinking_tokens`, `cost_usd`, `total_spent_usd`.
+  - event `harness.invalid_speech`: `seat`, `model`, `meeting`, `pass_index`, `attempt`, `reason`, `forfeited`.
+  - `aborted` (instead of `result`, when the spend cap or a fatal API error stopped the game): `reason` (`spend_cap` / `provider_error`), `detail`, `round`, `meetings`.
+  - `cost` (always last): `complete`, `seats` (per Seat: `controller`, `calls`, `failed_calls`, all token counts, `cost_usd`, `invalid_actions`, `forfeits`), `game` (totals), `spend_cap_usd`, `run_spent_usd`.
 
 Bump `transcript.SCHEMA_VERSION` when changing existing record shapes; adding new event/observation types does not need a bump.
 
@@ -106,6 +134,6 @@ Bump `transcript.SCHEMA_VERSION` when changing existing record shapes; adding ne
 - **Determinism.** Same seed + same controllers ⇒ byte-identical transcript. All randomness goes through `GameRng` forks; never use the global `random`, `hash()`, sets in output order, or wall-clock time in the engine. Iterate seats in seat order.
 - **Hidden information.** Controllers only see context objects. Anything a player learns must go through `game.observe` so the transcript records it. Never put ground truth (roles, other rooms, Model identity) in a context.
 - **No network in tests.** `tests/conftest.py` blocks sockets for every test.
-- **Live Model calls are opt-in.** Code that calls a paid API must refuse to run unless explicitly enabled (an explicit CLI flag plus `ZANTINE_LIVE=1`), read keys from the environment only, and enforce a spend cap. Tests that need a live call are marked `@pytest.mark.live` and skip unless `ZANTINE_LIVE=1`; they never run by default.
+- **Live Model calls are opt-in.** Code that calls a paid API must refuse to run unless explicitly enabled (an explicit CLI flag plus `ZANTINE_LIVE=1`), read keys from the environment only, and go through a `Ledger` (spend cap). Tests that need a live call are marked `@pytest.mark.live` and skip unless `ZANTINE_LIVE=1` and `pytest --live`; they never run by default. Other tests use a fake client (`tests/fake_provider.py`).
 - **Small files.** One concern per module so parallel work rarely touches the same file.
 - **Terminology.** Use the terms in `CONTEXT.md` exactly (Round, Seat, Meeting, Ejection, ...).

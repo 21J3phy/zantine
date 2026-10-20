@@ -14,6 +14,8 @@ Seven **Models**: one **Flagship** per lab (the strongest model a developer can 
 
 Every model accepts a `medium` effort setting, so "each lab's own medium" works for the whole pool.
 
+The machine-readable copy of this table (IDs, provider, effort, prices incl. cache-write prices, and output caps) is `src/zantine/harness/models.toml`; the spend cap and cost reports use it. Keep the two in sync.
+
 ## Notes
 
 - **Anthropic:** Fable 5.1 is the **Flagship** ("for demanding reasoning and long-horizon agentic work"); Opus 5.5 is its **Sibling** (Anthropic's recommended default "for most workloads"). Mythos 5.1 is "limited availability," so it doesn't count as public API.

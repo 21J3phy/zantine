@@ -8,6 +8,7 @@ byte-identical files. Record kinds:
   submitted action, kill, vote and the role of every ejected player
 - ``observation``: one player's private view (``seat``, ``type``, ``round``, ``data``)
 - ``result``: winner, reason, rounds played
+- ``aborted`` / ``cost``: written by live runs (``harness.live``)
 
 Every record carries a ``seq`` number giving its position in the game.
 """
@@ -51,6 +52,10 @@ class Transcript:
 
     def result(self, **data: Any) -> None:
         self._append({"kind": "result", **data})
+
+    def record(self, kind: str, /, **data: Any) -> None:
+        """Any other top-level record (e.g. the live runner's ``cost`` and ``aborted``)."""
+        self._append({"kind": kind, **data})
 
     # Queries -----------------------------------------------------------------
 

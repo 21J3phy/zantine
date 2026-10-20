@@ -28,6 +28,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--round-cap", type=int, default=GameConfig.round_cap)
     p.add_argument("--out", type=Path, help="write the JSONL transcript here")
     p.add_argument("--quiet", action="store_true", help="print only the result line")
+    p.add_argument(
+        "--live",
+        action="store_true",
+        help="allow live:<model> seats to call paid APIs (also needs ZANTINE_LIVE=1)",
+    )
+    p.add_argument(
+        "--spend-cap",
+        type=float,
+        default=10.0,
+        help="hard limit in USD on API spend for live seats (default 10)",
+    )
     r = sub.add_parser("replay", help="write a static HTML replay of a transcript (not scored)")
     r.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
     r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
@@ -37,6 +48,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         config = GameConfig(seed=args.seed, round_cap=args.round_cap)
+        if args.live or "live" in args.bots:
+            return _play_live(args, config)
         game = play(config, args.bots)
     except ValueError as exc:
         parser.error(str(exc))
@@ -44,9 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_timeline(game)
     print_result(game)
     if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        game.transcript.write(args.out)
-        print(f"transcript: {args.out}")
+        _write(game, args.out)
     return 0
 
 
@@ -59,6 +70,36 @@ def replay(parser: argparse.ArgumentParser, transcript: Path, out: Path | None) 
     view = write_replay(transcript, out)
     print(f"replay: {out} ({len(view['rounds'])} frames, {len(view['meetings'])} Meetings)")
     return 0
+
+
+def _write(game: Game, out: Path) -> None:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    game.transcript.write(out)
+    print(f"transcript: {out}")
+
+
+def _play_live(args: argparse.Namespace, config: GameConfig) -> int:
+    from zantine.harness.live import play_live
+
+    run = play_live(config, args.bots, spend_cap_usd=args.spend_cap, live=args.live)
+    game = run.game
+    if not args.quiet:
+        print_timeline(game)
+    if run.aborted:
+        print(f"ABORTED ({run.aborted}) in round {game.state.round}: {run.detail}")
+    else:
+        print_result(game)
+    for s in run.cost["seats"]:
+        if s["calls"]:
+            print(
+                f"  seat {s['seat']} {s['controller'].get('model')}: {s['calls']} calls, "
+                f"${s['cost_usd']:.4f}, in {s['input_tokens']} / cached "
+                f"{s['cached_input_tokens']} / out {s['output_tokens']} "
+                f"(thinking {s['thinking_tokens']}), invalid {s['invalid_actions']}"
+            )
+    print(f"spent ${run.ledger.spent_usd:.4f} of ${run.ledger.spend_cap_usd:.2f} cap")
+    _write(game, args.out or Path(f"runs/live-seed-{config.seed}.jsonl"))
+    return 1 if run.aborted else 0
 
 
 def print_timeline(game: Game) -> None:
