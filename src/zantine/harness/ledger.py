@@ -94,11 +94,14 @@ class Ledger:
         attempt: int = 1,
         harness: str | None = None,
         harness_version: int | None = None,
+        on_start: Callable[[float], None] | None = None,
     ) -> ProviderResponse:
         """Make one metered call. Raises ``SpendCapReached`` or ``ProviderError``.
 
         Seats pass their ``harness`` name and version, so calls made by different
         Harnesses for the same Model are logged with the same fields side by side.
+        ``on_start`` gets the call's worst-case cost once the cap allows it, just
+        before the request is sent (so a caller can journal the call as in flight).
         """
         model = adapter.model
         needed = model.worst_case_cost(request.text_size())
@@ -113,6 +116,8 @@ class Ledger:
             "harness_version": harness_version,
         }
         self._reserve(model, needed, attempt)
+        if on_start is not None:
+            on_start(needed)
         try:
             response = adapter.send(request)
         except ProviderError as exc:
@@ -120,6 +125,11 @@ class Ledger:
             raise
         self._record(model, meta, attempt, response, error=None)
         return response
+
+    def hold(self, amount_usd: float) -> None:
+        """Count ``amount_usd`` against the cap with no call record: e.g. the worst
+        case of a call lost in transit, which the provider may still have billed."""
+        self.spent_usd += amount_usd
 
     def _reserve(self, model: ModelSpec, needed: float, attempt: int) -> None:
         """Called once a call has passed the cap check, before it is sent; every
