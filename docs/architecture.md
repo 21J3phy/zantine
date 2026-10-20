@@ -182,7 +182,7 @@ Relay records: ground-truth `relay.generated` (initial parts with serial and tam
 - Live runs only (`harness/live.py`):
   - event `harness.call`: one per model call: `model`, `purpose`, `phase`, `seat`, `round`, `attempt`, `ok`, `error`, `stop_reason`, `input_tokens`, `cached_input_tokens`, `cache_write_tokens`, `output_tokens`, `thinking_tokens`, `cost_usd`, `total_spent_usd`, `provider_cost_usd` (the provider's own charge, where its API reports one: xAI; else null), `harness` and `harness_version` (the Seat's Harness, e.g. `neutral`, 5; null for non-seat calls).
   - event `harness.invalid_speech`: `seat`, `model`, `meeting`, `pass_index`, `attempt`, `reason`, `forfeited`.
-  - event `harness.notes` (agent-loop Harness only): `seat`, `model`, `round`, `phase`, `text` (the Seat's notes after an `update_notes` call).
+  - event `harness.notes` (agent-loop Harness only): `seat`, `model`, `round`, `phase`, `text` (the Seat's notes after an `update_notes` call). Private: the replay viewer never shows them as speech, and only with roles revealed.
   - `aborted` (instead of `result`, when the spend cap or a fatal API error stopped the game): `reason` (`spend_cap` / `provider_error`), `detail`, `round`, `meetings`.
   - `cost` (always last): `complete`, `seats` (per Seat: `controller`, `calls`, `failed_calls`, all token counts, `cost_usd`, `invalid_actions`, `forfeits`), `models` (per live Model: `provider`, `effort`, `effort_setting`, `calls`, `failed_calls`, all token counts incl. `thinking_tokens`, `cost_usd`), `harnesses` (per Harness label such as `neutral-v5`: `seats`, `calls`, `failed_calls`, all token counts, `cost_usd`), `game` (totals), `spend_cap_usd`, `run_spent_usd`.
 
