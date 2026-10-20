@@ -88,7 +88,7 @@ Risk: player speech is adversarial, and Jev doesn't treat input as hostile. Pass
 
 ## Budget & funding
 
-- Estimate (rough, unverified Opus pricing): ~460 calls and ~4.6M input / ~0.7M output tokens per game → ~$15–40 per game. A solid v1 (~400 games) ≈ $6K–15K.
+- Estimate (with verified prices, 2026-10-20): ~460 calls and ~4.6M input / ~0.7M output tokens per game → ~$25–45 per Balanced Lobby game. v1 is planned at 240 games (see `sample-size.md`) ≈ $6K–11K.
 - Personal subscriptions (Claude $100, Codex $100) are for **building** the engine, not for powering **Seats**. Running seats through them would break the **Neutral Harness**, would only cover 2 of 5 models, and would hit rate limits. Check each subscription's terms before any automated use.
 - Plan: request researcher credits from labs. Strengthen applications with pilot data and, ideally, a Purdue faculty sponsor.
 - Known programs (verify before applying): OpenAI Researcher Access Program (~$1K API credits, reviewed quarterly); Anthropic AI for Science (biology-focused, likely poor fit); Meta Model API gives $20 to new accounts. No research-credit program found for xAI or Google Gemini.

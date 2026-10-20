@@ -41,8 +41,8 @@ Exact IDs should be re-checked before each run.
 
 | Lab | Model | API ID | List price, in / out per 1M tokens |
 | --- | --- | --- | --- |
-| Anthropic | Claude Opus 5.5 | `claude-opus-5-5` | not checked |
-| OpenAI | [GPT-6 Astra](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-6-astra.html) | `gpt-6-astra` | $10 / $50 |
+| Anthropic | [Claude Fable 5.1](https://platform.claude.com/docs/en/about-claude/models/overview) | `claude-fable-5-1` | $10 / $50 |
+| OpenAI | [GPT-6 Astra](https://developers.openai.com/api/docs/models) | `gpt-6-astra` | $10 / $50 |
 | Google | [Gemini 4 Argon](https://ai.google.dev/gemini-api/docs/models/gemini-4-argon) | `gemini-4-argon` | $2 / $10 until Nov 30, then $4 / $20 |
 | xAI | [Grok 4.7](https://docs.x.ai/developers/grok-4-7) | `grok-4.7` | $2 / $6 |
 | Meta | [Muse Wonder](https://about.fb.com/news/2026/10/introducing-muse-wonder-models/) | `muse-wonder-1.0` | $4 / $20 |
@@ -151,12 +151,12 @@ This tests whether a player who can talk more ends up steering the team, even wh
 
 ## Open questions
 
-- [ ] **Games per configuration:** how many repeats does each **Impostor Pairing** need? Measure the variance in the ~$400 micro-pilot (~10 games), then size the full v1 for lab credits.
+- [x] **Games per configuration:** see `sample-size.md`. v1 is planned at 12 blocks (240 games), with a precision-based stopping rule (earliest stop 6 blocks, cap 15). The pilot re-estimates the variance.
 - [x] **Task catalog:** settled. See `plan.md` → Task catalog. Still open: how many **Tasks** per crewmate (tune in the pilot).
 - [ ] **Map and kill details:** room layout, kill cooldown length, and the exact round cap.
 - [x] **Claim extractor:** a fixed-weight open-weight model from outside the pool; fall back to two pool models from different labs if it isn't accurate enough. Still open: which specific model (choose after testing on **Planted Claims**).
 - [x] **Teamwork metric:** added **Disclosure Rate** and **Disclosure Lag** to cover information sharing.
-- [ ] **Model pool checks:** confirm `gpt-6-astra` against OpenAI's own docs, and record Opus 5.5 pricing.
+- [x] **Model pool checks:** verified on 2026-10-20 against each lab's docs. Anthropic's **Flagship** is Fable 5.1, not Opus 5.5 (see `model-pool.md`).
 - [x] **Publishing:** open engine and rules; tasks, codes, maps and names generated from a seed for each game; sample transcripts published; official seeds kept private. No leaderboard or composite score; results are published as graphs.
 
 ## Sources
