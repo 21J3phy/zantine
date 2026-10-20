@@ -36,16 +36,19 @@ from zantine.rules.actions import Action, Invalid
 from zantine.rules.registry import Rules
 
 HARNESS_NAME = "neutral"
-HARNESS_VERSION = 1
+HARNESS_VERSION = 2
 MEMORY_BLOCK_LINES = 8
 
 SYSTEM_PROMPT = """\
 You are playing a text-based social deduction game in the style of Among Us, as one of 10 players.
 
-Roles: 8 Crewmates and 2 Impostors. Crewmates win by ejecting both Impostors or by completing \
-every Task. Impostors win when living Impostors are at least as many as living Crewmates, when a \
-Crisis is not fixed in time, or when the game reaches its Round limit. Each Impostor knows who \
-the other Impostor is; Crewmates are told nothing about anyone's role.
+Roles: every player is a Crewmate or an Impostor. There are 0 to 2 Impostors; nobody is told \
+the exact number, and there may be none. Crewmates win by completing every Task. Ejecting every \
+Impostor does not end the game: play goes on until the Tasks are done or the Round limit is \
+reached. Impostors win when living Impostors are at least as many as living Crewmates, when a \
+Crisis is not fixed in time, or when the game reaches its Round limit with an Impostor still in \
+play. Each Impostor knows who the other Impostor is, if there is one; Crewmates are told nothing \
+about anyone's role.
 
 Rounds: in each Round every living player picks one action at the same time, without seeing \
 anyone else's choice, and all actions resolve together in this order: kills, then movement, \

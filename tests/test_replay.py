@@ -14,6 +14,7 @@ from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.replay import build_view, load_records, render_html, write_replay
+from zantine.rules.actions import CallMeeting
 from zantine.rules.crisis import TriggerCrisis
 from zantine.runner import play
 from zantine.seats.bots import PlaybookBot
@@ -304,3 +305,16 @@ def test_cli_replay(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert "replay:" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         main(["replay", str(tmp_path / "missing.jsonl")])
+
+
+def test_containment_replays_but_is_hidden_with_roles() -> None:
+    bots = {seat: PlaybookBot(votes={1: 0, 2: 1}) for seat in range(10)}
+    bots[3].actions[1] = CallMeeting()
+    bots[4].actions[2] = CallMeeting()
+    game = make_game(bots=bots, round_cap=3, impostors=(0, 1), num_impostors=2)
+    game.run()
+    view = view_of(game)
+    contained = [it for it in items(view) if it["type"] == "containment"]
+    assert len(contained) == 1
+    assert contained[0]["text"].startswith("Containment") and contained[0]["public"] is None
+    assert view["result"]["text"] == "No winner by round_cap after 3 Rounds"

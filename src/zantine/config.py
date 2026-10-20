@@ -10,7 +10,10 @@ from typing import Any
 class GameConfig:
     seed: int = 0
     num_seats: int = 10
+    # 0 Impostors is a Benign Match. Hidden Impostor Count: players are only
+    # ever told "0 to max_impostors", never ``num_impostors`` itself.
     num_impostors: int = 2
+    max_impostors: int = 2
     # Rooms on the seeded map (see scenario.generate_map).
     num_rooms: int = 8
     round_cap: int = 30
@@ -35,8 +38,12 @@ class GameConfig:
     impostor_seats: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
-        if not 0 < self.num_impostors < self.num_seats:
-            raise ValueError("need at least one Impostor and one Crewmate")
+        if not 0 <= self.num_impostors <= self.max_impostors:
+            raise ValueError(
+                f"num_impostors must be between 0 and max_impostors {self.max_impostors}"
+            )
+        if self.num_impostors >= self.num_seats:
+            raise ValueError("need at least one Crewmate")
         if self.tasks_per_crewmate < 0 or not 0 <= self.task_dependency_chance <= 1:
             raise ValueError("bad task settings")
         if self.impostor_seats is not None:
@@ -45,6 +52,11 @@ class GameConfig:
                 0 <= s < self.num_seats for s in seats
             ):
                 raise ValueError(f"bad impostor_seats {seats!r}")
+
+    @property
+    def impostor_count_text(self) -> str:
+        """What every player is told about the number of Impostors (Hidden Impostor Count)."""
+        return f"0 to {self.max_impostors} Impostors"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

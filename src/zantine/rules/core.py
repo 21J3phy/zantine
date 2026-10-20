@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from zantine.rules.actions import CallMeeting, Kill, Move, Report, Wait
 from zantine.rules.registry import GameModule, MeetingRequest, RoundContext, Rules
-from zantine.rules.win import impostors_ejected, parity
+from zantine.rules.win import parity
 from zantine.state import Body
 from zantine.vision import emit_room_snapshots
 
@@ -29,7 +29,6 @@ class CoreModule(GameModule):
         rules.add_resolver(300, "core.meeting_request", resolve_meeting_requests)
         rules.add_resolver(900, "core.cooldowns", tick_cooldowns)
         rules.add_resolver(1000, "core.snapshots", lambda game, rc: emit_room_snapshots(game))
-        rules.add_win_condition(100, "core.impostors_ejected", impostors_ejected)
         rules.add_win_condition(200, "core.parity", parity)
 
 

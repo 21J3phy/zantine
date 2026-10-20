@@ -8,6 +8,7 @@ How the code is laid out, where new features plug in, and the conventions every 
 uv sync                                   # create .venv with dev tools
 uv run zantine play --seed 7              # one 10-seat game with scripted bots
 uv run zantine play --seed 7 --bots 'scripted*8,idle*2' --out runs/seed-7.jsonl
+uv run zantine play --seed 7 --impostors 0       # a Benign Match
 uv run zantine replay runs/seed-7.jsonl   # writes runs/seed-7.html (demo viewer, not scored)
 uv run pytest                             # all tests (no network)
 uv run ruff check && uv run ruff format --check
@@ -22,7 +23,7 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test (also paid)
 
 | Module | Responsibility |
 | --- | --- |
-| `config.py` | `GameConfig`: every tunable number (seats, Impostors, round cap, cooldowns, Talk Budget, ...). |
+| `config.py` | `GameConfig`: every tunable number (seats, Impostors, round cap, cooldowns, Talk Budget, ...). `num_impostors` may be 0 to `max_impostors`; players only ever see `impostor_count_text` ("0 to 2 Impostors"). |
 | `rng.py` | `GameRng`: the only source of randomness. `fork(label)` gives independent named streams. |
 | `scenario.py` | Builds the `Scenario` (generated map, names, seat order, roles) from the seed; `classic_scenario()` is the fixed setup for tests. `SCENARIO_VERSION` is recorded in the header. |
 | `map.py` | `GameMap` (rooms, corridors, meeting room) and the hard-coded `tiny_map()` used by `classic_scenario()`. |
@@ -32,7 +33,8 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test (also paid)
 | `rules/registry.py` | `Rules`, `GameModule`, `RoundContext`, `MeetingRequest`: the plug-in surface. |
 | `rules/core.py` | `CoreModule`: kill, move, report, emergency Meeting, cooldowns, snapshots. |
 | `rules/crisis.py` | `CrisisModule`: Impostor-triggered **Crisis** (`crisis.trigger` / `crisis.fix`, resolver 500, win condition 300). State in `ext["crisis"]`. |
-| `rules/win.py` | Core win conditions (Impostors ejected, parity). |
+| `rules/win.py` | Core win condition (parity) and the round-cap winner. |
+| `rules/containment.py` | `ContainmentModule`: records **Containment** (every Impostor ejected) as a ground-truth event and in `result["containment"]`; never ends the game, never tells players. |
 | `rules/tasks.py` | `TasksModule`: assigns Tasks, `tasks.work`, private grading, Task Graph blocking, reassignment after Meetings, the `tasks_done` win, Productivity in the result. |
 | `tasks/base.py` | `TaskKind`, `TaskContent` and the Task-kind registry (`register_task_kind`, `task_kind`). |
 | `tasks/steps.py` | Solo step kinds (`sort_list`, `lookup_value`): the dependent-solo family. |
@@ -74,7 +76,7 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test (also paid)
 
 - `rules.register_action(cls)`: new `Action` subclasses with a unique `kind`; prefix with the module name if it could collide (e.g. `tasks.work`).
 - `rules.add_resolver(order, name, fn)`: a step run every Round. Order bands: 100 kills, 200 movement, 300 meeting requests, **400–899 free for plug-ins**, 900 cooldowns, 1000 snapshots. Use `rc.acting(MyAction)` to get surviving actors; set `rc.meeting` to request a Meeting.
-- `rules.add_win_condition(order, name, fn)`: core uses 100 and 200, Crisis 300, Tasks 400; return `(Team, reason)` or `None`.
+- `rules.add_win_condition(order, name, fn)`: core uses 200 (parity), Crisis 300, Tasks 400; return `(Team, reason)` or `None`. Ejecting every Impostor is not a win (see `rules/containment.py`). `Team.NONE` is only used for a round cap with no Impostor in play.
 - `on_setup(game)`, `on_meeting_end(game, meeting)` hooks.
 - `context_extra(game, seat)`: data that appears in that seat's `ctx.extra[module_name]` (e.g. its assigned Tasks).
 - `result_extra(game)`: data added to the transcript's `result` record under `result[module_name]` (e.g. Productivity).
@@ -87,7 +89,7 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test (also paid)
 **New Task kinds (split-key, chain relay, audit, ...)**: the Task framework in `tasks/` has three layers.
 
 1. *Kind* (`tasks/base.py`): subclass `TaskKind`, set a unique `name` (and `seats` if more than one player must take part), implement `generate(rng) -> TaskContent` (content and hidden answer key from the seed only), `grade(content, answer) -> bool` and `solve(brief)` (a reference solution from the brief alone, used by scripted bots and tests). Override `brief(content, slot)` when assignees see different information, and `solo_brief(content)` for solo calibration. Decorate with `@register_task_kind` and import the module from `tasks/__init__.py`.
-2. *Instance and graph* (`tasks/graph.py`): a `Task` places one `TaskContent` in a game (id, room, `assignees`, `requires`). `TaskGraph` holds every Task in id order; prerequisites must come earlier, so it is acyclic by construction. `waiting_on(id)` gives unfinished prerequisites, `counted()` the Tasks that count toward Productivity. `build_task_graph` currently only places solo steps (`seats == 1`); multi-seat kinds extend it (or add Tasks to the same `TaskGraph`) to choose several assignees.
+2. *Instance and graph* (`tasks/graph.py`): a `Task` places one `TaskContent` in a game (id, room, `assignees`, `requires`). `TaskGraph` holds every Task in generation order; prerequisites must come earlier, so it is acyclic by construction. `waiting_on(id)` gives unfinished prerequisites, `counted()` the Tasks that count toward Productivity. Ids come from `task_ids(rng, n)` (`T10`–`T99`, never sequential, so they don't reveal the crew size); use it for new Tasks too. `build_task_graph` currently only places solo steps (`seats == 1`); multi-seat kinds extend it (or add Tasks to the same `TaskGraph`) to choose several assignees.
 3. *Game rules* (`rules/tasks.py`): `TasksModule` owns the `TaskBoard` in `state.ext["tasks"]` (graph, per-seat stats, what each seat was told). `tasks.work` grades through the kind's `grade`; blocking, reassignment, the win and Productivity are kind-independent. Kind-specific timing or handoff rules belong in their own `GameModule` that reads and updates the same board (`rules.tasks.board(state)`).
 
 Hooks for later rules: `Task.fake` marks a Fake Task (shown and worked like a real one, never counted toward Productivity or the crew win); Sabotage of a Shared Task belongs in that kind's `grade`. `tasks.graded` events carry `correct` and `fake`, so analysis can tell real work from fake work. `run_solo_trial(kind, seed, solver)` runs a fresh instance of any registered kind outside a game with any `solver(brief) -> answer` (a Model Harness for calibration); `run_solo_trials` repeats it over many seeds.
@@ -116,9 +118,9 @@ Anthropic specifics (`anthropic_adapter.py`): `output_config.effort` from `model
 JSON Lines, keys sorted, one record per line, each with `seq` and `kind`:
 
 - `header`: `schema`, `seed`, `scenario_version`, `config`, `map`, `modules`, `seats` (`seat`, `name`, `role`, `controller`).
-- `event`: ground truth, `{round, type, data}`. Core types: `action`/`vote` (every attempt, with `valid`/`reason`), `kill`, `move`, `meeting_requested`, `meeting_started`, `bodies_cleared`, `speaking_order`, `statement`, `vote_tally`, `ejection` (with role), `meeting_ended`, `game_over`.
+- `event`: ground truth, `{round, type, data}`. Core types: `action`/`vote` (every attempt, with `valid`/`reason`), `kill`, `move`, `meeting_requested`, `meeting_started`, `bodies_cleared`, `speaking_order`, `statement`, `vote_tally`, `ejection` (with role), `containment` (`meeting`, `impostors`), `meeting_ended`, `game_over`.
 - `observation`: `{round, seat, type, data}`, exactly what that seat was told. Types are listed in `observations.py`.
-- `result`: `winner`, `reason`, `rounds`, `meetings`, `killed`, `ejected`, `survivors`, plus one key per module with `result_extra`. `tasks`: `productivity` (team), `done`, `total`, and `seats` (per **Seat**: `assigned`, `done`, `wrong`, `blocked`, `productivity`).
+- `result`: `winner` (`crew`, `impostors`, or `none`), `reason`, `rounds`, `meetings`, `killed`, `ejected`, `survivors`, plus one key per module with `result_extra`. `containment`: `contained`, `round`, `meeting`. `tasks`: `productivity` (team), `done`, `total`, and `seats` (per **Seat**: `assigned`, `done`, `wrong`, `blocked`, `productivity`).
 
 Task records: event `tasks.generated` (every Task with its answer key, at setup), `tasks.graded` (`seat`, `task`, `correct`, `fake`), `tasks.blocked` (`seat`, `task`, `waiting_on`), `tasks.reassigned` (`task`, `from_seat`, `to_seat`); observations `tasks.assigned` (`tasks`: the seat's briefs), `tasks.graded` (`task`, `correct`), `tasks.blocked` (`task`, `waiting_on`), `tasks.reassigned` (`task`, `previous_assignee`).
 - Live runs only (`harness/live.py`):
@@ -133,6 +135,7 @@ Bump `transcript.SCHEMA_VERSION` when changing existing record shapes; adding ne
 
 - **Determinism.** Same seed + same controllers ⇒ byte-identical transcript. All randomness goes through `GameRng` forks; never use the global `random`, `hash()`, sets in output order, or wall-clock time in the engine. Iterate seats in seat order.
 - **Hidden information.** Controllers only see context objects. Anything a player learns must go through `game.observe` so the transcript records it. Never put ground truth (roles, other rooms, Model identity) in a context.
+- **Hidden Impostor Count.** Never show players the real number of Impostors or anything it can be derived from (config, crew size, Task count, sequential ids, Containment). Harness prompts say "0 to 2 Impostors" (`ctx.impostor_count`). `tests/test_hidden_count.py` scans every context and observation for leaks; keep it passing.
 - **No network in tests.** `tests/conftest.py` blocks sockets for every test.
 - **Live Model calls are opt-in.** Code that calls a paid API must refuse to run unless explicitly enabled (an explicit CLI flag plus `ZANTINE_LIVE=1`), read keys from the environment only, and go through a `Ledger` (spend cap). Tests that need a live call are marked `@pytest.mark.live` and skip unless `ZANTINE_LIVE=1` and `pytest --live`; they never run by default. Other tests use a fake client (`tests/fake_provider.py`).
 - **Small files.** One concern per module so parallel work rarely touches the same file.
