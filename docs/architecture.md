@@ -25,6 +25,7 @@ uv run ruff check && uv run ruff format --check
 | `rules/actions.py` | `Action` base class and core actions. Each action validates itself. `Invalid` = unacceptable response. |
 | `rules/registry.py` | `Rules`, `GameModule`, `RoundContext`, `MeetingRequest`: the plug-in surface. |
 | `rules/core.py` | `CoreModule`: kill, move, report, emergency Meeting, cooldowns, snapshots. |
+| `rules/crisis.py` | `CrisisModule`: Impostor-triggered **Crisis** (`crisis.trigger` / `crisis.fix`, resolver 500, win condition 300). State in `ext["crisis"]`. |
 | `rules/win.py` | Core win conditions (Impostors ejected, parity). |
 | `rules/__init__.py` | `default_modules()` / `default_rules()`: the list of modules a normal game uses. |
 | `engine.py` | `Game`: the Round loop, asking seats (with the Invalid Action retry), contexts, recording. |
@@ -53,7 +54,7 @@ uv run ruff check && uv run ruff format --check
 
 - `rules.register_action(cls)`: new `Action` subclasses with a unique `kind`; prefix with the module name if it could collide (e.g. `tasks.work`).
 - `rules.add_resolver(order, name, fn)`: a step run every Round. Order bands: 100 kills, 200 movement, 300 meeting requests, **400–899 free for plug-ins**, 900 cooldowns, 1000 snapshots. Use `rc.acting(MyAction)` to get surviving actors; set `rc.meeting` to request a Meeting.
-- `rules.add_win_condition(order, name, fn)`: core uses 100 and 200; return `(Team, reason)` or `None`.
+- `rules.add_win_condition(order, name, fn)`: core uses 100 and 200, Crisis uses 300; return `(Team, reason)` or `None`.
 - `on_setup(game)`, `on_meeting_end(game, meeting)` hooks.
 - `context_extra(game, seat)`: data that appears in that seat's `ctx.extra[module_name]` (e.g. its assigned Tasks).
 - Keep module state in `game.state.ext[module_name]`, not new fields on `GameState`.
