@@ -12,6 +12,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+from helpers import make_game
+from zantine import runs
 from zantine.analysis.bootstrap import ratio_estimates, resample_weights
 from zantine.analysis.graphs import convex_hull, render_all
 from zantine.analysis.metrics import GameRow, SeatRow, game_row, load_run
@@ -25,8 +27,11 @@ from zantine.analysis.report import (
 )
 from zantine.analysis.sabotage import sabotage_damage
 from zantine.cli import main
+from zantine.rules.crisis import TriggerCrisis
+from zantine.rules.tasks import board
 from zantine.runs import create_run, execute
 from zantine.schedule import load_pool, make_manifest
+from zantine.seats.bots import PlaybookBot
 
 POOL = load_pool()
 ALPHA = sorted(POOL)
@@ -313,6 +318,30 @@ def test_unfinished_games_are_restricted_to_the_cap(reason: str, rounds: int) ->
     assert g.restricted_containment == 30
 
 
+def test_work_finished_in_the_round_an_impostor_win_fires_counts_as_finished() -> None:
+    """A Crisis deadline and the last Task in the same Round: the Impostors win, but the
+    work was done in that Round (real engine)."""
+    game = make_game(
+        {0: PlaybookBot({1: TriggerCrisis()})},
+        crisis_cooldown=0,
+        crisis_deadline=1,
+        tasks_per_crewmate=1,
+        task_dependency_chance=0,
+    )
+    game.play_round()
+    assert not game.state.over
+    for task in board(game.state).graph:
+        task.done = True
+    game.play_round()
+    recs = game.transcript.records
+    result = recs[-1]
+    assert (result["winner"], result["reason"], result["rounds"]) == ("impostors", "crisis", 2)
+    assert result["tasks"]["done"] == result["tasks"]["total"] > 0
+    g = game_row(PLANNED, recs)
+    assert (g.end_team, g.end_reason) == ("impostors", "crisis")
+    assert g.finished and g.completion_round == 2 and g.restricted_completion == 2
+
+
 def test_benign_match_has_no_containment_time() -> None:
     recs = records("tasks_done", 20)
     for s in recs[0]["seats"]:
@@ -446,6 +475,30 @@ def test_run_spend_comes_from_the_spend_log_and_mode_from_run_json(
     assert "Spend: $1.25 for the whole run" in (out / "progress.md").read_text("utf-8")
 
 
+@pytest.mark.parametrize("damage", ["malformed-middle", "torn-trailing"])
+def test_a_corrupt_transcript_is_left_out_as_the_runner_does(
+    dry_run: Path, tmp_path: Path, damage: str
+) -> None:
+    run = tmp_path / "run"
+    shutil.copytree(dry_run, run, ignore=shutil.ignore_patterns("report"))
+    path = next((run / "games").glob("b01-lobby-*.jsonl"))
+    lines = path.read_text("utf-8").splitlines()
+    if damage == "malformed-middle":
+        i = next(i for i, line in enumerate(lines) if '"type": "vote"' in line)
+        lines[i] = lines[i][:-5]
+    else:
+        lines.append('{"kind": "event", "rou')
+    path.write_text("\n".join(lines) + "\n", "utf-8")
+    assert not runs.is_complete(path)
+    data = load_run(run)
+    assert data.not_complete == [path.stem]
+    assert path.stem not in {g.id for g in data.games}
+    assert len(data.games) == len(load_run(dry_run).games) - 1
+    out, report = write_report(run, replicates=20)
+    assert report["run"]["transcripts_not_complete"] == [path.stem]
+    assert f"`{path.stem}`" in (out / "progress.md").read_text("utf-8")
+
+
 def test_report_is_deterministic_for_a_seed(dry_run: Path, tmp_path: Path) -> None:
     a = build_report(load_run(dry_run), replicates=100, seed=9)
     b = build_report(load_run(dry_run), replicates=100, seed=9)
@@ -512,6 +565,54 @@ def test_cli_report(dry_run: Path, tmp_path: Path, capsys: pytest.CaptureFixture
     assert "blocks complete 1 of 12" in capsys.readouterr().out
     method = json.loads((out / "metrics.json").read_text("utf-8"))["method"]
     assert (method["replicates"], method["seed"]) == (40, 2)
+
+
+def test_intervals_not_containing_their_estimate_are_drawn_from_their_bounds(
+    dry_run: Path, tmp_path: Path
+) -> None:
+    report = build_report(load_run(dry_run), replicates=50)
+    for key in ("productivity", "correct_vote_share", "cost_per_game", "sabotage_damage"):
+        for i, v in enumerate(report["metrics"][key]["per_model"].values()):
+            if v["estimate"] is not None:
+                shift = 1 + abs(v["estimate"])
+                # Wholly above the estimate for some Models, wholly below for others.
+                v["ci_low"], v["ci_high"] = (
+                    (v["estimate"] + shift, v["estimate"] + 2 * shift)
+                    if i % 2
+                    else (v["estimate"] - 2 * shift, v["estimate"] - shift)
+                )
+    out = tmp_path / "out"
+    out.mkdir()
+    render_all(report, out)
+    assert (out / "opening_map.svg").stat().st_size > 1000
+
+
+def test_cli_report_with_a_single_replicate(dry_run: Path, tmp_path: Path) -> None:
+    """One replicate: a percentile 'interval' is one draw, often off the estimate."""
+    out = tmp_path / "one"
+    assert (
+        main(["report", str(dry_run), "--replicates", "1", "--seed", "0", "--out", str(out)]) == 0
+    )
+    assert (out / "metrics.json").is_file() and (out / "progress.md").is_file()
+
+
+def test_captions_call_the_intervals_marginal(dry_run: Path) -> None:
+    out, _ = write_report(dry_run, replicates=20)
+    texts = " ".join(svg_text(out / "opening_map.svg"))
+    assert "marginal 95% intervals" in texts and "joint" not in texts
+
+
+def test_public_metrics_hold_no_seeds(dry_run: Path) -> None:
+    out, _ = write_report(dry_run, replicates=20)
+    private = json.loads((out / "metrics.json").read_text("utf-8"))
+    public = json.loads((out / "metrics.public.json").read_text("utf-8"))
+    assert private["run"]["master_seed"] == 3 and "seed" in private["games"][0]
+    assert "master_seed" not in public["run"] and "run_dir" not in public["run"]
+    assert all("seed" not in g for g in public["games"])
+    text = (out / "metrics.public.json").read_text("utf-8")
+    for g in private["games"]:
+        assert f'"seed": {g["seed"]}' not in text
+    assert public["metrics"] == private["metrics"]
 
 
 def test_report_refuses_a_directory_without_a_manifest(tmp_path: Path) -> None:

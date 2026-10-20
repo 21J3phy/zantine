@@ -5,18 +5,21 @@ No ranking and no composite score (``docs/plan.md``):
 - every chart lists Models in the same fixed alphabetical order;
 - one neutral colour for every Model, so no Model is visually singled out;
 - titles describe what is measured, never who is ahead;
-- every chart carries the interval caption (95%, game-level cluster bootstrap).
+- every chart carries the interval caption (marginal 95%, game-level cluster bootstrap).
 
 Charts (each written as SVG with real text, and PNG):
 
-- ``opening_map``: Productivity vs Vigilance, one dot per Model with 2-D error
-  bars, dot area by cost per game, Flagship-Sibling pairs joined, and Models whose
-  2-D intervals overlap shaded as one cluster.
+- ``opening_map``: Productivity vs Vigilance, one dot per Model with an interval on
+  each axis, dot area by cost per game, Flagship-Sibling pairs joined, and Models
+  whose interval rectangles overlap shaded as one (descriptive) cluster.
 - ``small_multiples``: one panel per metric (Balanced Lobbies, plus Benign-only
   Productivity, Sabotage Damage and cost), Models in fixed order.
 - ``sabotage_damage``: Sabotage Damage per Impostor Seat (#33).
 - ``cost_vs_metrics``: cost per game against a few metrics.
 - ``mirror``: Mirror Matches, separately labelled as descriptive self-play.
+
+Interval bars are drawn from their bounds, never as distances from the estimate:
+a percentile interval need not contain its point estimate.
 """
 
 from __future__ import annotations
@@ -161,7 +164,7 @@ def opening_map(report: dict[str, Any]) -> Figure:
         caption(fig, report)
         return fig
 
-    # Clusters: Models whose 2-D intervals overlap are drawn as one shaded region.
+    # Clusters: Models whose interval rectangles overlap are drawn as one shaded region.
     pos = {m: i for i, m in enumerate(models)}
     span_x = np.nanmax(np.r_[xhi, x]) - np.nanmin(np.r_[xlo, x]) or 1.0
     span_y = np.nanmax(np.r_[yhi, y]) - np.nanmin(np.r_[ylo, y]) or 1.0
@@ -182,7 +185,7 @@ def opening_map(report: dict[str, Any]) -> Figure:
             alpha=0.45,
             linewidth=0,
             zorder=0,
-            label=None if shaded else "Overlapping 95% intervals (read as one cluster)",
+            label=None if shaded else "Overlapping marginal intervals (read as one cluster)",
         )
         shaded = True
 
@@ -202,17 +205,8 @@ def opening_map(report: dict[str, Any]) -> Figure:
             )
             joined = True
 
-    ax.errorbar(
-        x[ok],
-        y[ok],
-        xerr=np.vstack([x[ok] - xlo[ok], xhi[ok] - x[ok]]),
-        yerr=np.vstack([y[ok] - ylo[ok], yhi[ok] - y[ok]]),
-        fmt="none",
-        ecolor=BAR,
-        elinewidth=1,
-        capsize=2.5,
-        zorder=2,
-    )
+    interval_bars(ax, np.where(ok, y, np.nan), xlo, xhi, horizontal=True, cap=5)
+    interval_bars(ax, np.where(ok, x, np.nan), ylo, yhi, horizontal=False, cap=5)
     sizes = dot_sizes(cost)
     ax.scatter(x[ok], y[ok], s=sizes[ok], color=DOT, edgecolor="white", linewidth=0.8, zorder=3)
     for i in np.flatnonzero(ok):
@@ -277,6 +271,33 @@ def convex_hull(points: list[tuple[float, float]]) -> list[tuple[float, float]]:
 # Dot-and-interval panels ------------------------------------------------------------
 
 
+def interval_bars(
+    ax: Any,
+    at: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    *,
+    horizontal: bool,
+    lw: float = 1.0,
+    cap: float = 4.0,
+) -> None:
+    """Draw each interval ``[lo, hi]`` at position ``at`` (a y for horizontal bars, an x
+    for vertical ones), with end caps. Drawn from the bounds themselves, so an interval
+    lying wholly above or below its estimate is shown as it is."""
+    ok = np.isfinite(at) & np.isfinite(lo) & np.isfinite(hi)
+    if not ok.any():
+        return
+    a, low, high = at[ok], lo[ok], hi[ok]
+    if horizontal:
+        ax.hlines(a, low, high, colors=BAR, linewidth=lw, zorder=2)
+        ends = (np.r_[low, high], np.r_[a, a])
+    else:
+        ax.vlines(a, low, high, colors=BAR, linewidth=lw, zorder=2)
+        ends = (np.r_[a, a], np.r_[low, high])
+    marker = "|" if horizontal else "_"
+    ax.scatter(*ends, marker=marker, s=cap**2, color=BAR, linewidths=lw, zorder=2)
+
+
 def interval_panel(ax: Any, metric: dict[str, Any], models: list[str], zero: bool = False) -> None:
     est, lo, hi = values(metric, models)
     rows = np.arange(len(models))[::-1]  # first Model at the top
@@ -287,16 +308,7 @@ def interval_panel(ax: Any, metric: dict[str, Any], models: list[str], zero: boo
     if zero:
         ax.axvline(0, color=BAR, linewidth=0.8)
     if ok.any():
-        err_ok = ok & np.isfinite(lo) & np.isfinite(hi)
-        ax.errorbar(
-            est[err_ok],
-            rows[err_ok],
-            xerr=np.vstack([est[err_ok] - lo[err_ok], hi[err_ok] - est[err_ok]]),
-            fmt="none",
-            ecolor=BAR,
-            elinewidth=1,
-            capsize=2,
-        )
+        interval_bars(ax, np.where(ok, rows, np.nan), lo, hi, horizontal=True)
         ax.scatter(est[ok], rows[ok], s=22, color=DOT, zorder=3)
     for r in rows[~ok]:
         ax.text(
@@ -382,17 +394,8 @@ def cost_vs_metrics(report: dict[str, Any]) -> Figure:
         if not ok.any():
             note(ax, "n/a")
             continue
-        both = ok & np.isfinite(lo) & np.isfinite(hi) & np.isfinite(clo) & np.isfinite(chi)
-        ax.errorbar(
-            cost[both],
-            est[both],
-            xerr=np.vstack([cost[both] - clo[both], chi[both] - cost[both]]),
-            yerr=np.vstack([est[both] - lo[both], hi[both] - est[both]]),
-            fmt="none",
-            ecolor=BAR,
-            elinewidth=0.9,
-            capsize=2,
-        )
+        interval_bars(ax, np.where(ok, est, np.nan), clo, chi, horizontal=True, lw=0.9)
+        interval_bars(ax, np.where(ok, cost, np.nan), lo, hi, horizontal=False, lw=0.9)
         ax.scatter(cost[ok], est[ok], s=22, color=DOT, zorder=3)
         for i in np.flatnonzero(ok):
             ax.annotate(
