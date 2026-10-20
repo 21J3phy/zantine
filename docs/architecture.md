@@ -28,6 +28,7 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test: one short game 
 uv run zantine schedule --blocks 12 --mirror --out runs/v1   # writes runs/v1/manifest.json
 uv run zantine run runs/v1 --dry-run --max-games 3           # scripted stand-ins, $0
 ZANTINE_LIVE=1 uv run zantine run runs/v1 --live --spend-cap 500   # paid; rerun to resume
+uv run zantine report runs/v1                # graphs, metrics.json, progress.md in runs/v1/report/
 ```
 
 ## Module map (`src/zantine/`)
@@ -74,14 +75,15 @@ ZANTINE_LIVE=1 uv run zantine run runs/v1 --live --spend-cap 500   # paid; rerun
 | `harness/openai_adapter.py` | OpenAI Responses API adapter (Astra, Sol); also the base for OpenAI-compatible Responses APIs. |
 | `harness/xai_adapter.py`, `harness/meta_adapter.py` | Grok 4.7 and Muse Wonder: `OpenAIAdapter` with the lab's `base_url`, key and usage quirks. |
 | `harness/google_adapter.py` | Gemini API adapter (Argon) via `google-genai`: `thinking_level`, implicit caching, thoughts as output. |
-| `harness/models.toml`, `harness/pricing.py` | Model IDs, provider, effort and prices per 1M tokens; `ModelSpec.cost(usage)`. |
+| `harness/models.toml`, `harness/pricing.py` | Model IDs, provider, effort and prices per 1M tokens; `ModelSpec.cost(usage)`. `tier` (`flagship` / `sibling`) and a Sibling's `flagship` are for analysis only (graphs join each pair). |
 | `harness/ledger.py` | `Ledger`: every paid call goes through `Ledger.send` (spend cap check, `_reserve` hook, call, price, record; `runs.RunLedger` journals the reservation and the record). |
 | `harness/live.py` | `play_live(...)`: the live gate, wiring live Seats into a game, clean abort, the `cost` record. |
 | `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
 | `schedule.py` | The lineup scheduler (pure data, no engine): Balanced Lobby blocks, Benign Matches, Mirror Matches, Impostor assignment, per-game seeds; `make_manifest(pool, master_seed, blocks=, mirror=)`, `verify(manifest)` (every invariant). The Model Pool is `harness/models.toml`. |
 | `runs.py` | Run directories: `create_run`, `execute` (play/resume a manifest under one run-level spend cap, dry or live), `game_setup` (manifest entry → `GameConfig` + bot spec); the `zantine schedule` / `zantine run` commands. |
 | `seats/dry.py` | `dry:<model>`: a scripted bot standing in for a Model in dry runs; the label is in `describe()` (header only). |
-| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`, `zantine schedule`, `zantine run` (from `runs.py`). |
+| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`, `zantine schedule`, `zantine run` (from `runs.py`), `zantine report` (from `analysis/report.py`). |
+| `analysis/` | Results from a run directory (reads `manifest.json`, transcripts, `run.json` and the spend log via `runs.spent_usd`; never engine state; [`metrics.md`](metrics.md)): `metrics.py` (per-game / per-Seat rows, restricted completion time, Claim Audit hook), `bootstrap.py` (game-level cluster bootstrap, stratified by game kind), `sabotage.py` (Sabotage Damage: lineup fixed-effects regression), `report.py` (`metrics.json`, `metrics.public.json`, `progress.md`, `zantine report`), `graphs.py` (matplotlib charts). |
 | `replay/model.py` | Demo replay viewer: transcript records → Round-by-Round view model (map positions, moves, bodies, log, Meetings). Reads transcripts only. |
 | `replay/render.py`, `replay/viewer.html` | Writes the view model into one self-contained HTML page (inline JS/CSS, no network). |
 
@@ -169,7 +171,7 @@ OpenAI-compatible specifics (`openai_adapter.py`, and xAI/Meta through it): Resp
 
 **Setup generation**: `scenario.build_scenario(config, rng)` returns the `Scenario` (`map`, `names`, `roles`, `seat_order`); the engine only consumes it, via `Game(..., scenario=)` or by building one from `rng.fork("scenario")`. `Game` takes controllers already in seat order; `Scenario.seat(lineup)` rearranges a lineup (spec order) into seats, which `runner.new_game` does for you. Add new generated content (e.g. Task codes) with its own `rng.fork(...)` so existing parts of a seed stay unchanged, and bump `SCENARIO_VERSION` whenever a change alters what an existing seed generates. Tests that need known room names use `tests/helpers.make_game`, which plays on `classic_scenario()` (`tiny_map()`, colour names, identity seat order).
 
-**Analysis (Claim Audit, metrics, graphs)**: read transcripts; don't import engine internals. Ground truth is in `event` records, each seat's view in `observation` records.
+**Analysis (Claim Audit, metrics, graphs)**: read transcripts; don't import engine internals. Ground truth is in `event` records, each seat's view in `observation` records. `zantine report <run-dir> [--replicates N] [--seed S]` (`analysis/`, definitions in [`metrics.md`](metrics.md)) writes `<run-dir>/report/`: the graphs (SVG + PNG), `metrics.json` (every number behind every chart; private, holds the seeds), `metrics.public.json` (the same without seeds, for the website) and `progress.md`. A new per-Model measure is one `MetricSpec` in `analysis/report.py` (a per-game `(numerator, denominator)` per Model; the bootstrap and the small-multiples panel follow). Later Claim Audit outputs plug in through `metrics.load_claims` (`<transcript>.claims.json`).
 
 **Replay viewer** (`zantine replay`, for demos, never scoring): unknown event/observation types appear as generic log lines, and a record with a speaker (`seat`/`speaker`/`sender`) plus `text`/`message` is shown as speech, so new modules replay with no viewer changes. Roles are hidden until the viewer's toggle is on: records whose data has a `role`/`killers`-style key, and actions or events whose name contains `kill`, `sabotage`, `crisis` or `vent`, are hidden or shown without the actor. For a nicer map, a header `map` may carry `layout: {room: [x, y]}`; otherwise rooms sit on a circle. Teach `replay/model.py` a new type only if the generic line isn't enough (e.g. it moves players or leaves bodies).
 
@@ -183,7 +185,7 @@ OpenAI-compatible specifics (`openai_adapter.py`, and xAI/Meta through it): Resp
 
 **Hidden Identity.** Players only ever see generated names and seat numbers. Dry-run Seats (`dry:<model>`) and live Seats (`live:<model>`) carry the Model only in `describe()`, i.e. the header's `controller`. `tests/test_hidden_identity.py` scans every context, observation and Neutral Harness prompt (and, for live Seats, every request each provider adapter sends, on fake clients of all five providers) for Model IDs, their name parts and lab names.
 
-**Run directory** (`runs/<run-id>/`; read by graphs #18, Sabotage Damage #33 and reproducibility #47):
+**Run directory** (`runs/<run-id>/`; read by graphs #18, Sabotage Damage #33 and reproducibility #47; `zantine report` adds `report/`, see [`metrics.md`](metrics.md)):
 
 | Path | Contents |
 | --- | --- |
