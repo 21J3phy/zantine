@@ -17,7 +17,7 @@ import pytest
 from helpers import make_game
 from zantine.cli import main
 from zantine.config import GameConfig
-from zantine.harness import neutral
+from zantine.harness import agent_loop, neutral
 from zantine.observations import ActionContext, MeetingContext
 from zantine.rng import GameRng
 from zantine.rules.actions import Action, CallMeeting
@@ -117,20 +117,21 @@ def test_nothing_a_crewmate_sees_states_the_impostor_count(impostors: int, seed:
                 assert item["fellow_impostors"] == [] and item["impostor_count"] == COUNT
 
 
+@pytest.mark.parametrize("harness", [neutral, agent_loop])
 @pytest.mark.parametrize("impostors", [0, 2])
-def test_neutral_harness_prompts_say_0_to_2_and_never_the_count(impostors: int) -> None:
+def test_harness_prompts_say_0_to_2_and_never_the_count(impostors: int, harness: Any) -> None:
     game, recorders = recorded(GameConfig(seed=4, num_impostors=impostors))
-    assert COUNT in neutral.SYSTEM_PROMPT
+    assert COUNT in harness.SYSTEM_PROMPT
     for p in game.state.players:
         if p.is_impostor:
             continue
         for ctx in recorders[p.seat].contexts[::5]:
             if isinstance(ctx, ActionContext):
-                request = neutral.action_request(game.rules, ctx)
+                request = harness.action_request(game.rules, ctx)
             elif ctx.pass_index is None:
-                request = neutral.vote_request(game.rules, ctx)
+                request = harness.vote_request(game.rules, ctx)
             else:
-                request = neutral.speak_request(game.rules, ctx)
+                request = harness.speak_request(game.rules, ctx)
             prompt = "\n".join([request.system, *request.memory, request.tail])
             assert leaks(prompt) == [], f"seat {p.seat}"
 
