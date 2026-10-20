@@ -30,8 +30,8 @@ def test_scripted_game_runs_to_completion(seed: int) -> None:
 
 
 def test_all_end_states_are_reachable_with_scripted_bots() -> None:
-    reasons = {play(GameConfig(seed=s)).state.win_reason for s in range(40)}
-    assert reasons == {"parity", "round_cap", "impostors_ejected"}
+    reasons = {play(GameConfig(seed=s)).state.win_reason for s in range(100)}
+    assert reasons == {"parity", "round_cap", "impostors_ejected", "tasks_done"}
 
 
 def test_same_seed_gives_identical_transcript() -> None:

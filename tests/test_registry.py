@@ -79,6 +79,8 @@ def test_resolvers_run_in_order() -> None:
     # Plug-ins run between meeting requests and cooldowns.
     assert names.index("core.meeting_request") < names.index("crisis.resolve")
     assert names.index("crisis.resolve") < names.index("core.cooldowns")
+    assert names.index("core.meeting_request") < names.index("tasks.work")
+    assert names.index("tasks.work") < names.index("core.cooldowns")
 
 
 def test_installing_a_module_twice_fails() -> None:

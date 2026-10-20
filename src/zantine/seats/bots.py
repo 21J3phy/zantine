@@ -10,7 +10,9 @@ from zantine.observations import ActionContext, MeetingContext, Observation
 from zantine.rng import GameRng
 from zantine.roles import Role
 from zantine.rules.actions import Action, CallMeeting, Kill, Move, Report, Wait
+from zantine.rules.tasks import WorkOnTask
 from zantine.seats.base import SeatController
+from zantine.tasks import task_kind
 
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
 _ACCUSE = re.compile(r"I accuse (\w+)")
@@ -68,20 +70,34 @@ class PlaybookBot(SeatController):
 class ScriptedBot(SeatController):
     """A simple role-aware bot.
 
-    Crewmates wander, report bodies they find, and call a Meeting if they saw a
-    kill elsewhere. In Meetings they say what they saw ("I saw X kill Y ... I
-    accuse X.") and vote for a killer they saw, else the most-accused player.
+    Crewmates report bodies they find, call a Meeting if they saw a kill
+    elsewhere; otherwise, in a ``diligence`` share of Rounds, they walk to their
+    nearest open Task and solve it (wrongly in a ``mistakes`` share of attempts;
+    a blocked Task is retried after a couple of Rounds), and wander when idle.
+    In Meetings they say what they saw ("I saw X kill Y ... I accuse X.") and
+    vote for a killer they saw, else the most-accused player.
     Impostors wander and kill when alone with one Crewmate (sometimes with one
     witness present); in Meetings
     they counter-accuse whoever accuses them.
     """
 
     kind = "scripted"
+    # Rounds to wait before retrying a blocked Task.
+    retry_after = 2
 
-    def __init__(self, rng: GameRng, move_chance: float = 0.6, reckless: float = 0.3) -> None:
+    def __init__(
+        self,
+        rng: GameRng,
+        move_chance: float = 0.6,
+        reckless: float = 0.3,
+        diligence: float = 0.5,
+        mistakes: float = 0.1,
+    ) -> None:
         self.rng = rng
         self.move_chance = move_chance
         self.reckless = reckless
+        self.diligence = diligence
+        self.mistakes = mistakes
 
     # Actions ------------------------------------------------------------------
 
@@ -92,7 +108,23 @@ class ScriptedBot(SeatController):
             return Report()
         if _killers_seen_since_meeting(ctx.observations) and ctx.emergency_meetings_left > 0:
             return CallMeeting()
-        return self._wander(ctx)
+        return self._task_action(ctx) or self._wander(ctx)
+
+    def _task_action(self, ctx: ActionContext) -> Action | None:
+        blocked = {o.data["task"]: o.round for o in ctx.observations if o.type == "tasks.blocked"}
+        tasks = [
+            t
+            for t in ctx.extra.get("tasks", {}).get("tasks", [])
+            if not t["done"] and ctx.round - blocked.get(t["task"], -10) > self.retry_after
+        ]
+        if not tasks or self.rng.random() >= self.diligence:
+            return None
+        task = min(tasks, key=lambda t: len(t["path"]))
+        if task["path"]:
+            return Move(to=task["path"][0])
+        if self.rng.random() < self.mistakes:
+            return WorkOnTask(task=task["task"], answer="no idea")
+        return WorkOnTask(task=task["task"], answer=task_kind(task["kind"]).solve(task))
 
     def _impostor_action(self, ctx: ActionContext) -> Action:
         fellows = _fellow_impostors(ctx.observations)

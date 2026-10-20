@@ -28,6 +28,11 @@ uv run ruff check && uv run ruff format --check
 | `rules/core.py` | `CoreModule`: kill, move, report, emergency Meeting, cooldowns, snapshots. |
 | `rules/crisis.py` | `CrisisModule`: Impostor-triggered **Crisis** (`crisis.trigger` / `crisis.fix`, resolver 500, win condition 300). State in `ext["crisis"]`. |
 | `rules/win.py` | Core win conditions (Impostors ejected, parity). |
+| `rules/tasks.py` | `TasksModule`: assigns Tasks, `tasks.work`, private grading, Task Graph blocking, reassignment after Meetings, the `tasks_done` win, Productivity in the result. |
+| `tasks/base.py` | `TaskKind`, `TaskContent` and the Task-kind registry (`register_task_kind`, `task_kind`). |
+| `tasks/steps.py` | Solo step kinds (`sort_list`, `lookup_value`): the dependent-solo family. |
+| `tasks/graph.py` | `Task` (a placed instance), `TaskGraph` (dependencies), `build_task_graph` (seeded). |
+| `tasks/trial.py` | `run_solo_trial(s)`: one Task alone, outside a game (solo calibration). |
 | `rules/__init__.py` | `default_modules()` / `default_rules()`: the list of modules a normal game uses. |
 | `engine.py` | `Game`: the Round loop, asking seats (with the Invalid Action retry), contexts, recording. |
 | `meeting.py` | Meeting flow, secret vote, `tally()`, Ejection. |
@@ -57,14 +62,23 @@ uv run ruff check && uv run ruff format --check
 
 - `rules.register_action(cls)`: new `Action` subclasses with a unique `kind`; prefix with the module name if it could collide (e.g. `tasks.work`).
 - `rules.add_resolver(order, name, fn)`: a step run every Round. Order bands: 100 kills, 200 movement, 300 meeting requests, **400–899 free for plug-ins**, 900 cooldowns, 1000 snapshots. Use `rc.acting(MyAction)` to get surviving actors; set `rc.meeting` to request a Meeting.
-- `rules.add_win_condition(order, name, fn)`: core uses 100 and 200, Crisis uses 300; return `(Team, reason)` or `None`.
+- `rules.add_win_condition(order, name, fn)`: core uses 100 and 200, Crisis 300, Tasks 400; return `(Team, reason)` or `None`.
 - `on_setup(game)`, `on_meeting_end(game, meeting)` hooks.
 - `context_extra(game, seat)`: data that appears in that seat's `ctx.extra[module_name]` (e.g. its assigned Tasks).
+- `result_extra(game)`: data added to the transcript's `result` record under `result[module_name]` (e.g. Productivity).
 - Keep module state in `game.state.ext[module_name]`, not new fields on `GameState`.
 - Record ground truth with `game.event(type, **data)` and private views with `game.observe(seat, type, **data)`. Prefix new types with the module name (`tasks.graded`).
 - Use `game.rng.fork("<module>")` for randomness.
 
 `tests/test_registry.py::DanceModule` is a complete minimal example.
+
+**New Task kinds (split-key, chain relay, audit, ...)**: the Task framework in `tasks/` has three layers.
+
+1. *Kind* (`tasks/base.py`): subclass `TaskKind`, set a unique `name` (and `seats` if more than one player must take part), implement `generate(rng) -> TaskContent` (content and hidden answer key from the seed only), `grade(content, answer) -> bool` and `solve(brief)` (a reference solution from the brief alone, used by scripted bots and tests). Override `brief(content, slot)` when assignees see different information, and `solo_brief(content)` for solo calibration. Decorate with `@register_task_kind` and import the module from `tasks/__init__.py`.
+2. *Instance and graph* (`tasks/graph.py`): a `Task` places one `TaskContent` in a game (id, room, `assignees`, `requires`). `TaskGraph` holds every Task in id order; prerequisites must come earlier, so it is acyclic by construction. `waiting_on(id)` gives unfinished prerequisites, `counted()` the Tasks that count toward Productivity. `build_task_graph` currently only places solo steps (`seats == 1`); multi-seat kinds extend it (or add Tasks to the same `TaskGraph`) to choose several assignees.
+3. *Game rules* (`rules/tasks.py`): `TasksModule` owns the `TaskBoard` in `state.ext["tasks"]` (graph, per-seat stats, what each seat was told). `tasks.work` grades through the kind's `grade`; blocking, reassignment, the win and Productivity are kind-independent. Kind-specific timing or handoff rules belong in their own `GameModule` that reads and updates the same board (`rules.tasks.board(state)`).
+
+Hooks for later rules: `Task.fake` marks a Fake Task (shown and worked like a real one, never counted toward Productivity or the crew win); Sabotage of a Shared Task belongs in that kind's `grade`. `tasks.graded` events carry `correct` and `fake`, so analysis can tell real work from fake work. `run_solo_trial(kind, seed, solver)` runs a fresh instance of any registered kind outside a game with any `solver(brief) -> answer` (a Model Harness for calibration); `run_solo_trials` repeats it over many seeds.
 
 **New seat controllers (live Models, other Harnesses)**: subclass `SeatController` (`choose_action`, `speak`, `vote`, and `describe()` for the transcript header, e.g. the model ID). Put it in its own module under `seats/`, register a factory with `@register_controller("name")`, and import that module at the bottom of `seats/registry.py`; it then works as `--bots name:arg`. A Harness turns `ActionContext` / `MeetingContext` into a prompt and parses the reply with `game.rules.parse_action(dict)`; unparseable output should be returned as `Invalid(reason, raw)` so the engine's retry/forfeit applies and is logged.
 
@@ -81,7 +95,9 @@ JSON Lines, keys sorted, one record per line, each with `seq` and `kind`:
 - `header`: `schema`, `seed`, `scenario_version`, `config`, `map`, `modules`, `seats` (`seat`, `name`, `role`, `controller`).
 - `event`: ground truth, `{round, type, data}`. Core types: `action`/`vote` (every attempt, with `valid`/`reason`), `kill`, `move`, `meeting_requested`, `meeting_started`, `bodies_cleared`, `speaking_order`, `statement`, `vote_tally`, `ejection` (with role), `meeting_ended`, `game_over`.
 - `observation`: `{round, seat, type, data}`, exactly what that seat was told. Types are listed in `observations.py`.
-- `result`: `winner`, `reason`, `rounds`, `meetings`, `killed`, `ejected`, `survivors`.
+- `result`: `winner`, `reason`, `rounds`, `meetings`, `killed`, `ejected`, `survivors`, plus one key per module with `result_extra`. `tasks`: `productivity` (team), `done`, `total`, and `seats` (per **Seat**: `assigned`, `done`, `wrong`, `blocked`, `productivity`).
+
+Task records: event `tasks.generated` (every Task with its answer key, at setup), `tasks.graded` (`seat`, `task`, `correct`, `fake`), `tasks.blocked` (`seat`, `task`, `waiting_on`), `tasks.reassigned` (`task`, `from_seat`, `to_seat`); observations `tasks.assigned` (`tasks`: the seat's briefs), `tasks.graded` (`task`, `correct`), `tasks.blocked` (`task`, `waiting_on`), `tasks.reassigned` (`task`, `previous_assignee`).
 
 Bump `transcript.SCHEMA_VERSION` when changing existing record shapes; adding new event/observation types does not need a bump.
 

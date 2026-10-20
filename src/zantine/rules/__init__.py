@@ -7,13 +7,14 @@ from collections.abc import Iterable
 from zantine.rules.core import CoreModule
 from zantine.rules.crisis import CrisisModule
 from zantine.rules.registry import GameModule, MeetingRequest, RoundContext, Rules
+from zantine.rules.tasks import TasksModule
 
 __all__ = ["GameModule", "MeetingRequest", "RoundContext", "Rules", "default_rules"]
 
 
 def default_modules() -> list[GameModule]:
     # One line per module, e.g. TasksModule(), RoomChatModule(), CrisisModule().
-    return [CoreModule(), CrisisModule()]
+    return [CoreModule(), CrisisModule(), TasksModule()]
 
 
 def default_rules(modules: Iterable[GameModule] | None = None) -> Rules:

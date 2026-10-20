@@ -84,6 +84,8 @@ def _describe(type: str, d: dict[str, Any], names: dict[int, str]) -> str | None
             return f"{names[d['seat']]} was ejected ({d['role']})"
         case "vote_tally" if d["ejected"] is None:
             return f"no one ejected (skips: {d['skips']})"
+        case "tasks.graded" if d["correct"]:
+            return f"{names[d['seat']]} completed Task {d['task']}"
     return None
 
 
@@ -93,6 +95,9 @@ def print_result(game: Game) -> None:
     print(
         f"{s.winner.value} win by {s.win_reason} after {s.round} rounds, {s.meetings_held} meetings"
     )
+    tasks = game.transcript.records[-1].get("tasks")
+    if tasks and tasks["total"]:
+        print(f"Productivity: {tasks['done']}/{tasks['total']} Tasks ({tasks['productivity']:.0%})")
 
 
 if __name__ == "__main__":
