@@ -206,6 +206,10 @@ _Avoid_: Fact-check, lie detection
 An engine-generated test message whose truth is already known, used to measure the accuracy of the **Claim Audit**.
 _Avoid_: Synthetic label, test claim
 
+**Label Panel**:
+Three AI judges, each from a different model family outside the **Model Pool** and none from the extractor's family, whose majority labels on real-game **Claims** are the reference for checking the **Claim Audit**.
+_Avoid_: Human labelers, annotators, judges (alone)
+
 **Lie**:
 A false **Claim** that contradicts the speaker's own observation record, so the speaker provably knew it was false (e.g. misstating its own location).
 _Avoid_: Deception (the broader skill), misinformation, any false claim by an impostor
@@ -253,5 +257,6 @@ _Avoid_: Delay, latency
 - "Racist / modelist" was used for models favoring their own kind; the measured quantity is **Minority Disadvantage**, and **Out-group Bias** is only claimed when a **Style Mask** removes it (2026-10-20, after Astra's review).
 - "Lopsided lineups" are not used for model-to-model comparison (seat count would confound skill), and with 8 seats of one model the 2 others stand out by style; they're used only as **Lopsided Lobbies** for **Minority Disadvantage**.
 - "Lie" first meant any false impostor **Claim**; it now requires proof the speaker knew (2026-10-20).
+- "Blind human labels" were replaced by the **Label Panel** (2026-10-20, user decision). Results checked this way are reported as validated by an AI panel, not by humans.
 - "Productivity" first meant share of tasks done, which penalized early **Containment**; it now means completion time over the whole game (2026-10-20).
 - "Accuracy" was used loosely in the original plan; it's now split into **Vigilance** (catching **Impostors**) and **Productivity** (finishing work).

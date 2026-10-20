@@ -22,7 +22,7 @@ Results are graphs, not rankings. The main measures are:
 | Priority | Version | Benchmark | Question it answers | Depends on |
 | --- | --- | --- | --- | --- |
 | 1 | v1 | Core comparison (**Balanced Lobby** + **Benign Match**) | How do models compare as crewmates and as **Impostors**, and how much damage does each do? | Game engine, **Claim Audit** |
-| 1 | v1 | Measurement validation | Can we trust the language metrics? (**Planted Claims**, required blind human labels) | **Claim Audit** |
+| 1 | v1 | Measurement validation | Can we trust the language metrics? (**Planted Claims**, required **Label Panel**) | **Claim Audit** |
 | 1 | v1 | **Mirror Match** set (descriptive) | How does a team of one model play against itself? | Game engine |
 | 2 | v1.1 | **Verification Protocol** experiment | Does independent verification cut **Sabotage Damage** without an unacceptable **Productivity** cost? | v1 |
 | 3 | v1.2 | Transfer check | Does the v1.1 result carry over to a small realistic workflow? | v1.1 |
@@ -99,7 +99,7 @@ Exact IDs should be re-checked before each run.
 1. A fixed-weight open-weight model from outside the pool turns **Meeting** speech into structured **Claims**.
 2. Plain code checks each **Claim** against the game record, and against the speaker's own observations to tell **Lies** from **Misstatements**.
 3. [Jev](https://www.braintrust.dev/articles/what-is-jev) makes the fuzzy judgments: is this a claim or a hedge, was it challenged, and who is this message pushing to eject.
-4. **Validation:** 400 **Planted Claims**, plus **required** blind human labels on at least 200 real-game **Claims** (two labelers, with model, role and seat color removed; Cohen's κ reported). Headline language metrics are published only with this validation.
+4. **Validation:** 400 **Planted Claims**, plus a **required Label Panel**: three AI judges from different model families outside the pool label 600 real-game **Claims**, with model, role and seat color removed. Krippendorff's α is reported. Headline language metrics are published only with this validation and are labeled as validated by an AI panel.
 
 ---
 
@@ -165,7 +165,7 @@ One seat's prompt tells it that it is the **Leader**. It gets no extra powers.
 - [x] **Model pool checks:** verified 2026-10-20 (see `model-pool.md`).
 - [x] **Publishing:** open engine; tasks, maps and names generated from a seed for each game; official seeds private; graphs only, no leaderboard.
 - [ ] **Transfer workflow:** which realistic workflow to use for v1.2, and how to measure sabotage in it.
-- [ ] **Human labelers:** who the two blind labelers are.
+- [x] **Labelers:** an AI **Label Panel** replaces human labelers. Which three judges is decided with the extractor choice (#19).
 
 ## Sources
 
