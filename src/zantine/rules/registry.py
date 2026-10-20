@@ -14,6 +14,7 @@ Resolver order bands (leave gaps so plug-ins can slot in between):
           split-key (460), Crisis (500), Sabotage ...
  900  cooldown ticks (core)
 1000  end-of-Round room snapshots (core)
+1100  Relevant Observation marks (relevance; reads the snapshots)
 ====  ===========================================================
 """
 
