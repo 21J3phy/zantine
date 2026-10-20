@@ -54,13 +54,17 @@ class TaskBoard:
     def view(self, task: Task, seat: int) -> dict[str, Any]:
         """A seat's private brief for one of its Tasks (never the answer key)."""
         brief = task_kind(task.kind).brief(task.content, task.assignees.index(seat))
-        return {
+        view = {
             "task": task.id,
             "room": task.room,
             **brief,
             "requires": [self._ref(r) for r in task.requires],
             "unlocks": [self._ref(d) for d in self.graph.dependents(task.id)],
         }
+        if len(task.assignees) > 1:
+            # Everyone on a multi-player Task, in slot order.
+            view["assignees"] = list(task.assignees)
+        return view
 
     def _ref(self, task_id: str) -> dict[str, Any]:
         t = self.graph.get(task_id)
@@ -117,6 +121,9 @@ class WorkOnTask(Action):
         task = b.graph.get(self.task)
         if actor.seat not in task.assignees:
             return f"{task.id} is not one of your Tasks"
+        actions = task_kind(task.kind).work_actions
+        if self.kind not in actions:
+            return f"{task.id} is worked with {', '.join(actions)}, not {self.kind}"
         if task.done:
             return f"{task.id} is already done"
         if actor.room != task.room:
@@ -146,6 +153,10 @@ class TasksModule(GameModule):
             cfg.tasks_per_crewmate,
             cfg.task_dependency_chance,
         )
+        # Modules with a ``place_tasks(game, graph)`` method add their own
+        # (multi-player) Tasks before anything is announced.
+        for module in game.rules.modules:
+            module.place_tasks(game, graph)
         b = TaskBoard(
             graph,
             stats={p.seat: SeatTaskStats() for p in state.players},
@@ -164,7 +175,7 @@ class TasksModule(GameModule):
         living_crew = [p.seat for p in state.living() if not p.is_impostor]
         rng = game.rng.fork(f"{NAME}/reassign/{meeting}")
         for task in b.graph:
-            if task.done or task.fake:
+            if task.done or task.fake or task.closed:
                 continue
             for slot, seat in enumerate(task.assignees):
                 options = [s for s in living_crew if s not in task.assignees]
@@ -204,6 +215,7 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
     b = board(game.state)
     # Prerequisites count only if complete at the start of the Round.
     done_before = {t.id for t in b.graph if t.done}
+    rc.scratch["tasks.done_before"] = done_before
     for seat, action in rc.acting(WorkOnTask):
         task = b.graph.get(action.task)
         stats = b.stats[seat]

@@ -28,6 +28,7 @@ from zantine.rules.actions import Action, Invalid
 if TYPE_CHECKING:
     from zantine.engine import Game
     from zantine.state import GameState, PlayerState
+    from zantine.tasks import TaskGraph
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,9 @@ class GameModule:
 
     def install(self, rules: Rules) -> None:
         """Register actions, resolvers and win conditions."""
+
+    def place_tasks(self, game: Game, graph: TaskGraph) -> None:
+        """Add Tasks before the board is initialized and private briefs are sent."""
 
     def on_setup(self, game: Game) -> None:
         """Called once before Round 1, after roles are assigned."""

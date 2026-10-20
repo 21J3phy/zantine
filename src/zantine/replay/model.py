@@ -59,7 +59,7 @@ SPOILER_KEYS = frozenset(
 # Observation types only Impostors, victims or witnesses get; they reveal roles.
 SPOILER_OBSERVATIONS = frozenset({"role_assigned", "killed", "kill_witnessed"})
 # Words in an action kind or event type that suggest only an Impostor could do it.
-IMPOSTOR_HINTS = ("kill", "sabotage", "crisis", "vent", "impostor")
+IMPOSTOR_HINTS = ("kill", "sabotage", "crisis", "vent", "impostor", "tamper")
 # Keys a generic record may use for who is speaking and what they said.
 SPEAKER_KEYS = ("speaker", "sender", "seat", "from_seat")
 TEXT_KEYS = ("text", "message", "content")

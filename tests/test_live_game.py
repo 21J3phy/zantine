@@ -66,7 +66,7 @@ def test_one_live_fable_seat_and_nine_bots_play_a_full_game() -> None:
         "model": "claude-fable-5-1",
         "provider": "anthropic",
         "effort": "medium",
-        "harness": "neutral-v3",
+        "harness": "neutral-v4",
     }
     others = [s for s in header["seats"] if s["seat"] != me]
     assert [s["controller"]["kind"] for s in others] == ["scripted"] * 9
@@ -104,7 +104,7 @@ def test_live_seat_does_not_change_bot_randomness() -> None:
 
 def test_consecutive_calls_reuse_the_cached_prefix() -> None:
     client = FakeClient()
-    run(client, round_cap=12, live_impostor=True)
+    run(client, round_cap=12, live_impostor=True, relay_tasks=0)
     calls = client.messages.calls
     assert len({repr(c["system"]) for c in calls}) == 1
     assert len({repr(c["tools"]) for c in calls}) == 1

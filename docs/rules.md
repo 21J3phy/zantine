@@ -1,6 +1,6 @@
 # Game Rules (as implemented)
 
-The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
+The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/relay.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
 
 Defaults are in `GameConfig` (`src/zantine/config.py`).
 
@@ -30,6 +30,9 @@ The whole setup is generated from the game seed (`src/zantine/scenario.py`), so 
 | `call_meeting` | anyone | you have an emergency **Meeting** left |
 | `crisis.trigger` | **Impostor** | no **Crisis** is active and the **Crisis** cooldown is 0 (see [Crisis](#crisis)) |
 | `crisis.fix` | anyone | a **Crisis** is active and your room is one of its two stations |
+| `relay.pick_up(task)` | current carrier | the part is unheld in your room, and your leg is open |
+| `relay.hand_off(task)` | first carrier | you hold the part in the handoff room; the second carrier must also finish the **Round** there for it to succeed |
+| `relay.deliver(task)` | second carrier | you hold the handed-off part in the delivery room |
 | `tasks.work(task, answer)` | assignee | the **Task** is assigned to you, not yet done, and in your room; `answer` is text, a number, or a list of those |
 
 **Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip. For live **Models**, an unusable reply (no tool call, the wrong tool, bad arguments, a refusal, or a transient API error) counts as an **Invalid Action** too. Meeting speech from a live **Model** follows the same rule: one retry, then the **Seat** says nothing that pass.
@@ -46,8 +49,9 @@ Every living player chooses an action from the same start-of-**Round** state; no
 2. **Movement (order 200).** All surviving movers move at once. Two players swapping rooms do not meet or see each other on the way.
 3. **Meeting requests (order 300).** A report beats an emergency call. Among several reporters (or several callers) the lowest seat number is credited as the caller; every requester is still logged. Only the credited emergency caller uses up their emergency **Meeting**. A report must be about a body that was in the room when the Round started, so a body created this Round cannot be reported until the next Round.
 4. **Work on Tasks (order 400).** See [Tasks](#tasks). A killed player's work that Round is cancelled.
-5. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
-6. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
+5. **Chain relays (order 450).** Drop parts held by killed carriers, then resolve pickups, handoffs, and deliveries. Handoffs use end-of-**Round** rooms, after movement. See [Chain relay](#chain-relay).
+6. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
+7. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
 
 Plug-in modules add steps between these (see `docs/architecture.md`); the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
 
@@ -64,18 +68,32 @@ Implemented in `src/zantine/rules/crisis.py`. Defaults: `crisis_cooldown = 6`, `
 
 ## Tasks
 
-The first **Task** kind is dependent solo steps: small pieces of work one player can do alone, linked into the crew's **Task Graph**. Settings are in `GameConfig` (`tasks_per_crewmate`, `task_dependency_chance`, `task_kinds`).
+The **Task** kinds include dependent solo steps and chain relays. Dependent solo steps are: small pieces of work one player can do alone, linked into the crew's **Task Graph**. Settings are in `GameConfig` (`tasks_per_crewmate`, `task_dependency_chance`, `task_kinds`).
 
 - **Content.** Each step is generated from the game seed, so there is no fixed answer key. Step kinds:
   - `sort_list`: sort 6 numbers from smallest to largest (answer: the list, or the numbers as text separated by commas or spaces).
   - `lookup_value`: find the value for one sector in a 6-row table (answer: that value).
-- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Step ids are distinct numbers drawn from `T10` to `T99` by the seed, unrelated to who holds them or to how many steps there are (sequential ids would reveal the crew size, and so the **Impostor** count). A game has at most 90 steps.
+- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Step ids are distinct numbers drawn from `T10` to `T99` by the seed, unrelated to who holds them or to how many steps there are (sequential ids would reveal the crew size, and so the **Impostor** count). A game has at most 90 **Tasks**, including relays.
 - **Task Graph.** Going through the steps in generation order, each step requires, with probability `task_dependency_chance` (default 0.5), one earlier step held by a *different* **Crewmate**. Chains are at most 3 steps long.
 - **What players are told.** At setup each **Crewmate** privately receives its steps (`tasks.assigned`): id, title, room, instructions and inputs, the steps it requires and the steps it unlocks (id, title, room, assignee). Its action context also shows, for each of its own steps, whether it has been told the step is done and the shortest route to the step's room. Nobody is told anything about other players' progress.
 - **Working.** `tasks.work` takes the whole **Round** in the step's room. Grading is automatic and **private**: only the worker is told whether the answer was right (`tasks.graded`). A wrong answer can be retried in a later **Round**; there is no penalty beyond the lost **Round**.
 - **Dependencies.** A step can only be worked once every prerequisite is **truly complete** (graded correct), not merely claimed done. Prerequisites count only if they were complete at the start of the **Round**, so a step finished this **Round** unlocks its dependents from the next **Round**. Working a blocked step uses up the **Round** and tells the worker only which prerequisites it is still waiting on (`tasks.blocked`); this is a legal action, not an **Invalid Action**.
 - **Dead players' Tasks.** When a **Meeting** ends, every unfinished step held by a dead or ejected player is handed to a living **Crewmate** with the fewest unfinished steps (ties broken by the seed), who is told privately (`tasks.reassigned`, naming the previous holder). Until then those steps cannot be worked.
 - **Productivity** is reported in the game result: team Productivity is the share of all **Tasks** completed; each **Seat**'s Productivity is the share of the **Tasks** it was ever assigned that it completed (`null` for a **Seat** with none). The result also counts each **Seat**'s wrong answers and blocked attempts.
+
+## Chain relay
+
+Implemented by `tasks/relay.py` (`chain_relay`, a two-player **TaskKind**) and `rules/relay.py` (**RelayModule**). The default `relay_tasks = 2` adds two relays per game, alongside solo steps. Each has two distinct **Crewmate** carriers and three distinct rooms drawn from the seed: pickup, handoff, delivery. Rooms exclude the meeting room when at least three other rooms exist. Relays are omitted with fewer than two **Crewmates**; enabling them on a map with fewer than three rooms is invalid. Their ids are drawn from the same `T10`–`T99` pool as other **Tasks**, excluding ids already placed.
+
+- **Assignment.** Both carriers privately learn the part name, route, their own leg, and their partner. Relay progress is private to its participants; only the actor learns a failed handoff. No **Task** brief, observation, or context includes the serial number or tamper state. Each carrier's context repeats only progress it was told and a route to its next step; it never reports the partner's location or remote progress.
+- **Pickup.** The first carrier spends a **Round** on `relay.pick_up` in the pickup room. **Task Graph** prerequisites must be complete at the start of that **Round**, as with solo steps. A blocked pickup spends the **Round** and gives a private `tasks.blocked` observation. The part travels with its holder, including when a **Meeting** returns them to the meeting room.
+- **Handoff.** The first carrier spends a **Round** on `relay.hand_off` in the handoff room. It succeeds only if both carriers survive and end that **Round** in that room. The second carrier may arrive that **Round** or wait there; moving away prevents the handoff. The receiver needs no separate action. On success both carriers receive private observations. On failure the first carrier retains the part and may retry later.
+- **Delivery.** The second carrier spends a **Round** on `relay.deliver` in the delivery room. Only an intact delivered part completes the **Task**, unlocking dependents from the next **Round**. Both carriers who completed a leg receive ground-truth completion credit; a relay counts once toward the crew's total. Relay actions cannot be bypassed with `tasks.work`.
+- **Killed carriers.** A carrier killed while holding a part drops it where they died; its action that **Round** is cancelled. The part keeps its current leg and tamper state. After the next **Meeting**, the dead carrier's place is reassigned using the normal **Task** reassignment rule, excluding the other carrier. The replacement is privately told the current leg and the dropped part's room, and may recover it with `relay.pick_up`. The surviving partner is told who replaced the carrier. A body being cleared never clears a dropped part.
+- **Ejected carriers.** A held part is left in the meeting room for the replacement carrier. Living carriers retain their parts through **Meetings**.
+- **Hidden tampering.** The engine hook `rules.relay.tamper(game, task_id, seat)` changes the hidden serial and records the actor in ground truth. **Sabotage** rules must validate who can call it; it is not a player action here. `rules.relay.part(state, task_id)` exposes ground truth for a later **Audit** rule. Tampered parts behave identically during pickup, handoff, and recovery. Delivery gives the same private receipt whether intact or tampered; the true grade appears only in `relay.delivered` / `tasks.graded` events. A delivered **Task** is closed even if tampered, so reassignment cannot reveal its grade. A tampered delivery stays incomplete and prevents the crew's **Task** win; detection and any repair rule belong to later **Audit** / **Sabotage** work.
+
+Scripted bots use their contexts to perform relay actions and wait for handoffs. They handle multiple relays in Task id order to avoid carriers waiting on each other in a cycle. A relay has no solo puzzle to calibrate: `solve(brief)` returns a carrier's action plan, while standalone solo trials are unsupported.
 
 ## Visibility
 

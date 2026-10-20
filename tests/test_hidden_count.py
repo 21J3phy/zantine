@@ -157,6 +157,7 @@ def test_a_crewmates_view_is_identical_with_0_1_or_2_impostors() -> None:
             impostors=impostors,
             num_impostors=len(impostors),
             tasks_per_crewmate=0,
+            relay_tasks=0,
             round_cap=4,
         )
         game.run()
@@ -214,7 +215,7 @@ def test_a_zero_impostor_game_runs_end_to_end_with_scripted_bots(seed: int) -> N
     assert (result["winner"], result["reason"]) in (("crew", "tasks_done"), ("none", "round_cap"))
     assert result["reason"] == "tasks_done" or state.round == game.config.round_cap
     assert result["containment"] == {"contained": False, "round": None, "meeting": None}
-    assert result["tasks"]["total"] == 20
+    assert result["tasks"]["total"] == 20 + game.config.relay_tasks
     assert not list(game.transcript.events("kill"))
     assert not list(game.transcript.events("crisis.started"))
     assert not list(game.transcript.events("containment"))

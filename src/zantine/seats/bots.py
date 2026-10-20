@@ -10,6 +10,7 @@ from zantine.observations import ActionContext, MeetingContext, Observation
 from zantine.rng import GameRng
 from zantine.roles import Role
 from zantine.rules.actions import Action, CallMeeting, Kill, Move, Report, Wait
+from zantine.rules.relay import Deliver, HandOff, PickUp
 from zantine.rules.tasks import WorkOnTask
 from zantine.seats.base import SeatController
 from zantine.tasks import task_kind
@@ -74,6 +75,8 @@ class ScriptedBot(SeatController):
     elsewhere; otherwise, in a ``diligence`` share of Rounds, they walk to their
     nearest open Task and solve it (wrongly in a ``mistakes`` share of attempts;
     a blocked Task is retried after a couple of Rounds), and wander when idle.
+    Carriers handle relays in Task id order, walking to each next step and
+    holding in the handoff room until their partner arrives.
     In Meetings they say what they saw ("I saw X kill Y ... I accuse X.") and
     vote for a killer they saw, else the most-accused player.
     Impostors wander and kill when alone with one Crewmate (sometimes with one
@@ -115,13 +118,24 @@ class ScriptedBot(SeatController):
         tasks = [
             t
             for t in ctx.extra.get("tasks", {}).get("tasks", [])
-            if not t["done"] and ctx.round - blocked.get(t["task"], -10) > self.retry_after
+            if not t["done"]
+            and WorkOnTask.kind in task_kind(t["kind"]).work_actions
+            and ctx.round - blocked.get(t["task"], -10) > self.retry_after
         ]
+        # A shared ordering avoids cycles when carriers share several relays.
+        relays = [r for r in ctx.extra.get("relay", {}).get("relays", []) if r["next"]]
+        if relays:
+            relay = min(relays, key=lambda r: r["task"])
+            if not _path(relay):
+                return _relay_step(relay)
+            if relay["status"] == "holding" or self.rng.random() < self.diligence:
+                return Move(to=_path(relay)[0])
+            return Wait()
         if not tasks or self.rng.random() >= self.diligence:
             return None
         task = min(tasks, key=lambda t: len(t["path"]))
-        if task["path"]:
-            return Move(to=task["path"][0])
+        if _path(task):
+            return Move(to=_path(task)[0])
         if self.rng.random() < self.mistakes:
             return WorkOnTask(task=task["task"], answer="no idea")
         return WorkOnTask(task=task["task"], answer=task_kind(task["kind"]).solve(task))
@@ -183,6 +197,20 @@ class ScriptedBot(SeatController):
         if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
             return None
         return ranked[0][1]
+
+
+def _path(target: dict) -> list[str]:
+    """Rooms to walk through to a solo Task or to a relay's next step."""
+    return target["next"]["path"] if "next" in target else target["path"]
+
+
+def _relay_step(relay: dict) -> Action:
+    """The relay action for a carrier already in its next step's room."""
+    step = relay["next"]["action"]
+    for cls in (PickUp, HandOff, Deliver):
+        if cls.kind == step:
+            return cls(task=relay["task"])
+    return Wait()  # "receive": stay in the handoff room
 
 
 # Reading observations and statements ----------------------------------------------
