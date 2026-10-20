@@ -104,8 +104,6 @@ class Ledger:
         needed = model.worst_case_cost(request.text_size())
         if self.spent_usd + needed > self.spend_cap_usd:
             raise SpendCapReached(self.spent_usd, self.spend_cap_usd, needed)
-        if on_start is not None:
-            on_start(needed)
         meta = {
             "purpose": purpose,
             "phase": phase,
@@ -114,6 +112,9 @@ class Ledger:
             "harness": harness,
             "harness_version": harness_version,
         }
+        self._reserve(model, needed, attempt)
+        if on_start is not None:
+            on_start(needed)
         try:
             response = adapter.send(request)
         except ProviderError as exc:
@@ -126,6 +127,11 @@ class Ledger:
         """Count ``amount_usd`` against the cap with no call record: e.g. the worst
         case of a call lost in transit, which the provider may still have billed."""
         self.spent_usd += amount_usd
+
+    def _reserve(self, model: ModelSpec, needed: float, attempt: int) -> None:
+        """Called once a call has passed the cap check, before it is sent; every
+        reservation is followed by exactly one ``_record`` unless the process dies.
+        ``runs.RunLedger`` persists it so a crash mid-call cannot hide spend."""
 
     def _record(
         self,
