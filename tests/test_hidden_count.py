@@ -44,6 +44,9 @@ class Recorder(SeatController):
         self.contexts.append(ctx)
         return self.inner.choose_action(ctx)
 
+    def say(self, ctx: ActionContext) -> str:
+        return self.inner.say(ctx)
+
     def speak(self, ctx: MeetingContext) -> str:
         self.contexts.append(ctx)
         return self.inner.speak(ctx)
@@ -174,6 +177,20 @@ def test_a_crewmates_view_is_identical_with_0_1_or_2_impostors() -> None:
     baseline = views(())
     assert views((0,)) == baseline
     assert views((0, 1)) == baseline
+
+
+@pytest.mark.parametrize("impostors", [0, 2])
+def test_room_chat_and_split_key_views_do_not_leak_the_count(impostors: int) -> None:
+    # No solo steps, so the split-key holders start gathering at once.
+    game, recorders = recorded(GameConfig(seed=1, num_impostors=impostors, tasks_per_crewmate=0))
+    crew = [p.seat for p in game.state.players if not p.is_impostor]
+    contexts = [c for s in crew for c in recorders[s].contexts if isinstance(c, ActionContext)]
+    # The scan below really covers the new context fields and observation types.
+    assert all(c.extra["chat"] == {"round_talk_budget_chars": 200} for c in contexts)
+    assert any("splitkey" in c.extra for c in contexts)
+    seen = [o for s in crew for o in observed(game, s)]
+    assert {"chat.message", "splitkey.read"} <= {o["type"] for o in seen}
+    assert leaks(as_dicts(contexts)) == [] and leaks(seen) == []
 
 
 def test_crisis_notices_do_not_say_how_many_impostors_there_are() -> None:

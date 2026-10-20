@@ -79,13 +79,13 @@ def deliver(game: Game, rc: RoundContext) -> None:
         if not raw.strip():
             continue
         if seat in rc.killed:
-            game.event("chat.dropped", speaker=seat, reason="killed", text=raw)
+            game.event("chat.dropped", speaker=seat, reason="killed", said=raw)
             continue
         budget = game.config.room_chat_budget(seat)
         text = raw[:budget]
         truncated = len(raw) > budget
         if not text.strip():
-            game.event("chat.dropped", speaker=seat, reason="no_budget", text=raw)
+            game.event("chat.dropped", speaker=seat, reason="no_budget", said=raw)
             continue
         room = state.player(seat).room
         listeners = [p.seat for p in state.living_in(room)]

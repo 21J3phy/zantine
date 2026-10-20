@@ -165,7 +165,7 @@ class ScriptedBot(SeatController):
             if relay["status"] == "holding" or self.rng.random() < self.diligence:
                 return Move(to=_path(relay)[0])
             return Wait()
-        key = self._splitkey_action(ctx, gather=True)
+        key = self._splitkey_action(ctx, gather=not tasks)
         if key is not None:
             return key
         checks = [a for a in audits if a["duty"] == "auditor" and a["spec_received"]]
