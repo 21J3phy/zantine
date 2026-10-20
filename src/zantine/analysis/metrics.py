@@ -83,6 +83,8 @@ class GameRow:
     ejections: int
     kills: int
     cost_usd: float
+    # The game's Verification Protocol (header config; "optional" before #37).
+    protocol: str = "optional"
     seats: list[SeatRow] = field(default_factory=list)
 
     @property
@@ -291,6 +293,7 @@ def game_row(
         ejections=ejections,
         kills=kills,
         cost_usd=float((cost.get("game") or {}).get("cost_usd") or 0.0),
+        protocol=str(header["config"].get("verification_protocol", "optional")),
         seats=seats,
     )
 

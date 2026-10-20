@@ -11,6 +11,7 @@ from zantine.rules.crisis import CrisisModule
 from zantine.rules.registry import GameModule, MeetingRequest, RoundContext, Rules
 from zantine.rules.relay import RelayModule
 from zantine.rules.tasks import TasksModule
+from zantine.rules.verification import VerificationModule
 
 __all__ = ["GameModule", "MeetingRequest", "RoundContext", "Rules", "default_rules"]
 
@@ -23,6 +24,7 @@ def default_modules() -> list[GameModule]:
         TasksModule(),
         RelayModule(),
         AuditModule(),
+        VerificationModule(),
         ContainmentModule(),
     ]
 

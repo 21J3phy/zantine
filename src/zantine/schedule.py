@@ -1,7 +1,9 @@
 """The lineup scheduler: Balanced Lobby blocks, Benign Matches and Mirror Matches.
 
 ``make_manifest(pool, master_seed, blocks=12, mirror=True)`` plans a whole run
-(see ``docs/sample-size.md``) as plain data; ``runs.py`` plays it. Nothing here
+(see ``docs/sample-size.md``) as plain data; ``runs.py`` plays it.
+``make_verification_manifest`` plans the v1.1 Verification Protocol experiment:
+the same blocks once per protocol. Nothing here
 touches the engine, so the plan is cheap to build, inspect and verify.
 
 **Block** (28 games with a Model Pool of 7): one Balanced Lobby for each way to
@@ -65,6 +67,14 @@ SEATS_PER_MODEL = 2
 IMPOSTORS = 2
 MIRROR_PER_MODEL = 6
 SEED_DERIVATION = "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >> 1"
+
+# v1.1 Verification Protocol experiment (docs/sample-size.md): each new protocol
+# gets 63 Balanced Lobbies + 21 Benign Matches, i.e. 3 blocks; the optional
+# protocol's data is the v1 run.
+VERIFICATION = "verification"
+EXPERIMENTS = (VERIFICATION,)
+VERIFICATION_BLOCKS = 3
+VERIFICATION_NEW_PROTOCOLS = ("none", "mandatory")
 
 Pairing = tuple[str, str]
 
@@ -209,34 +219,8 @@ def make_manifest(
     root = GameRng(master_seed)
     games: list[dict[str, Any]] = []
     for b in range(blocks):
-        block = b + 1
-        pairings = design.assign(b, root.fork(f"pairings/block-{block}"))
-        planned = [
-            {
-                "id": f"b{block:02d}-lobby-{lid:02d}",
-                "block": block,
-                "kind": "lobby",
-                "lineup_id": lid,
-                "lineup": list(design.lineups[lid]),
-                "impostors": list(pairings[lid]),
-                "config": {},
-            }
-            for lid in range(len(design.lineups))
-        ]
-        planned += [
-            {
-                "id": f"b{block:02d}-benign-{lid:02d}",
-                "block": block,
-                "kind": "benign",
-                "lineup_id": lid,
-                "lineup": list(design.lineups[lid]),
-                "impostors": [],
-                "config": {"num_impostors": 0},
-            }
-            for lid in design.benign(b)
-        ]
         # Shuffled within the block, so a run stopped mid-block is not biased by kind.
-        games += root.fork(f"order/block-{block}").shuffled(planned)
+        games += root.fork(f"order/block-{b + 1}").shuffled(_block_games(design, root, b))
     if mirror:
         for k in range(MIRROR_PER_MODEL):
             for i, model in enumerate(design.pool):
@@ -251,11 +235,7 @@ def make_manifest(
                         "config": {},
                     }
                 )
-    for index, game in enumerate(games):
-        game["index"] = index
-        game["seed"] = game_seed(master_seed, game["id"])
-    if len({g["seed"] for g in games}) != len(games):  # astronomically unlikely
-        raise ValueError("seed collision; choose another master seed")
+    _number(games, master_seed)
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "master_seed": master_seed,
@@ -274,6 +254,118 @@ def make_manifest(
     if problems:
         raise AssertionError(f"scheduler produced an invalid plan: {problems[:5]}")
     return manifest
+
+
+def make_verification_manifest(
+    pool: Sequence[str],
+    master_seed: int,
+    *,
+    blocks: int = VERIFICATION_BLOCKS,
+    protocols: Sequence[str] = VERIFICATION_NEW_PROTOCOLS,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The v1.1 Verification Protocol experiment (``docs/sample-size.md``).
+
+    Each protocol gets ``blocks`` blocks of the v1 design (21 Balanced Lobbies
+    and 7 Benign Matches each; 3 blocks = 63 + 21 games), with the same lineups
+    and Impostor Pairings for every protocol in block *b*, so protocols differ
+    only in their rule and their game seeds. Game ids carry the protocol
+    (``mandatory-b02-lobby-07``). The default protocols are the two new ones
+    (168 games); the optional protocol's data is the v1 run, but it can be
+    scheduled here too (e.g. for a dry run with its own baseline).
+    """
+    from zantine.config import VERIFICATION_PROTOCOLS
+
+    if blocks < 0:
+        raise ValueError("blocks must be >= 0")
+    protocols = list(protocols)
+    if not protocols or len(set(protocols)) != len(protocols):
+        raise ValueError("need at least one protocol, each listed once")
+    unknown = [p for p in protocols if p not in VERIFICATION_PROTOCOLS]
+    if unknown:
+        raise ValueError(
+            f"unknown Verification Protocol {unknown[0]!r}; known: "
+            f"{', '.join(VERIFICATION_PROTOCOLS)}"
+        )
+    if "verification_protocol" in (config or {}):
+        raise ValueError("the experiment sets verification_protocol per game")
+    design = CyclicDesign(pool)
+    root = GameRng(master_seed)
+    games: list[dict[str, Any]] = []
+    for b in range(blocks):
+        planned = [g for p in protocols for g in _block_games(design, root, b, protocol=p)]
+        # Every protocol's block b is shuffled together, so a run stopped part-way
+        # has played the protocols (and game kinds) about equally.
+        games += root.fork(f"order/block-{b + 1}").shuffled(planned)
+    _number(games, master_seed)
+    manifest = {
+        "manifest_version": MANIFEST_VERSION,
+        "experiment": VERIFICATION,
+        "protocols": protocols,
+        "master_seed": master_seed,
+        "seed_derivation": SEED_DERIVATION,
+        "pool": list(design.pool),
+        "blocks": blocks,
+        "block_size": len(design.lineups) + design.n,
+        "pairing_window": design.window,
+        "benign_period": design.benign_period,
+        "mirror_per_model": 0,
+        "engine": engine_versions(),
+        "config": dict(config or {}),
+        "games": games,
+    }
+    problems = verify(manifest)
+    if problems:
+        raise AssertionError(f"scheduler produced an invalid plan: {problems[:5]}")
+    return manifest
+
+
+def _block_games(
+    design: CyclicDesign, root: GameRng, b: int, *, protocol: str | None = None
+) -> list[dict[str, Any]]:
+    """Block ``b`` (0-based): one Balanced Lobby per lineup and the block's Benign
+    Matches. With a ``protocol``, ids and configs carry it; the Impostor Pairings
+    depend only on the block, so every protocol's block ``b`` gets the same ones."""
+    block = b + 1
+    pairings = design.assign(b, root.fork(f"pairings/block-{block}"))
+    prefix = f"{protocol}-" if protocol else ""
+    extra = {"verification_protocol": protocol} if protocol else {}
+    tag = {"protocol": protocol} if protocol else {}
+    planned = [
+        {
+            "id": f"{prefix}b{block:02d}-lobby-{lid:02d}",
+            "block": block,
+            "kind": "lobby",
+            **tag,
+            "lineup_id": lid,
+            "lineup": list(design.lineups[lid]),
+            "impostors": list(pairings[lid]),
+            "config": dict(extra),
+        }
+        for lid in range(len(design.lineups))
+    ]
+    planned += [
+        {
+            "id": f"{prefix}b{block:02d}-benign-{lid:02d}",
+            "block": block,
+            "kind": "benign",
+            **tag,
+            "lineup_id": lid,
+            "lineup": list(design.lineups[lid]),
+            "impostors": [],
+            "config": {"num_impostors": 0, **extra},
+        }
+        for lid in design.benign(b)
+    ]
+    return planned
+
+
+def _number(games: list[dict[str, Any]], master_seed: int) -> None:
+    for index, game in enumerate(games):
+        game["index"] = index
+        game["seed"] = game_seed(master_seed, game["id"])
+    if len({g["seed"] for g in games}) != len(games):  # astronomically unlikely
+        raise ValueError("seed collision; choose another master seed")
 
 
 def engine_versions() -> dict[str, Any]:
@@ -308,6 +400,42 @@ def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
 
 def verify(manifest: dict[str, Any]) -> list[str]:
     """Every scheduling invariant; returns the problems found (empty = valid)."""
+    if "experiment" in manifest:
+        return _verify_experiment(manifest)
+    return _verify_plan(manifest)
+
+
+def _verify_experiment(manifest: dict[str, Any]) -> list[str]:
+    """Each protocol's games are a valid plan of their own, with the same lineups
+    and Impostor Pairings per block, and each game is configured for its protocol."""
+    if manifest["experiment"] != VERIFICATION:
+        return [f"unknown experiment {manifest['experiment']!r}"]
+    games, protocols = manifest["games"], manifest["protocols"]
+    out: list[str] = []
+    if len({g["id"] for g in games}) != len(games):
+        out.append("duplicate game ids")
+    if len({g["seed"] for g in games}) != len(games):
+        out.append("duplicate seeds")
+    for g in games:
+        if g.get("protocol") not in protocols:
+            out.append(f"{g['id']}: protocol {g.get('protocol')!r} is not scheduled")
+        elif g["config"].get("verification_protocol") != g["protocol"]:
+            out.append(f"{g['id']}: not configured for its protocol")
+        if g["kind"] == "mirror":
+            out.append(f"{g['id']}: the experiment has no Mirror Matches")
+    designs = {}
+    for p in protocols:
+        mine = [g for g in games if g.get("protocol") == p]
+        out += [f"{p}: {x}" for x in _verify_plan({**manifest, "games": mine})]
+        designs[p] = sorted(
+            (g["block"], g["kind"], g["lineup_id"], tuple(g["impostors"])) for g in mine
+        )
+    if len({tuple(d) for d in designs.values()}) > 1:
+        out.append("protocols do not share the same lineups and Impostor Pairings per block")
+    return out
+
+
+def _verify_plan(manifest: dict[str, Any]) -> list[str]:
     pool = manifest["pool"]
     design = CyclicDesign(pool)
     games = manifest["games"]
@@ -386,6 +514,15 @@ def all_pairings(pool: Sequence[str]) -> list[Pairing]:
 
 def summary(manifest: dict[str, Any]) -> str:
     kinds = Counter(g["kind"] for g in manifest["games"])
+    if manifest.get("experiment") == VERIFICATION:
+        each = len(manifest["games"]) // max(1, len(manifest["protocols"]))
+        return (
+            f"{len(manifest['games'])} games: Verification Protocol experiment, "
+            f"{' / '.join(manifest['protocols'])}, each {manifest['blocks']} blocks x "
+            f"{manifest['block_size']} = {each} ({kinds['lobby']} Balanced Lobby, "
+            f"{kinds['benign']} Benign in all); same lineups and Impostor Pairings per block "
+            "for every protocol"
+        )
     return (
         f"{len(manifest['games'])} games: {manifest['blocks']} blocks x "
         f"{manifest['block_size']} ({kinds['lobby']} Balanced Lobby, {kinds['benign']} Benign), "

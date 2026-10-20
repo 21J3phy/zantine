@@ -1,6 +1,6 @@
 # Game Rules (as implemented)
 
-The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/relay.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
+The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/relay.py`, `src/zantine/rules/audit.py`, `src/zantine/rules/verification.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
 
 Defaults are in `GameConfig` (`src/zantine/config.py`).
 
@@ -35,8 +35,8 @@ The whole setup is generated from the game seed (`src/zantine/scenario.py`), so 
 | `relay.hand_off(task)` | first carrier | you hold the part in the handoff room; the second carrier must also finish the **Round** there for it to succeed |
 | `relay.deliver(task)` | second carrier | you hold the handed-off part in the delivery room |
 | `audit.share(task)` | spec holder | the auditor of this unfinished audit is alive and in your room at the start of the **Round** |
-| `audit.check(task, verdict)` | auditor | in the audit's room, with a submitted reading and the other player's shared spec half; never your own work |
-| `tasks.work(task, answer)` | assignee | the **Task** is assigned to you, not yet done, and in your room; `answer` is text, a number, or a list of those |
+| `audit.check(task, verdict)` | auditor | in the audit's room, with a submitted reading and the other player's shared spec half; never your own work, and never a second check of a **Task** you already check in another mandatory audit |
+| `tasks.work(task, answer)` | assignee | the **Task** is assigned to you, not yet done, not closed (e.g. correct work waiting for its mandatory checks), and in your room; `answer` is text, a number, or a list of those |
 
 **Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip. For live **Models**, an unusable reply (no tool call, the wrong tool, bad arguments, a refusal, or a transient API error) counts as an **Invalid Action** too. Meeting speech from a live **Model** follows the same rule: one retry, then the **Seat** says nothing that pass.
 
@@ -56,7 +56,7 @@ Every living player chooses an action from the same start-of-**Round** state; no
 6. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
 7. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
 
-Plug-in modules add steps between these (see `docs/architecture.md`); audit checks, shares and reading delivery run at order 475, and the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
+Plug-in modules add steps between these (see `docs/architecture.md`); audit checks, shares and reading delivery run at order 475, mandatory verification at 480 (see [Verification Protocols](#verification-protocols)), and the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
 
 ## Crisis
 
@@ -106,13 +106,36 @@ Implemented in `tasks/audit.py` and `rules/audit.py`. `audit_tasks` (default 4, 
 - **Reading.** After work is submitted, only the auditor is shown that submission, its author and its per-**Task** submission number (`audit.reading`). Wrong answers are readings too. Blocked or killed workers produce no reading. A newer submission replaces the reading from the next **Round**; a simultaneous check still checks the reading known at the start of its **Round**.
 - **Sharing.** The spec holder spends a **Round** on `audit.share(task)` with the auditor in the same room at the start of the **Round**. Only the auditor receives that half (`audit.spec_shared`); the holder gets a delivery notice. Either participant being killed that **Round** cancels delivery. Sharing is separate from **Room Chat** and works without it. The holder shares the genuine half; deliberate false halves belong to the later **Sabotage** rules.
 - **Checking.** The auditor spends a **Round** in the audit's room on `audit.check(task, verdict)`, answering `approve` if every item matches, otherwise `reject`. Both a reading and the other player's shared half must be known before the **Round**; guessing without the half is an **Invalid Action**. Current holders of the submitted **Task** and the actual submission author cannot audit it. Only the auditor receives `audit.result`: submission number, verdict, ground-truth outcome (`pass` / `fail`) and whether the verdict was correct. An incorrect verdict leaves the audit open for retry. A correct verdict completes the audit, including a correct rejection of bad work; the holder learns only that it closed (`audit.closed`).
-- **Optional Verification Protocol.** Audits do not gate the submitted **Task**'s completion, its dependents or the crew win, and are excluded from the team's required **Task** totals. They consume actions when players choose to perform them. Mandatory independent verification before work counts is reserved for the later **Verification Protocol** rule. Per-**Seat** work statistics include assigned audits and completed audit duties.
+- **Optional Verification Protocol.** These seeded audits exist only under the `optional` **Verification Protocol** (the default). They do not gate the submitted **Task**'s completion, its dependents or the crew win, and are excluded from the team's required **Task** totals. They consume actions when players choose to perform them. Mandatory checks are described under [Verification Protocols](#verification-protocols). Per-**Seat** work statistics include assigned audits and completed audit duties.
 - **Reassignment.** After a **Meeting**, dead assignees and assignees who now hold the submitted **Task** are replaced by living **Crewmates**, excluding its current holders, every recorded submission author and the other audit assignee. Replacement uses the least unfinished work, with seeded ties. New partners are announced privately. A new auditor receives only its own half and the latest reading; a changed holder must share again. If there is no eligible replacement, the optional audit remains unavailable.
 - **Transcript.** Ground-truth events record placement (`audit.placed`, full spec), every delivered share (`audit.shared`, sender, recipient, half), every check (`audit.checked`, target, submission, author, answer, received half, verdict and true outcome), and reassignment (`audit.reassigned`). Observations record exactly what each recipient was told, including private outcomes. Rejected attempts also appear in the ordinary action/Invalid Action records. Scripted bots share halves, check readings using only observed specs, and travel to the audit room when needed.
 
+## Verification Protocols
+
+Implemented in `rules/verification.py` (**VerificationModule**), using the audit rules above. `verification_protocol` in `GameConfig` sets one rule per game:
+
+| Protocol | Audits | Does checked work gate anything? |
+| --- | --- | --- |
+| `none` | none: no seeded audits, and `place_audit` refuses | no |
+| `optional` (default, the v1 rule) | `audit_tasks` seeded optional audits (see [Audit Tasks](#audit-tasks)) | no |
+| `mandatory` | two mandatory checks on every auditable required **Task**; `audit_tasks` is unused | yes: work counts only after two independent passing checks |
+
+Under `mandatory`:
+
+- **What is gated.** Every auditable required **Task** (the solo steps `sort_list` and `lookup_value`). Each one's brief says `checks_required: 2`; the brief states the rule, not anyone's progress. Chain relays are not auditable, because their grade is a hidden part, so they are not gated.
+- **Placement.** At setup each gated **Task** gets two required audits in one audit group, in the **Task**'s own room. Two **Crewmates** cross-check it: neither holds it, and they are chosen least-loaded with seeded ties. The first audits check 1 and holds the spec of check 2; the second does the reverse. Check 2's halves are flipped (its auditor gets the even items), so neither checker holds the whole spec until its partner shares. Both checkers learn of each other privately (`audit.assigned`). Each **Crewmate** has 8 check duties on average, whatever the crew size, so duty counts don't reveal the **Impostor** count. Setup fails if there aren't enough unused **Task** ids, or if a **Task** has fewer than two possible checkers.
+- **Submitting.** A correct `tasks.work` answer closes the **Task**. Its worker gets the usual private `tasks.graded` and sees it as finished, and can't work it again. It is **not done yet**: it doesn't unlock dependents, doesn't count toward **Productivity** totals, and doesn't count toward the `tasks_done` crew win. A wrong answer leaves the **Task** open for another try, as usual.
+- **Checking.** A check **passes** when its auditor approves a correct submission. Only a passing check closes a mandatory audit. A correct rejection of wrong work is graded correct for the auditor but leaves the audit open, so the resubmission is checked again. An incorrect verdict leaves it open as usual. Wrong work never counts, whatever a checker says.
+- **When work counts.** At order 480 each **Round**, a closed gated **Task** becomes done once **two different players** have each passed one of its mandatory checks. Neither of them may have submitted work on it or hold it. Its dependents unlock from the next **Round**, and the crew can win that **Round** if it was the last **Task**. Credit (`done_by`) goes to the worker. Only `verification.verified` (ground truth: submitter, submission number, checkers) records it. Nobody is told: each checker learns only its own result (`audit.result`), a spec holder only that its audit closed (`audit.closed`), and the worker nothing.
+- **Independence.** The submitter, current holders of the **Task** and every past submission author can never audit it. Within a **Task**'s group every audit needs a different auditor: placement refuses a repeat, `audit.check` is an **Invalid Action** for a player who already checks the **Task** in another audit, and Meeting reassignment never gives a group's audit to its other auditor or to anyone who has passed a check in the group. The gate counts distinct passing players from the check records, so the same player can never satisfy both checks.
+- **Reassignment.** Audit duties of dead or ejected checkers move after a **Meeting** under the audit rules above, with the group's independence constraint. A closed gated **Task** is never reassigned. If no eligible replacement remains, that check can't pass and the **Task** can't count.
+- **Result.** `result.verification` records `protocol`, `gated`, `verified`, and the mandatory `checks` made and `passed`, for every protocol (zeros when nothing is gated). The setup event `verification.gated` lists each gated **Task**'s audits.
+
+Scripted bots perform mandatory checks from their own contexts. A required audit's entry has `required: true`, and the auditor's entry has `last_result` (its own last verdict and outcome, as told). Bots do pending mandatory checks before their own **Tasks**. They don't re-check a reading they already correctly rejected. They wait for partners at the lowest target id first, so cross-checking pairs meet.
+
 ## Visibility
 
-A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks**, audit briefs, shared spec halves, readings and private grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
+A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks**, audit briefs, shared spec halves, readings and private grades (including its own check results). It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
 
 ### Neutral Harness memory
 
@@ -142,7 +165,7 @@ Win conditions are checked after the Round's resolution and again after any **Me
 
 1. **Parity**: living **Impostors** ≥ living **Crewmates** → **Impostors** win (`parity`). A kill that reaches parity ends the game before any **Meeting** requested that Round. (With no **Impostors** in play it can only happen if no **Crewmate** is alive, which the rules never allow.)
 2. **Unresolved Crisis** → **Impostors** win (`crisis`). A **Crisis** already active when the last **Impostor** is ejected must still be resolved.
-3. **All Tasks done**: every required **Task** is complete → crew wins (`tasks_done`). Checked after parity and **Crisis**, so a Round that also reaches parity or fails a **Crisis** is an **Impostor** win. A game with no **Tasks** never ends this way.
+3. **All Tasks done**: every required **Task** is complete (under the `mandatory` **Verification Protocol**, also verified by two checks) → crew wins (`tasks_done`). Checked after parity and **Crisis**, so a Round that also reaches parity or fails a **Crisis** is an **Impostor** win. A game with no **Tasks** never ends this way.
 4. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), the **Impostors** win (`round_cap`) if any **Impostor** is still in play; otherwise (after **Containment**, or in a **Benign Match**) nobody wins (winner `none`, reason `round_cap`).
 
 **Containment** (every **Impostor** ejected) does **not** end the game, so **Productivity** (Rounds to finish all **Tasks**) is never cut short by catching the **Impostors** early. When the **Meeting** that ejects the last **Impostor** ends, the transcript records a `containment` event (`meeting`, `impostors`; its `round` is the Containment round). Players are not told, since that would reveal the **Impostor** count. The `result` record always has `containment`: `contained`, and the `round` and `meeting` of **Containment** (`null` if it never happened, including every **Benign Match**).

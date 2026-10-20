@@ -17,6 +17,10 @@ Charts (each written as SVG with real text, and PNG):
 - ``sabotage_damage``: Sabotage Damage per Impostor Seat (#33).
 - ``cost_vs_metrics``: cost per game against a few metrics.
 - ``mirror``: Mirror Matches, separately labelled as descriptive self-play.
+- ``verification_protocols`` (v1.1 experiment runs, ``analysis/verification.py``):
+  Sabotage Damage prevented against Productivity cost per Verification Protocol,
+  relative to the optional baseline, plus each protocol's own damage and
+  Benign-Match completion time.
 
 Interval bars are drawn from their bounds, never as distances from the estimate:
 a percentile interval need not contain its point estimate.
@@ -426,4 +430,126 @@ def mirror(report: dict[str, Any]) -> Figure:
         interval_panel(ax, report["mirror"][key], models)
     fig.subplots_adjust(left=0.1, right=0.98, top=0.8, bottom=0.25, wspace=0.75)
     caption(fig, report)
+    return fig
+
+
+# Verification Protocol experiment (#37) ----------------------------------------------
+
+
+def _protocol_values(
+    report: dict[str, Any], protocols: list[str], key: str
+) -> tuple[np.ndarray, ...]:
+    def arr(field: str) -> np.ndarray:
+        out = []
+        for p in protocols:
+            v = (report["protocols"][p].get(key) or {}).get(field)
+            out.append(np.nan if v is None else v)
+        return np.array(out, dtype=float)
+
+    return arr("estimate"), arr("ci_low"), arr("ci_high")
+
+
+def verification_protocols(report: dict[str, Any]) -> Figure:
+    """Sabotage Damage prevented against Productivity cost, one dot per Verification
+    Protocol, relative to the optional baseline; and each protocol's own numbers."""
+    protocols = list(report["order"])
+    fig = Figure(figsize=(11, 4.8))
+    fig.suptitle(
+        "Verification Protocols: Sabotage Damage prevented vs Productivity cost",
+        color=INK,
+        fontsize=11,
+    )
+    ax = fig.add_axes((0.07, 0.22, 0.42, 0.62))
+    ax.set_xlabel("Productivity cost: extra Rounds to finish in Benign Matches vs optional")
+    ax.set_ylabel("Sabotage Damage prevented vs optional (Rounds)")
+    ax.grid(color=GRID, linewidth=0.6)
+    ax.axhline(0, color=BAR, linewidth=0.8)
+    ax.axvline(0, color=BAR, linewidth=0.8)
+    if not report["baseline_present"]:
+        note(ax, "No optional baseline loaded\n(zantine report <run> --baseline <v1 run>)")
+    else:
+        others = [p for p in protocols if p != report["baseline"]]
+        x, xlo, xhi = _protocol_values(report, others, "productivity_cost")
+        y, ylo, yhi = _protocol_values(report, others, "damage_prevented")
+        ok = np.isfinite(x) & np.isfinite(y)
+        interval_bars(ax, np.where(ok, y, np.nan), xlo, xhi, horizontal=True, cap=5)
+        interval_bars(ax, np.where(ok, x, np.nan), ylo, yhi, horizontal=False, cap=5)
+        ax.scatter(x[ok], y[ok], s=40, color=DOT, edgecolor="white", linewidth=0.8, zorder=3)
+        ax.scatter([0], [0], s=40, facecolor="white", edgecolor=DOT, linewidth=1.2, zorder=3)
+        ax.annotate(
+            f"{report['baseline']} (baseline)",
+            (0, 0),
+            xytext=(6, -11),
+            textcoords="offset points",
+            fontsize=8,
+            color=INK,
+        )
+        for i in np.flatnonzero(ok):
+            ax.annotate(
+                others[i], (x[i], y[i]), xytext=(6, 5), textcoords="offset points", fontsize=8
+            )
+        for i in np.flatnonzero(~ok):
+            ax.text(
+                0.02,
+                0.95 - 0.06 * i,
+                f"{others[i]}: n/a",
+                transform=ax.transAxes,
+                fontsize=7,
+                color=BAR,
+            )
+        span = np.r_[xlo, xhi, ylo, yhi, 0.0]
+        lim = np.nanmax(np.abs(span)) if np.isfinite(span).any() else 1.0
+        lim = 1.15 * (lim or 1.0)
+        ax.set_xlim(-lim, lim)
+        ax.set_ylim(-lim, lim)
+
+    panels = (
+        ("sabotage_damage", "Sabotage Damage per Balanced Lobby", "extra Rounds vs own Benign"),
+        ("benign_completion", "Benign Matches: time to finish", "Rounds (restricted mean)"),
+    )
+    for n, (key, title, unit) in enumerate(panels):
+        pax = fig.add_axes((0.64, 0.6 - 0.38 * n, 0.33, 0.24))
+        est, lo, hi = _protocol_values(report, protocols, key)
+        rows = np.arange(len(protocols))[::-1]
+        pax.set_yticks(rows, protocols, fontsize=8)
+        pax.set_ylim(-0.7, len(protocols) - 0.3)
+        pax.grid(axis="x", color=GRID, linewidth=0.6)
+        if key == "sabotage_damage":
+            pax.axvline(0, color=BAR, linewidth=0.8)
+        ok = np.isfinite(est)
+        if ok.any():
+            interval_bars(pax, np.where(ok, rows, np.nan), lo, hi, horizontal=True)
+            pax.scatter(est[ok], rows[ok], s=22, color=DOT, zorder=3)
+        for r in rows[~ok]:
+            pax.text(
+                0.98,
+                r,
+                "n/a",
+                transform=pax.get_yaxis_transform(),
+                ha="right",
+                va="center",
+                fontsize=7,
+                color=BAR,
+            )
+        pax.set_title(title, fontsize=9, color=INK, loc="left")
+        pax.set_xlabel(unit, fontsize=7.5)
+
+    method = report["method"]
+    counts = ", ".join(
+        f"{p}: {v['games']['lobby']} lobbies + {v['games']['benign']} Benign"
+        for p, v in report["protocols"].items()
+    )
+    finished = ", ".join(
+        f"{p} {v['benign_finished']['estimate']:.0%}"
+        for p, v in report["protocols"].items()
+        if v["benign_finished"]["estimate"] is not None
+    )
+    text = (
+        f"{method['intervals']} {method['replicates']} replicates, seed {method['seed']}. "
+        "Protocols in fixed order. Each protocol's damage is measured against its own "
+        "Benign Matches; unfinished games count as the round cap, which compresses damage "
+        f"when work rarely finishes (Benign Matches finished: {finished or 'n/a'}). "
+        f"Games: {counts}."
+    )
+    fig.text(0.01, 0.005, text, fontsize=7, color=BAR, ha="left", va="bottom", wrap=True)
     return fig

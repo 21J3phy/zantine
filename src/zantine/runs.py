@@ -50,7 +50,18 @@ from zantine.harness.pricing import ModelSpec
 from zantine.harness.provider import ProviderAdapter
 from zantine.rng import GameRng
 from zantine.scenario import build_scenario
-from zantine.schedule import engine_versions, load_pool, make_manifest, seat_lineup, summary
+from zantine.schedule import (
+    EXPERIMENTS,
+    VERIFICATION,
+    VERIFICATION_BLOCKS,
+    VERIFICATION_NEW_PROTOCOLS,
+    engine_versions,
+    load_pool,
+    make_manifest,
+    make_verification_manifest,
+    seat_lineup,
+    summary,
+)
 
 MANIFEST = "manifest.json"
 RUN = "run.json"
@@ -488,8 +499,25 @@ def _locked(run_dir: Path) -> Iterator[None]:
 def add_commands(sub: Any) -> None:
     """``zantine schedule`` and ``zantine run``."""
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
-    s.add_argument("--blocks", type=int, default=12, help="blocks of 28 games (default 12)")
+    s.add_argument(
+        "--blocks",
+        type=int,
+        help=f"blocks of 28 games (default 12; with --experiment {VERIFICATION}: "
+        f"{VERIFICATION_BLOCKS} per protocol)",
+    )
     s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model")
+    s.add_argument(
+        "--experiment",
+        choices=EXPERIMENTS,
+        help=f"a follow-up experiment instead of v1: '{VERIFICATION}' = the v1.1 "
+        "Verification Protocol experiment (docs/sample-size.md)",
+    )
+    s.add_argument(
+        "--protocols",
+        help=f"comma-separated Verification Protocols to schedule with --experiment "
+        f"{VERIFICATION} (default {','.join(VERIFICATION_NEW_PROTOCOLS)}; the optional "
+        "baseline is the v1 run)",
+    )
     s.add_argument(
         "--master-seed",
         type=int,
@@ -521,9 +549,31 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 def _schedule(args: argparse.Namespace) -> int:
     master_seed = args.master_seed if args.master_seed is not None else secrets.randbits(63)
     config = {"round_cap": args.round_cap} if args.round_cap is not None else {}
-    manifest = make_manifest(
-        load_pool(), master_seed, blocks=args.blocks, mirror=args.mirror, config=config
-    )
+    if args.experiment == VERIFICATION:
+        if args.mirror:
+            raise ValueError("the Verification Protocol experiment has no Mirror Matches")
+        protocols = (
+            [p.strip() for p in args.protocols.split(",") if p.strip()]
+            if args.protocols
+            else list(VERIFICATION_NEW_PROTOCOLS)
+        )
+        manifest = make_verification_manifest(
+            load_pool(),
+            master_seed,
+            blocks=VERIFICATION_BLOCKS if args.blocks is None else args.blocks,
+            protocols=protocols,
+            config=config,
+        )
+    else:
+        if args.protocols:
+            raise ValueError(f"--protocols needs --experiment {VERIFICATION}")
+        manifest = make_manifest(
+            load_pool(),
+            master_seed,
+            blocks=12 if args.blocks is None else args.blocks,
+            mirror=args.mirror,
+            config=config,
+        )
     if args.out is None:
         print(json.dumps(manifest, indent=1, sort_keys=True))
         return 0

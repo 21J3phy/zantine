@@ -2,9 +2,10 @@
 
 The *spec* is the answer key of the audited work, read as items
 (``TaskKind.audit_items``) and split between two players: the auditor holds the
-odd-numbered items and the spec holder the even-numbered ones, so neither half
-alone can confirm a reading. The *reading* is another player's submission. The
-verdict is ``approve`` (the reading matches the spec) or ``reject``.
+odd-numbered items and the spec holder the even-numbered ones (swapped in a
+*flipped* audit), so neither half alone can confirm a reading. The *reading* is
+another player's submission. The verdict is ``approve`` (the reading matches the
+spec) or ``reject``.
 
 In a game an audit always targets another Task (``AuditKind.for_target``); the
 reading arrives when that Task's work is submitted, and ``zantine.rules.audit``
@@ -78,28 +79,42 @@ class AuditKind(TaskKind):
     manages_reassignment = True
     size = 6
 
-    def for_target(self, target: Task) -> TaskContent:
-        """An audit of ``target``'s submitted work; the spec is its answer key."""
+    def for_target(self, target: Task, *, flip: bool = False, required: int = 0) -> TaskContent:
+        """An audit of ``target``'s submitted work; the spec is its answer key.
+
+        ``flip`` gives the auditor the even items and the spec holder the odd ones,
+        so two audits of one Task can cross-check (each player audits one and holds
+        the spec of the other) without either player ever holding the whole spec.
+        ``required`` > 0 marks one of the mandatory checks the target needs.
+        """
         kind = task_kind(target.kind)
         items = kind.audit_items(target.content.answer)
         if not kind.auditable or items is None or len(items) < 2:
             raise ValueError(f"{target.id} ({target.kind}) cannot be audited")
+        halves = split_spec(items)
+        instructions = (
+            f"Check the reading submitted for {target.id} ({target.content.title}) "
+            "against the spec. The spec is split between the auditor and the spec "
+            "holder: the auditor needs the other half (the spec holder shares it with "
+            "audit.share in the same room), then answers audit.check with 'approve' "
+            "if every item of the reading matches the spec, else 'reject'. Nobody may "
+            "audit their own submission."
+        )
+        if required:
+            instructions += (
+                f" This is a mandatory check: {target.id} counts as done only after "
+                f"{required} different players' checks approve correct work. A rejected "
+                "reading keeps this check open until a new reading arrives."
+            )
         return TaskContent(
             kind=self.name,
             title=f"Audit {target.id}: {target.content.title}",
-            instructions=(
-                f"Check the reading submitted for {target.id} ({target.content.title}) "
-                "against the spec. The spec is split between the auditor and the spec "
-                "holder: the auditor needs the other half (the spec holder shares it with "
-                "audit.share in the same room), then answers audit.check with 'approve' "
-                "if every item of the reading matches the spec, else 'reject'. Nobody may "
-                "audit their own submission."
-            ),
+            instructions=instructions,
             inputs={
                 "target": target.id,
                 "target_title": target.content.title,
                 "spec_length": len(items),
-                "halves": list(split_spec(items)),
+                "halves": [halves[1], halves[0]] if flip else list(halves),
             },
             # The verdict depends on the submission, so there is no fixed key; the
             # full spec is in ``halves``.

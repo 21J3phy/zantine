@@ -4,7 +4,9 @@ At setup every Crewmate is privately assigned solo steps (``zantine.tasks``).
 Working a Task is an action taken in the Task's room with an answer. The answer
 is graded automatically and privately: only the worker is told the result. A
 step whose prerequisites are not truly complete at the start of the Round is
-blocked, and the worker is told so. All counted Tasks done is a crew win.
+blocked, and the worker is told so. All counted Tasks done is a crew win. Under a
+mandatory Verification Protocol, correct work on a Task with ``checks_required``
+closes it and waits for its checks (``rules/verification.py``) before it is done.
 
 The rules implemented here are documented in ``docs/rules.md``; keep them in sync.
 """
@@ -68,6 +70,9 @@ class TaskBoard:
         if len(task.assignees) > 1:
             # Everyone on a multi-player Task, in slot order.
             view["assignees"] = list(task.assignees)
+        if task.checks_required:
+            # The Verification Protocol's rule, not anyone's progress.
+            view["checks_required"] = task.checks_required
         return view
 
     def _ref(self, task_id: str) -> dict[str, Any]:
@@ -130,6 +135,10 @@ class WorkOnTask(Action):
             return f"{task.id} is worked with {', '.join(actions)}, not {self.kind}"
         if task.done:
             return f"{task.id} is already done"
+        if task.closed and task.checks_required:
+            return f"{task.id} was submitted correctly and is waiting for its checks"
+        if task.closed:
+            return f"{task.id} is closed: no more work can be done on it"
         if actor.room != task.room:
             return f"{task.id} is in {task.room}, not {actor.room}"
         if not _answer_shape_ok(self.answer):
@@ -236,6 +245,13 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
         game.observe(seat, "tasks.graded", task=task.id, correct=correct)
         if not correct:
             stats.wrong += 1
+        elif task.checks_required:
+            # Verification Protocol: the work is in, but the Task is done (unlocks
+            # dependents, counts toward the win) only when its checks pass, which
+            # its module decides (rules/verification.py). The worker knows only
+            # that its answer was right.
+            task.closed = True
+            b.known_done[seat].add(task.id)
         elif not task.done:
             task.done, task.done_by, task.done_round = True, seat, rc.round
             stats.done += 1

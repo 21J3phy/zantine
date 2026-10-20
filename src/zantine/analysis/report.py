@@ -11,6 +11,10 @@ Writes into ``<run-dir>/report/``:
   widths. Information only: v1 has a fixed size and no early stopping.
 - the graphs (``graphs.py``), as SVG and PNG.
 
+A Verification Protocol experiment run (``--experiment verification``) is
+reported by ``analysis/verification.py`` instead (``verification.json`` and its
+graph), with ``--baseline <v1 run>`` supplying the optional-protocol games.
+
 No ranking and no composite score (``docs/plan.md``): Models always appear in
 fixed alphabetical order, and nothing is labelled as ahead of anything else.
 Definitions: ``docs/metrics.md``.
@@ -29,6 +33,7 @@ from typing import Any
 import numpy as np
 
 from zantine import runs
+from zantine.analysis import verification
 from zantine.analysis.bootstrap import (
     DEFAULT_REPLICATES,
     DEFAULT_SEED,
@@ -575,8 +580,24 @@ def write_report(
     replicates: int = DEFAULT_REPLICATES,
     seed: int = DEFAULT_SEED,
     graphs: bool = True,
+    baseline: str | Path | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Build the report for a run directory and write it (graphs included)."""
+    """Build the report for a run directory and write it (graphs included).
+
+    A Verification Protocol experiment run (``analysis/verification.py``) gets its
+    own report instead: per-Model v1 metrics would pool games played under
+    different rules."""
+    if verification.is_experiment(run_dir):
+        return verification.write(
+            run_dir,
+            baseline=baseline,
+            out_dir=out_dir,
+            replicates=replicates,
+            seed=seed,
+            graphs=graphs,
+        )
+    if baseline is not None:
+        raise ValueError("--baseline is only for a Verification Protocol experiment run")
     data = load_run(run_dir)
     report = build_report(data, replicates=replicates, seed=seed)
     out = Path(out_dir) if out_dir is not None else Path(run_dir) / REPORT_DIR
@@ -617,6 +638,12 @@ def add_command(sub: Any) -> None:
     )
     r.add_argument("--seed", type=int, default=DEFAULT_SEED, help="bootstrap seed (default 0)")
     r.add_argument("--out", type=Path, help="output directory (default: <run-dir>/report)")
+    r.add_argument(
+        "--baseline",
+        type=Path,
+        help="for a Verification Protocol experiment run: the v1 run directory whose "
+        "games are the optional-protocol baseline",
+    )
 
 
 def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -624,10 +651,26 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         parser.error("--replicates must be at least 1")
     try:
         out, report = write_report(
-            args.run_dir, out_dir=args.out, replicates=args.replicates, seed=args.seed
+            args.run_dir,
+            out_dir=args.out,
+            replicates=args.replicates,
+            seed=args.seed,
+            baseline=args.baseline,
         )
     except ValueError as exc:
         parser.error(str(exc))
+    if report.get("experiment") == "verification":
+        for run in report["runs"]:
+            parts = ", ".join(
+                f"{p} {c['complete']}/{c['planned']}" for p, c in run["by_protocol"].items()
+            )
+            print(f"{run['games_complete']}/{run['games_planned']} games ({parts})")
+        if not report["baseline_present"]:
+            print("no optional-protocol games: pass --baseline <v1 run dir> for the comparison")
+        print(f"report: {out}")
+        for name in report["files"]:
+            print(f"  {name}")
+        return 0
     p = report["progress"]
     print(
         f"{report['run']['games_complete']}/{report['run']['games_planned']} games; "

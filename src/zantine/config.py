@@ -5,6 +5,10 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+# Verification Protocols (rules/verification.py): no audits, the seeded optional
+# audits of v1, or two independent checks before work counts.
+VERIFICATION_PROTOCOLS = ("none", "optional", "mandatory")
+
 
 @dataclass(frozen=True)
 class GameConfig:
@@ -39,6 +43,11 @@ class GameConfig:
     # Optional Audit Tasks (rules/audit.py): maximum targets checked by two other
     # Crewmates at setup; these do not gate completion of the submitted work.
     audit_tasks: int = 4
+    # Verification Protocol (rules/verification.py), one of VERIFICATION_PROTOCOLS:
+    # "none" places no audits; "optional" places the ``audit_tasks`` optional audits;
+    # "mandatory" makes every auditable Task count only after two independent
+    # passing checks (``audit_tasks`` is then unused).
+    verification_protocol: str = "optional"
     # Fixed Impostor seats (tests, and scheduled runs: runs.game_setup). None = drawn
     # from the seed.
     impostor_seats: tuple[int, ...] | None = None
@@ -57,6 +66,10 @@ class GameConfig:
             or not 0 <= self.task_dependency_chance <= 1
         ):
             raise ValueError("bad task settings")
+        if self.verification_protocol not in VERIFICATION_PROTOCOLS:
+            raise ValueError(
+                f"verification_protocol must be one of {', '.join(VERIFICATION_PROTOCOLS)}"
+            )
         if self.impostor_seats is not None:
             seats = self.impostor_seats
             if len(set(seats)) != self.num_impostors or not all(

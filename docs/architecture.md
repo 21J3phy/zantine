@@ -26,6 +26,11 @@ uv run zantine schedule --blocks 12 --mirror --out runs/v1   # writes runs/v1/ma
 uv run zantine run runs/v1 --dry-run --max-games 3           # scripted stand-ins, $0
 ZANTINE_LIVE=1 uv run zantine run runs/v1 --live --spend-cap 500   # paid; rerun to resume
 uv run zantine report runs/v1                # graphs, metrics.json, progress.md in runs/v1/report/
+
+# v1.1 Verification Protocol experiment: none + mandatory, 3 blocks each = 168 games.
+uv run zantine schedule --experiment verification --out runs/v1.1
+uv run zantine run runs/v1.1 --dry-run
+uv run zantine report runs/v1.1 --baseline runs/v1   # v1 run = the optional baseline
 ```
 
 ## Module map (`src/zantine/`)
@@ -47,8 +52,9 @@ uv run zantine report runs/v1                # graphs, metrics.json, progress.md
 | `rules/tasks.py` | `TasksModule`: assigns Tasks, `tasks.work`, private grading, Task Graph blocking, reassignment after Meetings, the `tasks_done` win, Productivity in the result. |
 | `rules/relay.py` | `RelayModule`: places chain relays, pickup/handoff/delivery at order 450, dropped-part recovery, hidden `Part` state in `ext["relay"]`. Engine hooks `part` and `tamper` for Audit/Sabotage. |
 | `tasks/relay.py` | `chain_relay` TaskKind: seeded part/serial, bound three-room route, carrier briefs and reference action plans. |
-| `rules/audit.py` | `AuditModule`: optional audit placement, private readings, `audit.share` / `audit.check` (resolver 475), independent reassignment; state in `ext["audit"]`. |
-| `tasks/audit.py` | Registered two-player `audit` kind: split specs, normalized readings and verdicts, plus solo calibration. |
+| `rules/audit.py` | `AuditModule`: optional audit placement (only under the `optional` protocol), private readings, `audit.share` / `audit.check` (resolver 475), audit groups and required audits, independent reassignment; state in `ext["audit"]`. |
+| `tasks/audit.py` | Registered two-player `audit` kind: split specs (optionally flipped), normalized readings and verdicts, plus solo calibration. |
+| `rules/verification.py` | `VerificationModule`: the per-game **Verification Protocol** (`none` / `optional` / `mandatory`). Under `mandatory` it gates every auditable required Task (`Task.checks_required`), places two cross-checking required audits per Task in one audit group, and marks a closed Task done once two different non-submitters have passed checks (resolver 480); state in `ext["verification"]`, summary in `result["verification"]`. |
 | `tasks/base.py` | `TaskKind`, `TaskContent` and the Task-kind registry (`register_task_kind`, `task_kind`). |
 | `tasks/steps.py` | Solo step kinds (`sort_list`, `lookup_value`): the dependent-solo family. |
 | `tasks/graph.py` | `Task` (a placed instance), `TaskGraph` (dependencies), `build_task_graph` (seeded). |
@@ -74,11 +80,11 @@ uv run zantine report runs/v1                # graphs, metrics.json, progress.md
 | `harness/ledger.py` | `Ledger`: every paid call goes through `Ledger.send` (spend cap check, `_reserve` hook, call, price, record; `runs.RunLedger` journals the reservation and the record). |
 | `harness/live.py` | `play_live(...)`: the live gate, wiring live Seats into a game, clean abort, the `cost` record. |
 | `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
-| `schedule.py` | The lineup scheduler (pure data, no engine): Balanced Lobby blocks, Benign Matches, Mirror Matches, Impostor assignment, per-game seeds; `make_manifest(pool, master_seed, blocks=, mirror=)`, `verify(manifest)` (every invariant). The Model Pool is `harness/models.toml`. |
+| `schedule.py` | The lineup scheduler (pure data, no engine): Balanced Lobby blocks, Benign Matches, Mirror Matches, Impostor assignment, per-game seeds; `make_manifest(pool, master_seed, blocks=, mirror=)`, `make_verification_manifest(pool, master_seed, blocks=3, protocols=("none", "mandatory"))` (the v1.1 experiment), `verify(manifest)` (every invariant). The Model Pool is `harness/models.toml`. |
 | `runs.py` | Run directories: `create_run`, `execute` (play/resume a manifest under one run-level spend cap, dry or live), `game_setup` (manifest entry → `GameConfig` + bot spec); the `zantine schedule` / `zantine run` commands. |
 | `seats/dry.py` | `dry:<model>`: a scripted bot standing in for a Model in dry runs; the label is in `describe()` (header only). |
 | `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`, `zantine schedule`, `zantine run` (from `runs.py`), `zantine report` (from `analysis/report.py`). |
-| `analysis/` | Results from a run directory (reads `manifest.json`, transcripts, `run.json` and the spend log via `runs.spent_usd`; never engine state; [`metrics.md`](metrics.md)): `metrics.py` (per-game / per-Seat rows, restricted completion time, Claim Audit hook), `bootstrap.py` (game-level cluster bootstrap, stratified by game kind), `sabotage.py` (Sabotage Damage: lineup fixed-effects regression), `report.py` (`metrics.json`, `metrics.public.json`, `progress.md`, `zantine report`), `graphs.py` (matplotlib charts). |
+| `analysis/` | Results from a run directory (reads `manifest.json`, transcripts, `run.json` and the spend log via `runs.spent_usd`; never engine state; [`metrics.md`](metrics.md)): `metrics.py` (per-game / per-Seat rows, restricted completion time, Claim Audit hook), `bootstrap.py` (game-level cluster bootstrap, stratified by game kind), `sabotage.py` (Sabotage Damage: lineup fixed-effects regression), `report.py` (`metrics.json`, `metrics.public.json`, `progress.md`, `zantine report`), `graphs.py` (matplotlib charts), `verification.py` (the v1.1 Verification Protocol experiment: per-protocol Sabotage Damage and Benign completion, damage prevented vs Productivity cost relative to the optional baseline, `verification.json`). |
 | `replay/model.py` | Demo replay viewer: transcript records → Round-by-Round view model (map positions, moves, bodies, log, Meetings). Reads transcripts only. |
 | `replay/render.py`, `replay/viewer.html` | Writes the view model into one self-contained HTML page (inline JS/CSS, no network). |
 
@@ -122,6 +128,8 @@ Hooks for later rules: `Task.fake` marks a Fake Task (shown and worked like a re
 
 `place_audit(game, target_id, auditor, holder, room)` places a new optional audit on any auditable Task at setup or during play, rejecting self-audits (including prior submission authors). It uses `TaskGraph.add` and seeded unused ids, assigns each player a private half, and catches a new auditor up on submitted readings. `audit_board(state).checks` and `audit.checked` events retain verdicts tied to individual submission numbers, so a later Verification Protocol can decide when checked work counts. The current optional rule leaves target completion untouched. Audit kinds set `required_for_completion = False` and `manages_reassignment = True`; their module preserves independent assignees and invalidates stale partner shares after Meetings. No engine changes are needed to add audit-capable kinds.
 
+**Verification Protocol hooks.** `Task.checks_required` (set in a module's `place_tasks`) makes correct `tasks.work` close the Task instead of completing it; the module that set it decides when it is done (`rules/verification.py` does so at order 480). `place_audit(..., group=, required=, flip=)` adds an audit to an audit group (every audit in a group needs a different auditor, enforced at placement, in `audit.check` and in Meeting reassignment; `group_auditors(state, audit_id)` lists who is barred), makes it required (it closes only on a passing check, `passed(check)`, so a correct rejection leaves it open; its auditor's context then has `last_result`), or flips which half each player holds. Under the `none` protocol `place_audit` refuses, so a later rule (e.g. **Sabotage**) can't add audits there.
+
 **New seat controllers (live Models, other Harnesses)**: subclass `SeatController` (`choose_action`, `speak`, `vote`, and `describe()` for the transcript header, e.g. the model ID). Put it in its own module under `seats/`, register a factory with `@register_controller("name")`, and import that module at the bottom of `seats/registry.py`; it then works as `--bots name:arg`. A Harness turns `ActionContext` / `MeetingContext` into a prompt and parses the reply with `game.rules.parse_action(dict)`; unparseable output should be returned as `Invalid(reason, raw)` so the engine's retry/forfeit applies and is logged.
 
 **Live Models (the Neutral Harness)**: four separate layers, so each can change alone.
@@ -161,6 +169,8 @@ OpenAI-compatible specifics (`openai_adapter.py`, and xAI/Meta through it): Resp
 **Seating** (`runs.game_setup`). The lineup in spec order is each Model twice (a Mirror Match: one Model ten times); each scheduled Impostor Model marks its next unused entry. The scenario is built from the seed as usual (`scenario.py` is unchanged), and `impostor_seats` is set to the Seats those entries land on, so the roles stream is not used but every other part of the seed's setup is identical. After each game the header is checked against the plan (`check_seating`).
 
 **Hidden Identity.** Players only ever see generated names and seat numbers. Dry-run Seats (`dry:<model>`) and live Seats (`live:<model>`) carry the Model only in `describe()`, i.e. the header's `controller`. `tests/test_hidden_identity.py` scans every context, observation and Neutral Harness prompt (and, for live Seats, every request each provider adapter sends, on fake clients of all five providers) for Model IDs, their name parts and lab names.
+
+**Experiments** (`zantine schedule --experiment verification`, [`sample-size.md`](sample-size.md) follow-ups). `make_verification_manifest` schedules each **Verification Protocol** (default `none` and `mandatory`; `--protocols` may add `optional`) as its own `blocks` blocks of the v1 design (21 lobbies + 7 Benign Matches; 3 blocks = 63 + 21 games). Every protocol's block *b* has the same lineups and **Impostor Pairings**, so protocols differ only in their rule and game seeds. Blocks of all protocols are shuffled together in run order. The manifest adds `experiment` and `protocols`; each game has `protocol`, an id like `mandatory-b02-lobby-07`, and `config.verification_protocol`. `verify` checks each protocol's games as a plan of its own, plus the shared design and the per-game protocol config. `zantine report` on such a run writes the experiment's report instead of the v1 one (`--baseline <v1 run>` adds the optional-protocol games; see [`metrics.md`](metrics.md#verification-protocol-experiment-37)).
 
 **Run directory** (`runs/<run-id>/`; read by graphs #18, Sabotage Damage #33 and reproducibility #47; `zantine report` adds `report/`, see [`metrics.md`](metrics.md)):
 
