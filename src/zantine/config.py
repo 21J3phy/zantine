@@ -19,6 +19,11 @@ class GameConfig:
     meeting_passes: int = 3
     # Talk Budget per Meeting pass, in characters; longer speech is truncated.
     talk_budget_chars: int = 500
+    # Crisis: Rounds the Impostors must wait before the first Crisis and after
+    # each resolved one; the crew must resolve it within ``crisis_deadline``
+    # Rounds after the Round it was triggered in.
+    crisis_cooldown: int = 6
+    crisis_deadline: int = 3
     # Fixed Impostor seats (tests). None = drawn from the seed.
     impostor_seats: tuple[int, ...] | None = None
 

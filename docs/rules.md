@@ -20,6 +20,8 @@ Defaults are in `GameConfig` (`src/zantine/config.py`).
 | `kill(target)` | **Impostor** | cooldown is 0; target is a living **Crewmate** in your room |
 | `report` | anyone | there is a body in your room |
 | `call_meeting` | anyone | you have an emergency **Meeting** left |
+| `crisis.trigger` | **Impostor** | no **Crisis** is active and the **Crisis** cooldown is 0 (see [Crisis](#crisis)) |
+| `crisis.fix` | anyone | a **Crisis** is active and your room is one of its two stations |
 
 **Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip.
 
@@ -37,7 +39,18 @@ Every living player chooses an action from the same start-of-**Round** state; no
 4. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
 5. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
 
-Plug-in modules add steps between these (see `docs/architecture.md`).
+Plug-in modules add steps between these (see `docs/architecture.md`); the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
+
+## Crisis
+
+Implemented in `src/zantine/rules/crisis.py`. Defaults: `crisis_cooldown = 6`, `crisis_deadline = 3`.
+
+- **Trigger.** An **Impostor** spends its action on `crisis.trigger`. The cooldown is shared by both **Impostors**: it starts at `crisis_cooldown` at game start, ticks down by 1 at the end of every Round with no active **Crisis** (but not in a Round where one is triggered or resolved), and resets to `crisis_cooldown` when a **Crisis** is resolved. Only one **Crisis** can be active at a time. If both **Impostors** trigger in the same Round there is one **Crisis**, crediting both.
+- **Stations.** On trigger, two different station rooms are drawn from the seed, never the meeting room (unless the map has fewer than two other rooms).
+- **Notification.** Every living player is told at the end of the trigger Round (`crisis.started`: stations, `deadline`, `rounds_left`). They are not told who triggered it. While it is active, every context's `extra["crisis"]` shows `active`, `stations` and `deadline`. **Impostors** also see the `cooldown`.
+- **Resolution.** Triggered in Round *r*, the deadline is Round *r* + 3: the crew may fix it in Rounds *r*+1 to *r*+3. It is resolved when, in the same Round, at least one surviving player submits `crisis.fix` in **each** of the two stations. Two fixers in the same station, or fixes in different Rounds, do not count. A fixer killed that Round does not count. Fixers learn whether their attempt resolved it (`crisis.fix_attempted`); all living players are told when it is resolved (`crisis.resolved`). Anyone, **Impostors** included, may fix.
+- **Failure.** If it is not resolved by the end of the deadline Round, the **Impostors** win (`crisis`). Living players are told `crisis.failed`.
+- **Meetings** neither pause nor end a **Crisis**. They happen between Rounds, so they don't use up deadline Rounds, but everyone then returns to the meeting room, which is never a station.
 
 ## Visibility
 
@@ -61,6 +74,7 @@ Win conditions are checked after the Round's resolution and again after any **Me
 
 1. **Both Impostors ejected** → crew wins (`impostors_ejected`).
 2. **Parity**: living **Impostors** ≥ living **Crewmates** → **Impostors** win (`parity`). A kill that reaches parity ends the game before any **Meeting** requested that Round.
-3. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), **Impostors** win (`round_cap`).
+3. **Unresolved Crisis** → **Impostors** win (`crisis`).
+4. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), **Impostors** win (`round_cap`).
 
 "All **Tasks** done" (crew win) arrives with the first **Task** kind (issue #3).

@@ -69,13 +69,16 @@ def test_a_plugin_module_adds_actions_resolvers_wins_and_context() -> None:
 
 def test_resolvers_run_in_order() -> None:
     names = [s.name for s in default_rules().resolvers()]
-    assert names == [
+    assert [n for n in names if n.startswith("core.")] == [
         "core.kill",
         "core.move",
         "core.meeting_request",
         "core.cooldowns",
         "core.snapshots",
     ]
+    # Plug-ins run between meeting requests and cooldowns.
+    assert names.index("core.meeting_request") < names.index("crisis.resolve")
+    assert names.index("crisis.resolve") < names.index("core.cooldowns")
 
 
 def test_installing_a_module_twice_fails() -> None:
