@@ -6,11 +6,11 @@ How `zantine report <run-dir>` turns a run directory into numbers and graphs (#1
 
 ## Inputs
 
-`manifest.json` and the complete transcripts under `games/` (see "Scheduled runs" in [`architecture.md`](architecture.md)); the run summary also reads the mode from `run.json` and the whole run's spend from `spend.jsonl` (`runs.spent_usd`). Analysis never uses engine state. A Seat's **Model** is the header's `controller.model` (`dry:<model>` and `live:<model>` Seats both record it). Incomplete or aborted games are left out; a partial run (even one game) or a Mirror-only run still renders, with `n/a` where a measure is not yet estimable.
+`manifest.json` and the complete transcripts under `games/` (see "Scheduled runs" in [`architecture.md`](architecture.md)); the run summary also reads the mode from `run.json` and the whole run's spend from `spend.jsonl` (`runs.spent_usd`). Analysis never uses engine state. A Seat's **Model** is the header's `controller.model` (`dry:<model>` and `live:<model>` Seats both record it). Incomplete or aborted games are left out (as in the runner, a transcript with any line that does not parse is not complete; such games are listed in `run.transcripts_not_complete`); a partial run (even one game) or a Mirror-only run still renders, with `n/a` where a measure is not yet estimable.
 
 ## Censoring: restricted completion time
 
-Every game is followed until all **Tasks** are done, the **Impostors** win, or the round cap `L` (30 by default). Write `T` for the **Round** the last **Task** was done, with `T = ∞` if it never was (round cap or an **Impostor** win, after which the work can never be finished).
+Every game is followed until all **Tasks** are done, the **Impostors** win, or the round cap `L` (30 by default). Write `T` for the **Round** the last **Task** was done, with `T = ∞` if it never was (round cap or an **Impostor** win, after which the work can never be finished). Completion is read from the transcript's counted **Task** totals, not from who won: if the last **Task** is done in the same **Round** a higher-priority **Impostor** win fires (e.g. a **Crisis** deadline), `T` is that **Round**.
 
 - The measured value is the **restricted completion time** `min(T, L)`: the completion **Round** if the work finished, otherwise `L`.
 - Means are **restricted mean completion times** (RMST up to `L`). Because no game stops being observed before `L` (a game either finishes, ends for good, or reaches `L`), `mean(min(T, L))` equals the area under the Kaplan-Meier "work still unfinished" curve up to `L`, so no survival model or independent-censoring assumption is needed. `tests/test_analysis.py` checks this identity.
@@ -64,17 +64,17 @@ min(T_g, L) = a_lineup(g) + Σ_m β_m · k_{g,m} + e_g
 
 ## Intervals
 
-95% percentile intervals from a **game-level cluster bootstrap**: whole games are resampled with replacement, never Seats, because Seats in one game are correlated ([`sample-size.md`](sample-size.md), DEFF). Resampling is stratified by game kind (lobby, Benign, Mirror), so every replicate keeps each kind's game count and contains both the lobbies and the **Benign Matches** that **Sabotage Damage** compares. All measures share the same replicates, so the 2-D intervals on the opening map are joint. Default 2,000 replicates, seed 0 (`--replicates`, `--seed`); the same seed gives the same intervals. A replicate in which a measure is undefined (e.g. no non-skip votes drawn) is left out, and `replicates` records how many were used.
+95% percentile intervals from a **game-level cluster bootstrap**: whole games are resampled with replacement, never Seats, because Seats in one game are correlated ([`sample-size.md`](sample-size.md), DEFF). Resampling is stratified by game kind (lobby, Benign, Mirror), so every replicate keeps each kind's game count and contains both the lobbies and the **Benign Matches** that **Sabotage Damage** compares. All measures share the same replicates, so the covariance between measures is preserved, but every interval is **marginal**: its bounds are the 2.5% and 97.5% quantiles of that one measure. The rectangle the opening map draws from two marginal intervals is not a joint 95% region (two independent 95% intervals cover both coordinates only about 90% of the time), and the report makes no joint-coverage claim. A percentile interval need not contain its point estimate; charts draw each interval from its bounds. Default 2,000 replicates, seed 0 (`--replicates`, `--seed`); the same seed gives the same intervals. A replicate in which a measure is undefined (e.g. no non-skip votes drawn) is left out, and `replicates` records how many were used.
 
 ## Graphs (`<run-dir>/report/`, SVG with real text, and PNG)
 
-- `opening_map`: **Productivity** vs **Vigilance** (correct-vote share), one dot per Model with 2-D error bars, dot area by cost per game (equal sizes when no cost was recorded, as in dry runs), **Flagship**–**Sibling** pairs joined by a dashed line (`tier` / `flagship` in `harness/models.toml`), and Models whose 2-D intervals overlap (rectangles intersecting, taken transitively) shaded as one cluster, so small gaps are not over-read.
+- `opening_map`: **Productivity** vs **Vigilance** (correct-vote share), one dot per Model with a marginal interval on each axis, dot area by cost per game (equal sizes when no cost was recorded, as in dry runs), **Flagship**–**Sibling** pairs joined by a dashed line (`tier` / `flagship` in `harness/models.toml`), and Models whose interval rectangles intersect (taken transitively) shaded as one cluster. The clusters are descriptive, a guard against over-reading small gaps, not a test.
 - `small_multiples`: one panel per measure, Models in fixed alphabetical order top to bottom.
 - `sabotage_damage`: **Sabotage Damage** per **Impostor** Seat with a zero line.
 - `cost_vs_metrics`: cost per game against **Productivity**, correct-vote share, **Impostor** survival and **Sabotage Damage**.
 - `mirror`: **Mirror Matches**, labelled as descriptive self-play.
 
-Every chart carries the interval caption. `metrics.json` holds every number behind every chart (estimates, interval bounds and widths, counts, per-game and per-Seat rows, the map's pairs and clusters), so the website (#48) can draw its own.
+Every chart carries the interval caption. `metrics.json` holds every number behind every chart (estimates, interval bounds and widths, counts, per-game and per-Seat rows, the map's pairs and clusters). It also holds the master seed and every game's seed, so it stays private ([`adr/0001`](adr/0001-layered-reproducibility-with-private-official-seeds.md)). `metrics.public.json` is the same without the seeds and the local run path; that is the file for the website (#48) to draw its own charts from.
 
 ## Progress report (`progress.md`, `metrics.json` → `progress`)
 

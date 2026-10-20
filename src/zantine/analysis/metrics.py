@@ -110,6 +110,8 @@ class RunData:
     run_dir: Path
     manifest: dict[str, Any]
     games: list[GameRow]
+    # Games whose transcript exists but is not complete (torn or corrupt): left out.
+    not_complete: list[str] = field(default_factory=list)
 
     @property
     def pool(self) -> list[str]:
@@ -125,18 +127,21 @@ class RunData:
 # Loading ------------------------------------------------------------------------------
 
 
-def read_records(path: Path) -> list[dict[str, Any]]:
-    out = []
-    for line in path.read_text("utf-8").splitlines():
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue  # a torn last line from a crash
-    return out
+def read_records(path: Path) -> list[dict[str, Any]] | None:
+    """Every record of a transcript, or None if any line fails to parse.
+
+    A complete game is evidence, so a corrupt or torn line rejects the whole
+    transcript (as ``runs.is_complete`` does) rather than silently dropping a record.
+    """
+    try:
+        return [json.loads(line) for line in path.read_text("utf-8").splitlines() if line]
+    except (OSError, ValueError):
+        return None
 
 
-def is_complete(records: list[dict[str, Any]]) -> bool:
-    """Same rule as ``runs.is_complete``: a header, a result and a final complete cost."""
+def is_complete(records: list[dict[str, Any]] | None) -> bool:
+    """Same rule as ``runs.is_complete``: every line parses, a header, a result and a
+    final complete cost."""
     return (
         bool(records)
         and records[0].get("kind") == "header"
@@ -147,22 +152,25 @@ def is_complete(records: list[dict[str, Any]]) -> bool:
 
 
 def load_run(run_dir: str | Path) -> RunData:
-    """Every complete game of a run, in manifest order. Incomplete games are skipped."""
+    """Every complete game of a run, in manifest order. Incomplete games are skipped;
+    a transcript that exists but is not complete (torn, corrupt) is listed in
+    ``RunData.not_complete``."""
     run_dir = Path(run_dir)
     path = run_dir / MANIFEST
     if not path.is_file():
         raise ValueError(f"no manifest at {path}; is {run_dir} a run directory?")
     manifest = json.loads(path.read_text("utf-8"))
-    games = []
+    games, not_complete = [], []
     for planned in manifest["games"]:
         tpath = run_dir / GAMES / f"{planned['id']}.jsonl"
         if not tpath.is_file():
             continue
         records = read_records(tpath)
-        if not is_complete(records):
+        if records is None or not is_complete(records):
+            not_complete.append(planned["id"])
             continue
         games.append(game_row(planned, records, claims=load_claims(tpath)))
-    return RunData(run_dir=run_dir, manifest=manifest, games=games)
+    return RunData(run_dir=run_dir, manifest=manifest, games=games, not_complete=not_complete)
 
 
 def seat_model(controller: Any) -> str:
@@ -252,7 +260,13 @@ def game_row(
             row.claims_false = counts["false"]
             row.lies = counts["lies"]
 
-    finished = result["reason"] == "tasks_done"
+    # Work completion is read from the counted Task totals, not from who won: the
+    # last Task can be done in the same Round a higher-priority Impostor win fires
+    # (e.g. a Crisis deadline). Had it been done earlier, the game would have ended
+    # then as a crew win, so the completion Round is the game's last Round.
+    totals = result.get("tasks") or {}
+    total = int(totals.get("total") or 0)
+    finished = result["reason"] == "tasks_done" or (total > 0 and totals.get("done") == total)
     containment = result.get("containment") or {}
     contained = bool(containment.get("contained"))
     return GameRow(

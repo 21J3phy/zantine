@@ -3,8 +3,10 @@
 Writes into ``<run-dir>/report/``:
 
 - ``metrics.json``: every estimate and interval behind every chart, plus the
-  per-game and per-Seat rows they come from, so another renderer (the website)
-  can draw its own charts from the same numbers.
+  per-game and per-Seat rows they come from. Private: it holds the game seeds.
+- ``metrics.public.json``: the same without the master seed, the game seeds and the
+  local run path (official seeds stay private, ``docs/adr/0001``), so another
+  renderer (the website) can draw its own charts from the same numbers.
 - ``progress.md``: blocks complete out of the fixed 12 and current interval
   widths. Information only: v1 has a fixed size and no early stopping.
 - the graphs (``graphs.py``), as SVG and PNG.
@@ -41,7 +43,7 @@ REPORT_DIR = "report"
 REPORT_SCHEMA = 1
 PLANNED_BLOCKS = 12  # v1 is fixed at 12 blocks (docs/sample-size.md)
 CI_NOTE = (
-    "Error bars: 95% intervals from a game-level cluster bootstrap "
+    "Error bars: marginal 95% intervals from a game-level cluster bootstrap "
     "(whole games resampled, stratified by game kind)."
 )
 
@@ -325,7 +327,11 @@ def estimate_metric(
 
 
 def overlap_clusters(models: list[str], x: list[Estimate], y: list[Estimate]) -> list[list[str]]:
-    """Groups of Models whose 2-D 95% intervals (rectangles) overlap, transitively."""
+    """Groups of Models whose interval rectangles overlap, transitively.
+
+    Each side is a marginal 95% interval, so a rectangle is not a joint 95% region;
+    the clusters are descriptive, a guard against over-reading small gaps.
+    """
     usable = [
         i
         for i in range(len(models))
@@ -452,6 +458,7 @@ def run_summary(data: RunData) -> dict[str, Any]:
         "pool": data.pool,
         "games_planned": len(planned),
         "games_complete": len(done),
+        "transcripts_not_complete": list(data.not_complete),
         "by_kind": by_kind,
         "round_caps": sorted({g.round_cap for g in data.games}),
         "mode": run_mode(data.run_dir),
@@ -510,6 +517,12 @@ def progress_markdown(report: dict[str, Any]) -> str:
     ]
     for b, frac in p["games_in_partial_blocks"].items():
         lines.append(f"- Block {b} in progress: {frac} games complete.")
+    if run["transcripts_not_complete"]:
+        lines.append(
+            "- Transcripts left out as not complete (torn or corrupt): "
+            + ", ".join(f"`{g}`" for g in run["transcripts_not_complete"])
+            + "."
+        )
     lines += [
         f"- Mirror Matches complete: {p['mirror']['complete']} of {p['mirror']['planned']}.",
         f"- Games complete: {run['games_complete']} of {run['games_planned']} "
@@ -547,6 +560,14 @@ def strip_private(obj: Any) -> Any:
     return obj
 
 
+def public_report(report: dict[str, Any]) -> dict[str, Any]:
+    """``report`` without the seeds of its games (docs/adr/0001) or the local run path."""
+    public = strip_private(report)
+    public["run"] = {k: v for k, v in public["run"].items() if k not in ("master_seed", "run_dir")}
+    public["games"] = [{k: v for k, v in g.items() if k != "seed"} for g in public["games"]]
+    return public
+
+
 def write_report(
     run_dir: str | Path,
     *,
@@ -565,11 +586,19 @@ def write_report(
         from zantine.analysis.graphs import render_all
 
         files = render_all(report, out)
-    report["files"] = [*sorted(p.name for p in files), "metrics.json", "progress.md"]
-    (out / "metrics.json").write_text(
-        json.dumps(strip_private(report), indent=1, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
+    report["files"] = [
+        *sorted(p.name for p in files),
+        "metrics.json",
+        "metrics.public.json",
+        "progress.md",
+    ]
+    for name, data in (
+        ("metrics.json", strip_private(report)),
+        ("metrics.public.json", public_report(report)),
+    ):
+        (out / name).write_text(
+            json.dumps(data, indent=1, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8"
+        )
     (out / "progress.md").write_text(progress_markdown(report), encoding="utf-8")
     return out, report
 
