@@ -107,3 +107,27 @@ def ratio_estimates(num: np.ndarray, den: np.ndarray, weights: np.ndarray) -> li
             )
         )
     return out
+
+
+def ratio_difference(
+    num: np.ndarray, den: np.ndarray, weights: np.ndarray, a: int, b: int
+) -> Estimate:
+    """Column ``a``'s pooled ratio minus column ``b``'s, with the same game-level
+    replicates for both (so the interval keeps their within-game correlation)."""
+    num = np.asarray(num, dtype=float)[:, [a, b]]
+    den = np.asarray(den, dtype=float)[:, [a, b]]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        point = num.sum(axis=0) / den.sum(axis=0)
+        boot = (weights @ num) / (weights @ den)
+    diff = (boot[:, 0] - boot[:, 1])[:, None]
+    diff[~np.isfinite(diff)] = np.nan
+    low, high, n = percentile_interval(diff)
+    defined = bool((den.sum(axis=0) > 0).all())
+    return Estimate(
+        estimate=float(point[0] - point[1]) if defined else np.nan,
+        low=float(low[0]) if defined else np.nan,
+        high=float(high[0]) if defined else np.nan,
+        n_games=int(((den > 0).any(axis=1)).sum()),
+        n_units=float(den.sum()),
+        replicates=int(n[0]) if defined else 0,
+    )
