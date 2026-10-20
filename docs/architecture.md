@@ -1,0 +1,89 @@
+# Architecture
+
+How the code is laid out, where new features plug in, and the conventions every change must follow. Game rules as implemented: [`rules.md`](rules.md). Terms: [`../CONTEXT.md`](../CONTEXT.md).
+
+## Running
+
+```sh
+uv sync                                   # create .venv with dev tools
+uv run zantine play --seed 7              # one 10-seat game with scripted bots
+uv run zantine play --seed 7 --bots 'scripted*8,idle*2' --out runs/seed-7.jsonl
+uv run pytest                             # all tests (no network)
+uv run ruff check && uv run ruff format --check
+```
+
+## Module map (`src/zantine/`)
+
+| Module | Responsibility |
+| --- | --- |
+| `config.py` | `GameConfig`: every tunable number (seats, Impostors, round cap, cooldowns, Talk Budget, ...). |
+| `rng.py` | `GameRng`: the only source of randomness. `fork(label)` gives independent named streams. |
+| `scenario.py` | Builds the `Scenario` (map, names, roles) from the seed. Issue #2's procedural generation goes here. |
+| `map.py` | `GameMap` (rooms, corridors, meeting room) and the hard-coded `tiny_map()`. |
+| `state.py` | Ground-truth `GameState`, `PlayerState`, `Body`. `GameState.ext` holds per-module state. |
+| `roles.py` | `Role` (crewmate/impostor) and `Team` (winner). |
+| `rules/actions.py` | `Action` base class and core actions. Each action validates itself. `Invalid` = unacceptable response. |
+| `rules/registry.py` | `Rules`, `GameModule`, `RoundContext`, `MeetingRequest`: the plug-in surface. |
+| `rules/core.py` | `CoreModule`: kill, move, report, emergency Meeting, cooldowns, snapshots. |
+| `rules/win.py` | Core win conditions (Impostors ejected, parity). |
+| `rules/__init__.py` | `default_modules()` / `default_rules()`: the list of modules a normal game uses. |
+| `engine.py` | `Game`: the Round loop, asking seats (with the Invalid Action retry), contexts, recording. |
+| `meeting.py` | Meeting flow, secret vote, `tally()`, Ejection. |
+| `vision.py` | What a player perceives of its own room. |
+| `observations.py` | `Observation`, `ActionContext`, `MeetingContext`, `Statement`: everything a seat may know. |
+| `transcript.py` | JSONL game record: header, ground-truth events, per-player observations, result. |
+| `seats/base.py` | `SeatController`: the interface for scripted bots now and live Model Harnesses later. |
+| `seats/bots.py` | `ScriptedBot`, `IdleBot`, `PlaybookBot` (fixed script, for tests). |
+| `seats/registry.py` | Named controller factories and the `--bots` spec parser. |
+| `runner.py` | `new_game(config, bots)` / `play(...)`. |
+| `cli.py` | `zantine play`. |
+
+## Game loop
+
+`Game.run()` → `start()` (header, `on_setup` hooks, role and room observations) → repeat `play_round()`:
+
+1. Ask every living seat for an action from the same start-of-Round context (`Game.ask` handles the one retry, then forfeit).
+2. Run every registered resolver in `order` with a shared `RoundContext`.
+3. Check win conditions; if a Meeting was requested and the game isn't over, run it (`meeting.run_meeting`) and check again.
+4. Enforce the round cap; on game over, write `game_over` observations and the `result` record.
+
+## Extension points
+
+**New rules (Task kinds, Room Chat, Crisis, Sabotage, ...)**: write a `GameModule` in its own file (e.g. `rules/tasks.py`) and add one line to `default_modules()`. A module can:
+
+- `rules.register_action(cls)`: new `Action` subclasses with a unique `kind`; prefix with the module name if it could collide (e.g. `tasks.work`).
+- `rules.add_resolver(order, name, fn)`: a step run every Round. Order bands: 100 kills, 200 movement, 300 meeting requests, **400–899 free for plug-ins**, 900 cooldowns, 1000 snapshots. Use `rc.acting(MyAction)` to get surviving actors; set `rc.meeting` to request a Meeting.
+- `rules.add_win_condition(order, name, fn)`: core uses 100 and 200; return `(Team, reason)` or `None`.
+- `on_setup(game)`, `on_meeting_end(game, meeting)` hooks.
+- `context_extra(game, seat)`: data that appears in that seat's `ctx.extra[module_name]` (e.g. its assigned Tasks).
+- Keep module state in `game.state.ext[module_name]`, not new fields on `GameState`.
+- Record ground truth with `game.event(type, **data)` and private views with `game.observe(seat, type, **data)`. Prefix new types with the module name (`tasks.graded`).
+- Use `game.rng.fork("<module>")` for randomness.
+
+`tests/test_registry.py::DanceModule` is a complete minimal example.
+
+**New seat controllers (live Models, other Harnesses)**: subclass `SeatController` (`choose_action`, `speak`, `vote`, and `describe()` for the transcript header, e.g. the model ID). Put it in its own module under `seats/`, register a factory with `@register_controller("name")`, and import that module at the bottom of `seats/registry.py`; it then works as `--bots name:arg`. A Harness turns `ActionContext` / `MeetingContext` into a prompt and parses the reply with `game.rules.parse_action(dict)`; unparseable output should be returned as `Invalid(reason, raw)` so the engine's retry/forfeit applies and is logged.
+
+**Setup generation**: replace internals of `scenario.build_scenario`; the engine only consumes the `Scenario`.
+
+**Analysis (Claim Audit, metrics, graphs)**: read transcripts; don't import engine internals. Ground truth is in `event` records, each seat's view in `observation` records.
+
+## Transcript format
+
+JSON Lines, keys sorted, one record per line, each with `seq` and `kind`:
+
+- `header`: `schema`, `seed`, `config`, `map`, `modules`, `seats` (`seat`, `name`, `role`, `controller`).
+- `event`: ground truth, `{round, type, data}`. Core types: `action`/`vote` (every attempt, with `valid`/`reason`), `kill`, `move`, `meeting_requested`, `meeting_started`, `bodies_cleared`, `speaking_order`, `statement`, `vote_tally`, `ejection` (with role), `meeting_ended`, `game_over`.
+- `observation`: `{round, seat, type, data}`, exactly what that seat was told. Types are listed in `observations.py`.
+- `result`: `winner`, `reason`, `rounds`, `meetings`, `killed`, `ejected`, `survivors`.
+
+Bump `transcript.SCHEMA_VERSION` when changing existing record shapes; adding new event/observation types does not need a bump.
+
+## Conventions
+
+- **Determinism.** Same seed + same controllers ⇒ byte-identical transcript. All randomness goes through `GameRng` forks; never use the global `random`, `hash()`, sets in output order, or wall-clock time in the engine. Iterate seats in seat order.
+- **Hidden information.** Controllers only see context objects. Anything a player learns must go through `game.observe` so the transcript records it. Never put ground truth (roles, other rooms, Model identity) in a context.
+- **No network in tests.** `tests/conftest.py` blocks sockets for every test.
+- **Live Model calls are opt-in.** Code that calls a paid API must refuse to run unless explicitly enabled (an explicit CLI flag plus `ZANTINE_LIVE=1`), read keys from the environment only, and enforce a spend cap. Tests that need a live call are marked `@pytest.mark.live` and skip unless `ZANTINE_LIVE=1`; they never run by default.
+- **Small files.** One concern per module so parallel work rarely touches the same file.
+- **Terminology.** Use the terms in `CONTEXT.md` exactly (Round, Seat, Meeting, Ejection, ...).
