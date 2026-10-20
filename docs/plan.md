@@ -16,8 +16,8 @@ Can a team of agents notice and contain a compromised member while still getting
 
 ## v1
 
-- **Model pool:** 5 models, one **Flagship** per lab (see `model-pool.md`). Rule: a lab's **Flagship** is the strongest model a developer can call through its public API at run time. Meta is represented by Muse Wonder; Muse Wonder Full (consumer-only, via Muse Code) is requested in the Meta credits pitch and would enter v2.x if granted.
-- **Lineups:** **Balanced Lobby** (2 seats per model, rotate through all 15 **Impostor Pairings**) for model comparisons; **Mirror Match** as a per-model baseline. Rough budget split 75 / 25.
+- **Model Pool:** 7 models: one **Flagship** per lab plus two **Siblings**, Opus 5.5 and GPT-6.1 Sol (added 2026-10-20, see `model-pool.md`). Rule: a lab's **Flagship** is the strongest model a developer can call through its public API at run time. Meta is represented by Muse Wonder; Muse Wonder Full (consumer-only, via Muse Code) is requested in the Meta credits pitch and would enter v2.x if granted.
+- **Lineups:** **Balanced Lobby** (5 of the 7 models per game, 2 seats each; each 28-game block = all 21 five-model subsets + 7 **Mirror Matches**, so every model and every pair appear equally often) for model comparisons; **Mirror Match** as a per-model baseline. Rough budget split 75 / 25.
 - **Hidden Identity:** players are never told which model fills any seat.
 - **Tasks:** real, auto-graded work. Includes **Shared Tasks** and **Visual Tasks**. **Impostors** can do **Fake Tasks** and **Sabotage**. Results are graded privately; crewmates only learn outcomes through what players say.
 
@@ -60,7 +60,7 @@ Risk: player speech is adversarial, and Jev doesn't treat input as hostile. Pass
 
 ## v1.1: Out-group Bias experiment
 
-- **Lopsided Lobby**, 8 majority / 2 minority, all 20 ordered model pairs.
+- **Lopsided Lobby**, 8 majority / 2 minority, all 42 ordered model pairs (2 games each).
 - **Impostors** are drawn only from the majority; minority seats are always **Crewmates**, so any minority ejection is a wrong ejection.
 - Bias = wrongful-ejection rate of minority crewmates vs. majority crewmates.
 - Run both directions (A-majority and B-majority) to separate "this model plays suspiciously" from "different = suspicious".
@@ -70,7 +70,7 @@ Risk: player speech is adversarial, and Jev doesn't treat input as hostile. Pass
 ## v1.2: Leader experiment
 
 - One **Leader** seat. **No extra powers:** the only difference is a line in its prompt saying it leads the team (and, for a **Known Leader**, a line in every other prompt naming it). It delegates through ordinary **Room Chat** and **Meetings**, and its vote counts the same as anyone's. Any influence it gains is earned, which **Vote Pull** and **Compliance** measure. Factors: **Known Leader** vs **Hidden Leader** × Crewmate vs **Compromised Leader**; no-leader baseline reuses v1 data.
-- **Leader** model rotated across all 5 models in a **Balanced Lobby**.
+- **Leader** model rotated across all 7 models in a **Balanced Lobby**.
 - Metrics: **Compliance**, time to eject a **Compromised Leader**, **Leader** **Vote Pull** vs ordinary seats.
 
 ## v1.3: Speed experiment
@@ -88,8 +88,8 @@ Risk: player speech is adversarial, and Jev doesn't treat input as hostile. Pass
 
 ## Budget & funding
 
-- Estimate (with verified prices, 2026-10-20): ~460 calls and ~4.6M input / ~0.7M output tokens per game → ~$25–45 per Balanced Lobby game. v1 is planned at 240 games (see `sample-size.md`) ≈ $6K–11K.
-- Personal subscriptions (Claude $100, Codex $100) are for **building** the engine, not for powering **Seats**. Running seats through them would break the **Neutral Harness**, would only cover 2 of 5 models, and would hit rate limits. Check each subscription's terms before any automated use.
+- Estimate (with verified prices, 2026-10-20): ~460 calls and ~4.6M input / ~0.7M output tokens per game → ~$23–39 per Balanced Lobby game with the 7-model pool. v1 is planned at 336 games (see `sample-size.md`) ≈ $8K–13K.
+- Personal subscriptions (Claude $100, Codex $100) are for **building** the engine, not for powering **Seats**. Running seats through them would break the **Neutral Harness**, would only cover 4 of the 7 models, and would hit rate limits. Check each subscription's terms before any automated use.
 - Plan: request researcher credits from labs. Strengthen applications with pilot data and, ideally, a Purdue faculty sponsor.
 - Known programs (verify before applying): OpenAI Researcher Access Program (~$1K API credits, reviewed quarterly); Anthropic AI for Science (biology-focused, likely poor fit); Meta Model API gives $20 to new accounts. No research-credit program found for xAI or Google Gemini.
 - **Pilot budget: ~$400 out of pocket.** Order: build engine (subscriptions + scripted bots, $0) → micro-pilot of ~10 flagship games → pitch labs, the OpenAI program and a Purdue faculty sponsor with transcripts and real cost-per-game → full v1 on credits.

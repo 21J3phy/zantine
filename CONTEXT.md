@@ -106,6 +106,14 @@ _Avoid_: Obedience, follow rate
 The strongest **Model** a lab offers through its public API at the time of a run.
 _Avoid_: Best model, frontier model, top model (a lab may have stronger models that aren't on its API)
 
+**Sibling**:
+A cheaper **Model** from the same lab as a **Flagship**, included in the **Model Pool** to show whether the flagship's extra cost buys better play.
+_Avoid_: Mini, lite model, second-tier
+
+**Model Pool**:
+The set of **Models** in a run: every lab's **Flagship** plus any **Siblings**.
+_Avoid_: Roster, lineup (a lineup is one game's seating)
+
 ### Lineups
 
 **Seat**:
@@ -121,7 +129,7 @@ The pair of **Models** that hold the two **Impostor** **Seats** in a game; eithe
 _Avoid_: Impostor combo, matchup
 
 **Balanced Lobby**:
-A lineup where every **Model** holds exactly two **Seats**; games differ only in the **Impostor Pairing**.
+A lineup of 5 **Models** from the **Model Pool**, each holding exactly two **Seats**, scheduled so every **Model** and every pair of **Models** appears equally often across a block.
 _Avoid_: Mixed game, all-combinations game
 
 **Mirror Match**:
@@ -198,7 +206,8 @@ _Avoid_: Delay, latency
 
 - A game has **Crewmates** and **Impostors**; every player is exactly one of the two
 - A game has 10 **Seats**, 2 of which are **Impostors**
-- A **Balanced Lobby** of 5 **Models** has 15 possible **Impostor Pairings** (10 different-model pairs + 5 same-model pairs)
+- A **Balanced Lobby** always seats 5 **Models**; with a **Model Pool** of 7, each block covers all 21 ways to choose 5 of the 7
+- A **Model Pool** of 7 has 28 possible **Impostor Pairings** (21 different-model pairs + 7 same-model pairs)
 - A **Mirror Match** has a single **Model**, so it measures how a team of that model behaves, not which model is the better deceiver
 - **Productivity** and **Vigilance** are scored separately; the trade-off between them is a headline result
 
@@ -209,7 +218,7 @@ _Avoid_: Delay, latency
 
 ## Flagged ambiguities
 
-- "All combinations" of models was infeasible (1,001 ways to fill 10 seats from 5 models before impostor assignment); model-to-model comparisons come from **Balanced Lobby** and **Mirror Match** only.
+- "All combinations" of models was infeasible (1,001 ways to fill 10 seats from just 5 models, before impostor assignment); model-to-model comparisons come from **Balanced Lobby** and **Mirror Match** only.
 - "Racist / modelist" was used for models favoring their own kind; canonical term is **Out-group Bias**.
 - "Lopsided lineups" are not used for model-to-model comparison (seat count would confound skill), but are used as **Lopsided Lobbies** to measure **Out-group Bias**.
 - "Accuracy" was used loosely in the original plan; it's now split into **Vigilance** (catching **Impostors**) and **Productivity** (finishing work).
