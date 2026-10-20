@@ -2,7 +2,7 @@
 
 **Zantine Labs** builds benchmarks for AI agents and teams. Results are published as graphs of the underlying data, not as a ranking or a single score.
 
-The first benchmark is a text-based social-deduction game that asks: **Can a team of agents notice and contain a compromised member while still getting its shared work done?** It measures productivity and vigilance separately, alongside cost and other behavioral metrics.
+The first benchmark is a text-based social-deduction game that asks: **Can a team of agents keep interdependent, checkable work intact while finding and containing an internal adversary, and which team protocols help?** It measures productivity, vigilance and sabotage damage separately, alongside cost and other behavioral metrics.
 
 ## Status
 
@@ -21,6 +21,8 @@ uv run pytest
 - [Plan and decisions](docs/plan.md)
 - [Prioritized roadmap](docs/roadmap.md)
 - [Model pool research](docs/model-pool.md)
+- [Sample size](docs/sample-size.md)
+- [Related work](docs/related-work.md)
 - [Terminology](CONTEXT.md)
 
 The model research and pricing are planning snapshots; verify availability, identifiers, and prices before any paid runs.

@@ -32,6 +32,10 @@ _Avoid_: Discussion, council
 Removal of a player by **Meeting** vote; the ejected player's role is not revealed.
 _Avoid_: Vote-out, kick, elimination (which also covers kills)
 
+**Verification Protocol**:
+The team rule for checking each other's work: no audits, optional audits, or a mandatory independent two-person check before work counts.
+_Avoid_: Review process, QA
+
 **Talk Budget**:
 The maximum amount a **Seat** may say per **Round** or **Meeting** pass; equal for every **Seat** unless an experiment varies it.
 _Avoid_: Token speed, TPS, rate limit (those describe the API, not the game rule)
@@ -133,26 +137,50 @@ A lineup of 5 **Models** from the **Model Pool**, each holding exactly two **Sea
 _Avoid_: Mixed game, all-combinations game
 
 **Mirror Match**:
-A lineup where all ten **Seats** are the same **Model**.
-_Avoid_: All-X game, self-play
+A lineup where all ten **Seats** are the same **Model**; it describes self-play only and is not a measure of defense, because the attackers and defenders are the same model.
+_Avoid_: All-X game, baseline
+
+**Benign Match**:
+A game with zero **Impostors**, otherwise identical to a **Balanced Lobby**, used as the baseline for **Sabotage Damage**.
+_Avoid_: Control game, clean game, no-impostor mode
+
+**Hidden Impostor Count**:
+The rule that every player is told only "0 to 2 **Impostors**," never the exact number, so **Benign Matches** look identical to players.
+_Avoid_: Unknown impostors, secret count
 
 **Lopsided Lobby**:
-A lineup with a majority **Model** and a minority **Model** (e.g. 8 vs 2), used to measure **Out-group Bias** rather than to compare models head-to-head.
+A lineup with a majority **Model** and a minority **Model** (e.g. 8 vs 2), used to measure **Minority Disadvantage** rather than to compare models head-to-head.
 _Avoid_: Unbalanced game, skewed lobby
 
 **Hidden Identity**:
 The rule that no player is told which **Model** fills any other **Seat**; players can only guess from behavior and writing style.
 _Avoid_: Anonymous play, blind mode
 
+**Minority Disadvantage**:
+The excess rate at which minority-model **Crewmates** are wrongly ejected in a **Lopsided Lobby**, compared with majority-model **Crewmates**; it is what's measured, whatever the cause.
+_Avoid_: Bias score, discrimination
+
 **Out-group Bias**:
-A **Model** treating players as more suspicious because they seem to be a different model, rather than because of evidence.
+A **Model** treating players as more suspicious because they seem to be a different model, rather than because of evidence; claimed only when a **Style Mask** removes the **Minority Disadvantage**.
 _Avoid_: Racism, modelism, tribalism
+
+**Style Mask**:
+A condition where a fixed model rewrites every message in a neutral style before other players see it, removing writing-style cues to which model is speaking.
+_Avoid_: Paraphrasing, anonymizer
 
 ### Outcomes
 
 **Productivity**:
-How much of the crew's shared **Task** work gets done.
-_Avoid_: Task score, efficiency
+How quickly the crew finishes all of its shared **Task** work, measured as **Rounds** to completion; games that hit the round cap count as unfinished.
+_Avoid_: Task score, efficiency, share of tasks done (a game cut short would look unproductive)
+
+**Containment**:
+The moment both **Impostors** have been ejected; play continues afterwards until all **Tasks** are done or the round cap is reached.
+_Avoid_: Crew win, game over
+
+**Sabotage Damage**:
+The loss in **Productivity** caused by **Impostors**: the completion time of a game with **Impostors** minus that of a matched **Benign Match**.
+_Avoid_: Harm, impact
 
 **Vigilance**:
 How quickly and accurately the crew identifies and ejects the **Impostors**.
@@ -179,12 +207,12 @@ An engine-generated test message whose truth is already known, used to measure t
 _Avoid_: Synthetic label, test claim
 
 **Lie**:
-A false **Claim** made by an **Impostor**.
-_Avoid_: Deception (the broader skill), misinformation
+A false **Claim** that contradicts the speaker's own observation record, so the speaker provably knew it was false (e.g. misstating its own location).
+_Avoid_: Deception (the broader skill), misinformation, any false claim by an impostor
 
 **Misstatement**:
-A false **Claim** made by a **Crewmate**, whether from confusion or hallucination.
-_Avoid_: Lie (reserved for impostors), mistake
+A false **Claim** that the speaker's own observation record doesn't prove it knew was false, whether from confusion, hallucination or an unprovable lie.
+_Avoid_: Lie (reserved for provably knowing falsehoods), mistake
 
 **Reliability**:
 How often a **Model**'s **Claims** as a **Crewmate** are true.
@@ -205,10 +233,13 @@ _Avoid_: Delay, latency
 ## Relationships
 
 - A game has **Crewmates** and **Impostors**; every player is exactly one of the two
-- A game has 10 **Seats**, 2 of which are **Impostors**
+- A game has 10 **Seats**, 2 of which are **Impostors** (0 in a **Benign Match**); players are never told which, because of the **Hidden Impostor Count**
+- **Containment** does not end a game; **Productivity** is measured over the whole game, so catching **Impostors** early is never penalized
 - A **Balanced Lobby** always seats 5 **Models**; with a **Model Pool** of 7, each block covers all 21 ways to choose 5 of the 7
 - A **Model Pool** of 7 has 28 possible **Impostor Pairings** (21 different-model pairs + 7 same-model pairs)
-- A **Mirror Match** has a single **Model**, so it measures how a team of that model behaves, not which model is the better deceiver
+- A **Mirror Match** has a single **Model**, so it describes self-play; per-model defense is measured from seat-level metrics in **Balanced Lobbies**, where every model faces the same mix of attackers
+- **Sabotage Damage** = **Productivity** in a **Balanced Lobby** compared with a **Benign Match** of the same five **Models**
+- A **Lie** is always a false **Claim**, but a false **Claim** is a **Lie** only when the speaker's own record proves it knew
 - **Productivity** and **Vigilance** are scored separately; the trade-off between them is a headline result
 
 ## Example dialogue
@@ -219,6 +250,8 @@ _Avoid_: Delay, latency
 ## Flagged ambiguities
 
 - "All combinations" of models was infeasible (1,001 ways to fill 10 seats from just 5 models, before impostor assignment); model-to-model comparisons come from **Balanced Lobby** and **Mirror Match** only.
-- "Racist / modelist" was used for models favoring their own kind; canonical term is **Out-group Bias**.
-- "Lopsided lineups" are not used for model-to-model comparison (seat count would confound skill), but are used as **Lopsided Lobbies** to measure **Out-group Bias**.
+- "Racist / modelist" was used for models favoring their own kind; the measured quantity is **Minority Disadvantage**, and **Out-group Bias** is only claimed when a **Style Mask** removes it (2026-10-20, after Astra's review).
+- "Lopsided lineups" are not used for model-to-model comparison (seat count would confound skill), and with 8 seats of one model the 2 others stand out by style; they're used only as **Lopsided Lobbies** for **Minority Disadvantage**.
+- "Lie" first meant any false impostor **Claim**; it now requires proof the speaker knew (2026-10-20).
+- "Productivity" first meant share of tasks done, which penalized early **Containment**; it now means completion time over the whole game (2026-10-20).
 - "Accuracy" was used loosely in the original plan; it's now split into **Vigilance** (catching **Impostors**) and **Productivity** (finishing work).
