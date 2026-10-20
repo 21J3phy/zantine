@@ -48,7 +48,9 @@ def bots(
     }
 
 
-def lie_game(eject: bool = False, speech: str = "I was in Medbay.") -> Records:
+def lie_game(
+    eject: bool = False, speech: str = "I was in Medbay.", room: str = "Weapons"
+) -> Records:
     """Red (Impostor) kills Green in Weapons in Round 2; Orange saw it and reports.
     At the Meeting Red says it was in Medbay (its own snapshots say Weapons) and
     nobody votes, so the Lie survives (unless ``eject``: then the crew ejects Red)."""
@@ -56,9 +58,9 @@ def lie_game(eject: bool = False, speech: str = "I was in Medbay.") -> Records:
     game = make_game(
         bots=bots(
             actions={
-                RED: {1: Move("Weapons"), 2: Kill(GREEN)},
-                GREEN: {1: Move("Weapons")},
-                ORANGE: {1: Move("Weapons"), 3: Report()},
+                RED: {1: Move(room), 2: Kill(GREEN)},
+                GREEN: {1: Move(room)},
+                ORANGE: {1: Move(room), 3: Report()},
             },
             votes=votes,
             speech={RED: {1: speech}},
@@ -341,6 +343,33 @@ def test_a_stale_audit_of_the_same_seed_is_not_used() -> None:
     )
 
 
+def test_a_stale_audit_with_the_same_speech_but_other_events_is_not_used() -> None:
+    """Same seed, same statements at the same seqs, but the players went to Medbay:
+    Red's "I was in Medbay." is now true, so the old Lie verdict must not be reused."""
+    old_audit = audit_of(lie_game())
+    rerun = lie_game(room="Medbay")
+    spoken = [r for r in rerun if r["kind"] == "event" and r["type"] == "statement"]
+    assert [r["data"] for r in spoken] == [
+        st | {"truncated": False}
+        for st in (
+            {k: s[k] for k in ("meeting", "order", "pass_index", "speaker", "text")}
+            for s in old_audit["statements"]
+        )
+    ]
+    assert [r["seq"] for r in spoken] == [s["seq"] for s in old_audit["statements"]]
+    report = find_moments(rerun, old_audit)
+    assert "surviving_lie" not in types(report)
+    assert report["audit_rejected"].startswith("the audit report's verdict for Claim ")
+    assert {c["verdict"]["label"] for c in audit_of(rerun)["claims"]} == {"true"}
+
+
+def test_a_tampered_claim_cannot_be_checked() -> None:
+    records = lie_game()
+    audit = audit_of(records)
+    del audit["claims"][0]["kind"]
+    assert "can't be checked" in find_moments(records, audit)["audit_rejected"]
+
+
 def test_cli_ignores_a_stale_sidecar(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     transcript = write(lie_game(), tmp_path / "game.jsonl")
     assert main(["audit", str(transcript)]) == 0
@@ -392,7 +421,8 @@ def test_detectors_read_transcripts_and_audits_only() -> None:
     package = Path(__file__).parent.parent / "src" / "zantine" / "moments"
     for path in package.glob("*.py"):
         imports = re.findall(r"^\s*(?:from|import) (zantine\.\w+)", path.read_text(), re.M)
-        assert set(imports) <= {"zantine.moments", "zantine.replay"}, (path.name, imports)
+        allowed = {"zantine.moments", "zantine.replay", "zantine.audit"}
+        assert set(imports) <= allowed, (path.name, imports)
 
 
 # Ranking ---------------------------------------------------------------------

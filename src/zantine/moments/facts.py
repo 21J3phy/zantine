@@ -7,11 +7,15 @@ here is ground truth about this one game.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
+from zantine.audit.check import check_claim
+from zantine.audit.claims import Claim
+from zantine.audit.record import build_record
 from zantine.moments.captions import join
 
 
@@ -200,18 +204,23 @@ def build_facts(
             case "crisis.failed" if data["number"] in facts.crises:
                 facts.crises[data["number"]].failed = rnd
     if audit is not None:
-        facts.audit_problem = audit_mismatch(facts, audit)
+        facts.audit_problem = audit_mismatch(facts, audit, records)
         if facts.audit_problem is not None:
             facts.audit = None
     return facts
 
 
-def audit_mismatch(facts: GameFacts, audit: dict[str, Any]) -> str | None:
+def audit_mismatch(
+    facts: GameFacts, audit: dict[str, Any], records: list[dict[str, Any]]
+) -> str | None:
     """Why ``audit`` is not this transcript's report, or None if it is.
 
     The seed alone is not enough (runs reuse seeds, and a rerun can overwrite a
-    transcript next to an old ``.audit.json``), so every audited statement must
-    match this transcript's statement at the same ``seq``, and vice versa.
+    transcript next to an old ``.audit.json``). Every audited statement must
+    match this transcript's statement at the same ``seq`` (and vice versa), and
+    every Claim's verdict, including its proof, must be what checking that Claim
+    against this transcript gives: same speech over different events must not
+    reuse a stale Lie.
     """
     seed = audit.get("game", {}).get("seed")
     if seed != facts.seed:
@@ -229,7 +238,22 @@ def audit_mismatch(facts: GameFacts, audit: dict[str, Any]) -> str | None:
     for seq in sorted(set(audited) | set(facts.statements)):
         if audited.get(seq) != facts.statements.get(seq):
             return f"the audit report's statements differ from this transcript's (seq {seq})"
+    rec = build_record(records)
+    for c in audit.get("claims", []):
+        try:
+            claim = Claim(**{f.name: c[f.name] for f in fields(Claim) if f.name != "problems"})
+            claim = Claim(**{**claim.__dict__, "problems": tuple(c.get("problems", ()))})
+            verdict = _plain(check_claim(claim, rec).to_dict())
+        except (KeyError, TypeError, ValueError, StopIteration):
+            return f"the audit report's Claim {c.get('id')} can't be checked on this transcript"
+        if verdict != _plain(c.get("verdict")):
+            return f"the audit report's verdict for Claim {c.get('id')} differs on this transcript"
     return None
+
+
+def _plain(value: Any) -> Any:
+    """As it reads back from JSON (tuples become lists)."""
+    return json.loads(json.dumps(value, sort_keys=True))
 
 
 def _normal(text: str) -> str:
