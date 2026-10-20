@@ -54,6 +54,9 @@ class ModelSpec:
     # Neutral effort level -> the lab's own setting. Empty means the level is sent as-is.
     efforts: dict[str, str] = field(default_factory=dict, hash=False)
     long_context: PriceTier | None = None
+    # Analysis only (graphs join a Sibling to its Flagship); never sent to a provider.
+    tier: str | None = None
+    flagship: str | None = None
 
     def __post_init__(self) -> None:
         if self.efforts and self.effort not in self.efforts:
