@@ -441,6 +441,10 @@ def build_report(
         "games": [g.to_dict() for g in games],
         "seats": [s.__dict__ for g in games for s in g.seats],
     }
+    if data.manifest.get("experiment") == "speed":
+        from zantine.analysis.speed import speed_report
+
+        report["speed"] = speed_report(data.run_dir, {g.id for g in games}, replicates, seed)
     report["progress"] = progress(data, report)
     return report
 
@@ -449,7 +453,9 @@ def run_summary(data: RunData) -> dict[str, Any]:
     planned = data.manifest["games"]
     done = {g.id for g in data.games}
     by_kind = {}
-    for kind in ("lobby", "benign", "mirror"):
+    kinds = ["lobby", "benign", "mirror"]
+    kinds += sorted({g["kind"] for g in planned} - set(kinds))  # e.g. the speed realism check
+    for kind in kinds:
         p = [g for g in planned if g["kind"] == kind]
         by_kind[kind] = {"planned": len(p), "complete": sum(g["id"] in done for g in p)}
     return {
@@ -485,8 +491,10 @@ def progress(data: RunData, report: dict[str, Any]) -> dict[str, Any]:
     widths = {}
     for key, metric in report["metrics"].items():
         widths[key] = {m: v["ci_width"] for m, v in metric["per_model"].items()}
+    # The speed experiment's size is its own (docs/sample-size.md), not v1's 12 blocks.
+    speed = data.manifest.get("experiment") == "speed"
     return {
-        "planned_blocks": PLANNED_BLOCKS,
+        "planned_blocks": data.manifest["blocks"] if speed else PLANNED_BLOCKS,
         "scheduled_blocks": data.manifest.get("blocks", len(blocks)),
         "blocks_complete": len(complete),
         "complete_block_ids": complete,
@@ -498,9 +506,13 @@ def progress(data: RunData, report: dict[str, Any]) -> dict[str, Any]:
         "mirror": report["run"]["by_kind"]["mirror"],
         "ci_widths": widths,
         "note": (
-            "Information only. v1 is fixed at 12 blocks with no early stopping "
-            "(docs/sample-size.md); interval widths here do not decide anything."
-        ),
+            "Information only. The speed experiment is fixed at 76 games (56 tier games + 20 "
+            "realism check)"
+            if speed
+            else "Information only. v1 is fixed at 12 blocks"
+        )
+        + " with no early stopping (docs/sample-size.md); interval widths here do not decide "
+        "anything.",
     }
 
 
@@ -513,7 +525,11 @@ def progress_markdown(report: dict[str, Any]) -> str:
         f"Run: `{run['run_dir']}`",
         "",
         f"- Blocks complete: **{p['blocks_complete']} of {p['planned_blocks']}** "
-        f"(the fixed v1 size; this manifest schedules {p['scheduled_blocks']}).",
+        + (
+            "(the speed experiment's tier games)."
+            if "speed" in report
+            else f"(the fixed v1 size; this manifest schedules {p['scheduled_blocks']})."
+        ),
     ]
     for b, frac in p["games_in_partial_blocks"].items():
         lines.append(f"- Block {b} in progress: {frac} games complete.")
@@ -524,6 +540,14 @@ def progress_markdown(report: dict[str, Any]) -> str:
             + "."
         )
     lines += [
+        *(
+            [
+                f"- Realism-check games complete: {run['by_kind']['realism']['complete']} of "
+                f"{run['by_kind']['realism']['planned']}."
+            ]
+            if "realism" in run["by_kind"]
+            else []
+        ),
         f"- Mirror Matches complete: {p['mirror']['complete']} of {p['mirror']['planned']}.",
         f"- Games complete: {run['games_complete']} of {run['games_planned']} "
         f"(lobby {run['by_kind']['lobby']['complete']}, benign "
@@ -548,6 +572,23 @@ def progress_markdown(report: dict[str, Any]) -> str:
             w = p["ci_widths"][key].get(m)
             cells.append("n/a" if w is None else f"{w:.3g}")
         lines.append(f"| {metric['label']} | {metric['unit']} | " + " | ".join(cells) + " |")
+    for section in ((report.get("speed") or {}).get("modes") or {}).values():
+        tiers = report["speed"]["tiers"]
+        lines += [
+            "",
+            f"## Talk Budget tiers, {section['label']}: 95% interval widths",
+            "",
+            f"{section['games']} games, {section['seats']} Seats; Vote Pull positions: "
+            f"{section['pull_source']}.",
+            "",
+            "| Metric | " + " | ".join(tiers) + " | fast - slow |",
+            "| --- | " + " | ".join("---:" for _ in tiers) + " | ---: |",
+        ]
+        for metric in section["metrics"].values():
+            widths = [metric["per_tier"][t]["ci_width"] for t in tiers]
+            widths.append(metric["fast_minus_slow"]["ci_width"])
+            cells = ["n/a" if w is None else f"{w:.3g}" for w in widths]
+            lines.append(f"| {metric['label']} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
 

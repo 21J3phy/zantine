@@ -71,7 +71,7 @@ LOBBY_MODELS = 5
 SEATS_PER_MODEL = 2
 IMPOSTORS = 2
 MIRROR_PER_MODEL = 6
-EXPERIMENTS = ("main", "effort")
+EFFORT = "effort"  # manifest["experiment"] of an effort sweep
 # Effort sweep: Mirror Matches per Model at each swept level (medium comes from v1).
 EFFORT_PER_LEVEL = 10
 EFFORT_SWEEP_LEVELS = ("low", "high")
@@ -335,7 +335,7 @@ def make_effort_manifest(
         raise ValueError("seed collision; choose another master seed")
     manifest = {
         "manifest_version": MANIFEST_VERSION,
-        "experiment": "effort",
+        "experiment": EFFORT,
         "master_seed": master_seed,
         "seed_derivation": SEED_DERIVATION,
         "pool": list(pool),
@@ -385,11 +385,8 @@ def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
 
 def verify(manifest: dict[str, Any]) -> list[str]:
     """Every scheduling invariant; returns the problems found (empty = valid)."""
-    experiment = manifest.get("experiment", "main")
-    if experiment == "effort":
+    if manifest.get("experiment") == EFFORT:
         return verify_effort(manifest)
-    if experiment != "main":
-        return [f"unknown experiment {experiment!r}"]
     pool = manifest["pool"]
     design = CyclicDesign(pool)
     games = manifest["games"]
@@ -492,7 +489,7 @@ def all_pairings(pool: Sequence[str]) -> list[Pairing]:
 
 
 def summary(manifest: dict[str, Any]) -> str:
-    if manifest.get("experiment") == "effort":
+    if manifest.get("experiment") == EFFORT:
         return (
             f"{len(manifest['games'])} games: effort sweep, {manifest['effort_per_level']} Mirror "
             f"Matches per Model at each of {', '.join(manifest['effort_levels'])} effort; "
