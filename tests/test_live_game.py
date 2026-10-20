@@ -66,6 +66,7 @@ def test_one_live_fable_seat_and_nine_bots_play_a_full_game() -> None:
         "model": "claude-fable-5-1",
         "provider": "anthropic",
         "effort": "medium",
+        "effort_setting": "medium",
         "harness": "neutral-v4",
     }
     others = [s for s in header["seats"] if s["seat"] != me]

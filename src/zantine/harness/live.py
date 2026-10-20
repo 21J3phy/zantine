@@ -76,10 +76,13 @@ def play_live(
     adapter_factory: Callable[[ModelSpec], ProviderAdapter] | None = None,
     models: dict[str, ModelSpec] | None = None,
     ledger: Ledger | None = None,
+    effort: str | None = None,
 ) -> LiveRun:
     """Play one game in which ``live:<model>`` seats are played by Models.
 
     Pass a shared ``ledger`` to make several games draw on one spend cap.
+    ``effort`` (``low`` / ``medium`` / ``high``) overrides every live Model's
+    configured level; each adapter sends its lab's own setting for that level.
     """
     models = load_models() if models is None else models
     entries = parse_spec(bots, config.num_seats)
@@ -93,6 +96,8 @@ def play_live(
     for model_id in wanted:
         if model_id not in adapters:
             spec = model_spec(model_id, models)
+            if effort is not None:
+                spec = spec.at_effort(effort)
             spec.check_price_current()
             try:
                 adapters[model_id] = adapter_factory(spec)
@@ -143,7 +148,7 @@ def play_live(
 def cost_report(
     game: Game, ledger: Ledger, records: Sequence[CallRecord], aborted: str | None
 ) -> dict[str, Any]:
-    """Per-Seat tokens, dollars and Invalid Actions for one game."""
+    """Per-Seat and per-Model tokens (incl. thinking), dollars and Invalid Actions for one game."""
     invalid = {seat: 0 for seat in range(game.config.num_seats)}
     forfeits = dict(invalid)
     for r in game.transcript.records:
@@ -155,6 +160,18 @@ def cost_report(
         if bad:
             invalid[d["seat"]] += 1
             forfeits[d["seat"]] += d["attempt"] == 2
+    specs = {
+        c.adapter.model.id: c.adapter.model for c in game.controllers if isinstance(c, HarnessSeat)
+    }
+    models = {
+        model_id: {
+            "provider": spec.provider,
+            "effort": spec.effort,
+            "effort_setting": spec.effort_setting,
+            **summarize(r for r in records if r.model == model_id),
+        }
+        for model_id, spec in specs.items()
+    }
     seats = []
     for seat, controller in enumerate(game.controllers):
         mine = [r for r in records if r.seat == seat]
@@ -170,6 +187,7 @@ def cost_report(
     return {
         "complete": aborted is None,
         "seats": seats,
+        "models": models,
         "game": summarize(records),
         "spend_cap_usd": ledger.spend_cap_usd,
         "run_spent_usd": round(ledger.spent_usd, 6),

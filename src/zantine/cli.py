@@ -10,6 +10,7 @@ from typing import Any
 
 from zantine.config import GameConfig
 from zantine.engine import Game
+from zantine.harness.pricing import EFFORT_LEVELS
 from zantine.roles import Team
 from zantine.runner import play
 from zantine.seats.registry import controller_names
@@ -45,6 +46,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=float,
         default=10.0,
         help="hard limit in USD on API spend for live seats (default 10)",
+    )
+    p.add_argument(
+        "--effort",
+        choices=EFFORT_LEVELS,
+        help="reasoning effort for every live seat, mapped to each lab's own setting "
+        "(default: the level in models.toml, medium)",
     )
     r = sub.add_parser("replay", help="write a static HTML replay of a transcript (not scored)")
     r.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
@@ -88,7 +95,9 @@ def _write(game: Game, out: Path) -> None:
 def _play_live(args: argparse.Namespace, config: GameConfig) -> int:
     from zantine.harness.live import play_live
 
-    run = play_live(config, args.bots, spend_cap_usd=args.spend_cap, live=args.live)
+    run = play_live(
+        config, args.bots, spend_cap_usd=args.spend_cap, live=args.live, effort=args.effort
+    )
     game = run.game
     if not args.quiet:
         print_timeline(game)
