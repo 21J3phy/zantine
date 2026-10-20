@@ -158,7 +158,7 @@ OpenAI-compatible specifics (`openai_adapter.py`, and xAI/Meta through it): Resp
 
 **Seating** (`runs.game_setup`). The lineup in spec order is each Model twice (a Mirror Match: one Model ten times); each scheduled Impostor Model marks its next unused entry. The scenario is built from the seed as usual (`scenario.py` is unchanged), and `impostor_seats` is set to the Seats those entries land on, so the roles stream is not used but every other part of the seed's setup is identical. After each game the header is checked against the plan (`check_seating`).
 
-**Hidden Identity.** Players only ever see generated names and seat numbers. Dry-run Seats (`dry:<model>`) and live Seats (`live:<model>`) carry the Model only in `describe()`, i.e. the header's `controller`. `tests/test_hidden_identity.py` scans every context, observation and Neutral Harness prompt (and, for live Seats on a fake provider, every request sent) for Model IDs, their name parts and lab names.
+**Hidden Identity.** Players only ever see generated names and seat numbers. Dry-run Seats (`dry:<model>`) and live Seats (`live:<model>`) carry the Model only in `describe()`, i.e. the header's `controller`. `tests/test_hidden_identity.py` scans every context, observation and Neutral Harness prompt (and, for live Seats, every request each provider adapter sends, on fake clients of all five providers) for Model IDs, their name parts and lab names.
 
 **Run directory** (`runs/<run-id>/`; read by graphs #18, Sabotage Damage #33 and reproducibility #47):
 

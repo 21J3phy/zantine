@@ -218,18 +218,18 @@ def test_a_live_run_stops_at_the_spend_cap_and_resumes_with_a_higher_cap(
     games = load_manifest(run_dir)["games"]
     first = games[0]["id"]
 
-    report = live(run_dir, cap=2.0)
+    report = live(run_dir, cap=1.0)
     assert (report.stopped, report.stopped_game, report.played) == ("spend_cap", first, [])
     assert complete(run_dir) == []
     assert (run_dir / "aborted" / f"{first}.1.jsonl").is_file()
     spent = spent_usd(run_dir)
-    assert 0 < spent <= 2.0 and report.spent_usd == pytest.approx(spent)
+    assert 0 < spent <= 1.0 and report.spent_usd == pytest.approx(spent)
     calls = read_jsonl(run_dir / "spend.jsonl")
     assert {(c["game"], c["attempt"]) for c in calls} == {(first, 1)}
 
-    # The cap is for the whole run: the same cap does not buy a fresh $2.
-    report = live(run_dir, cap=2.0)
-    assert report.stopped == "spend_cap" and spent_usd(run_dir) <= 2.0
+    # The cap is for the whole run: the same cap does not buy a fresh $1.
+    report = live(run_dir, cap=1.0)
+    assert report.stopped == "spend_cap" and spent_usd(run_dir) <= 1.0
 
     report = live(run_dir, cap=1000.0, max_games=2)
     assert report.stopped is None and report.played == [first, games[1]["id"]]
