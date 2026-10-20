@@ -1,6 +1,7 @@
 """Tasks: Crewmates work on seeded Tasks linked by the crew's Task Graph.
 
-At setup every Crewmate is privately assigned solo steps (``zantine.tasks``).
+At setup every Crewmate is privately assigned solo steps (``zantine.tasks``),
+and Shared Tasks are placed across several Crewmates.
 Working a Task is an action taken in the Task's room with an answer. The answer
 is graded automatically and privately: only the worker is told the result. A
 step whose prerequisites are not truly complete at the start of the Round is
@@ -26,6 +27,8 @@ if TYPE_CHECKING:
     from zantine.state import GameState, PlayerState
 
 NAME = "tasks"
+# ``RoundContext.scratch`` key: this Round's graded attempts.
+GRADED = "tasks.graded"
 
 
 @dataclass
@@ -53,11 +56,20 @@ class TaskBoard:
 
     def view(self, task: Task, seat: int) -> dict[str, Any]:
         """A seat's private brief for one of its Tasks (never the answer key)."""
-        brief = task_kind(task.kind).brief(task.content, task.assignees.index(seat))
+        slot = task.assignees.index(seat)
+        brief = task_kind(task.kind).brief(task.content, slot)
+        shared: dict[str, Any] = {}
+        if len(task.assignees) > 1:
+            shared = {
+                "slot": slot,
+                "assignees": list(task.assignees),
+                "slot_room": task.slot_room(seat),
+            }
         return {
             "task": task.id,
             "room": task.room,
             **brief,
+            **shared,
             "requires": [self._ref(r) for r in task.requires],
             "unlocks": [self._ref(d) for d in self.graph.dependents(task.id)],
         }
@@ -145,6 +157,7 @@ class TasksModule(GameModule):
             cfg.task_kinds,
             cfg.tasks_per_crewmate,
             cfg.task_dependency_chance,
+            cfg.shared_task_kinds,
         )
         b = TaskBoard(
             graph,
@@ -204,6 +217,9 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
     b = board(game.state)
     # Prerequisites count only if complete at the start of the Round.
     done_before = {t.id for t in b.graph if t.done}
+    # (seat, task id, correct) for every graded attempt this Round, for kind
+    # modules that act on grades in later resolvers (e.g. split-key resets).
+    graded: list[tuple[int, str, bool]] = rc.scratch.setdefault(GRADED, [])
     for seat, action in rc.acting(WorkOnTask):
         task = b.graph.get(action.task)
         stats = b.stats[seat]
@@ -214,6 +230,7 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
             game.observe(seat, "tasks.blocked", task=task.id, waiting_on=waiting)
             continue
         correct = task_kind(task.kind).grade(task.content, action.answer)
+        graded.append((seat, task.id, correct))
         game.event("tasks.graded", seat=seat, task=task.id, correct=correct, fake=task.fake)
         # Private: only the worker learns the grade.
         game.observe(seat, "tasks.graded", task=task.id, correct=correct)

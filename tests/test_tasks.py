@@ -30,7 +30,11 @@ from zantine.tasks.steps import SortList
 
 
 def started(**config: Any) -> Game:
-    """A started game of idle PlaybookBots; Impostors are seats 0 and 1."""
+    """A started game of idle PlaybookBots; Impostors are seats 0 and 1.
+
+    Solo steps only, unless ``shared_task_kinds`` is given.
+    """
+    config.setdefault("shared_task_kinds", ())
     game = make_game(**config)
     game.start()
     return game
@@ -302,9 +306,11 @@ def test_assignments_are_private_and_never_include_the_answer_key() -> None:
     assigned = [o for o in game.transcript.observations() if o["type"] == "tasks.assigned"]
     impostors = {p.seat for p in game.state.players if p.is_impostor}
     assert {o["seat"] for o in assigned} == set(range(10)) - impostors
-    # The answer key is only in ground-truth events.
+    # The answer key is only in ground-truth events (a split-key reset makes a new one).
     [generated] = events(game, "tasks.generated")
-    assert {json.dumps(t["answer"]) for t in generated["tasks"]} == answers
+    recorded = [t["answer"] for t in generated["tasks"]]
+    recorded += [r["answer"] for r in events(game, "split_key.reset")]
+    assert answers <= {json.dumps(a) for a in recorded}
 
 
 def test_task_content_is_generated_from_the_seed() -> None:

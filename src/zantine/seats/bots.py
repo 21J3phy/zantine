@@ -10,12 +10,17 @@ from zantine.observations import ActionContext, MeetingContext, Observation
 from zantine.rng import GameRng
 from zantine.roles import Role
 from zantine.rules.actions import Action, CallMeeting, Kill, Move, Report, Wait
+from zantine.rules.room_chat import Say
+from zantine.rules.split_key import ReadPart
 from zantine.rules.tasks import WorkOnTask
 from zantine.seats.base import SeatController
 from zantine.tasks import task_kind
+from zantine.tasks.split_key import checksum
 
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
 _ACCUSE = re.compile(r"I accuse (\w+)")
+# How scripted bots share split-key parts in Room Chat: "T9 part 2: 418".
+_PART = re.compile(r"\b(T\d+) part (\d+): (\d+)")
 
 
 class IdleBot(SeatController):
@@ -71,9 +76,14 @@ class ScriptedBot(SeatController):
     """A simple role-aware bot.
 
     Crewmates report bodies they find, call a Meeting if they saw a kill
-    elsewhere; otherwise, in a ``diligence`` share of Rounds, they walk to their
-    nearest open Task and solve it (wrongly in a ``mistakes`` share of attempts;
-    a blocked Task is retried after a couple of Rounds), and wander when idle.
+    elsewhere; otherwise they work on a split-key Task they hold (read their
+    part at its terminal, walk to the entry room, say their part in Room Chat
+    to every holder there, check the part their checksum covers and enter the
+    code once they know all parts), else, in a ``diligence`` share of Rounds,
+    walk to their nearest open solo step and solve it (wrongly in a
+    ``mistakes`` share of attempts; a blocked step is retried after a couple of
+    Rounds), and wander when idle. A bot with ``lies`` gives a wrong split-key
+    part and never enters the code (a stand-in for Sabotage).
     In Meetings they say what they saw ("I saw X kill Y ... I accuse X.") and
     vote for a killer they saw, else the most-accused player.
     Impostors wander and kill when alone with one Crewmate (sometimes with one
@@ -84,6 +94,8 @@ class ScriptedBot(SeatController):
     kind = "scripted"
     # Rounds to wait before retrying a blocked Task.
     retry_after = 2
+    # Split-key holders open the window only on Rounds divisible by this.
+    read_every = 8
 
     def __init__(
         self,
@@ -92,12 +104,14 @@ class ScriptedBot(SeatController):
         reckless: float = 0.3,
         diligence: float = 0.5,
         mistakes: float = 0.1,
+        lies: bool = False,
     ) -> None:
         self.rng = rng
         self.move_chance = move_chance
         self.reckless = reckless
         self.diligence = diligence
         self.mistakes = mistakes
+        self.lies = lies
 
     # Actions ------------------------------------------------------------------
 
@@ -108,14 +122,58 @@ class ScriptedBot(SeatController):
             return Report()
         if _killers_seen_since_meeting(ctx.observations) and ctx.emergency_meetings_left > 0:
             return CallMeeting()
-        return self._task_action(ctx) or self._wander(ctx)
+        return self._split_key_action(ctx) or self._task_action(ctx) or self._wander(ctx)
+
+    def _split_key_action(self, ctx: ActionContext) -> Action | None:
+        for key in ctx.extra.get("split_key", {}).get("tasks", []):
+            action = self._split_key_step(ctx, key)
+            if action is not None:
+                return action
+        return None
+
+    def _split_key_step(self, ctx: ActionContext, key: dict) -> Action | None:
+        task = key["task"]
+        if key["digits"] is None:
+            # Reading opens the window for everyone, so scripted holders all
+            # read on the same Rounds (a fixed convention standing in for
+            # agreeing a time in Room Chat), or at once if it is already open.
+            # Until it is time to head to the terminal, do other work.
+            wait = -ctx.round % self.read_every if key["deadline"] is None else 0
+            if len(key["part_path"]) < wait:
+                return None
+            if key["part_path"]:
+                return Move(to=key["part_path"][0])
+            return ReadPart(task=task) if wait == 0 else Wait()
+        if key["entry_path"]:
+            return Move(to=key["entry_path"][0])
+        holders = {h["part"]: h["seat"] for h in key["holders"]}
+        mine = _corrupt(key["digits"]) if self.lies else key["digits"]
+        # Parts of the current code can only have been said after its window opened.
+        heard, told, said = _split_key_chat(ctx, task, key["deadline"] - key["window"])
+        if (set(holders.values()) & set(ctx.players_here)) - told - {ctx.seat}:
+            return Say(text=f"{task} part {key['part']}: {mine}")
+        parts = {**heard, key["part"]: key["digits"]}
+        if self.lies or len(parts) < len(holders):
+            return Wait()
+        checked = parts[key["checks_part"]]
+        if checksum(checked) != key["checksum"]:
+            # The checksum exposes a wrong part: say whose, and don't enter it.
+            warning = (
+                f"{task} part {key['checks_part']} from "
+                f"{ctx.roster[holders[key['checks_part']]]} fails my checksum."
+            )
+            return Say(text=warning) if warning not in said else Wait()
+        brief = {"inputs": {"parts": [parts[p] for p in sorted(parts)]}}
+        return WorkOnTask(task=task, answer=task_kind("split_key").solve(brief))
 
     def _task_action(self, ctx: ActionContext) -> Action | None:
         blocked = {o.data["task"]: o.round for o in ctx.observations if o.type == "tasks.blocked"}
         tasks = [
             t
             for t in ctx.extra.get("tasks", {}).get("tasks", [])
-            if not t["done"] and ctx.round - blocked.get(t["task"], -10) > self.retry_after
+            if not t["done"]
+            and task_kind(t["kind"]).seats == 1
+            and ctx.round - blocked.get(t["task"], -10) > self.retry_after
         ]
         if not tasks or self.rng.random() >= self.diligence:
             return None
@@ -186,6 +244,35 @@ class ScriptedBot(SeatController):
 
 
 # Reading observations and statements ----------------------------------------------
+
+
+def _split_key_chat(
+    ctx: ActionContext, task: str, since: int
+) -> tuple[dict[int, str], set[int], set[str]]:
+    """Room Chat about ``task`` after Round ``since`` (when the current code's
+    window opened): parts heard from others, seats that heard my part, and
+    everything I said."""
+    heard: dict[int, str] = {}
+    told: set[int] = set()
+    said: set[str] = set()
+    for obs in ctx.observations:
+        if obs.type != "room_chat.message" or obs.round <= since:
+            continue
+        text = obs.data["text"]
+        if obs.data["speaker"] == ctx.seat:
+            said.add(text)
+            if any(t == task for t, _, _ in _PART.findall(text)):
+                told.update(obs.data["listeners"])
+            continue
+        for t, part, digits in _PART.findall(text):
+            if t == task:
+                heard[int(part)] = digits
+    return heard, told, said
+
+
+def _corrupt(digits: str) -> str:
+    """A wrong part that fails its checksum (last digit changed)."""
+    return digits[:-1] + str((int(digits[-1]) + 1) % 10)
 
 
 def _fellow_impostors(observations: Sequence[Observation]) -> set[int]:

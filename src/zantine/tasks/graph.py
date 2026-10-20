@@ -1,7 +1,8 @@
 """Task instances in a game and the crew's Task Graph.
 
 A ``Task`` is one ``TaskContent`` placed in a game: an id, a room, its
-assignees, and the Tasks it ``requires`` (the Task Graph's edges). A Task can
+assignees (several for a Shared Task, each with its own starting room), and
+the Tasks it ``requires`` (the Task Graph's edges). A Task can
 only be worked once every prerequisite is truly complete (graded correct), not
 merely claimed done.
 """
@@ -27,6 +28,10 @@ class Task:
     assignees: list[int]
     content: TaskContent
     requires: tuple[str, ...] = ()
+    # Multi-seat Tasks: the room each assignee slot starts its part in (e.g.
+    # where a split-key part is read). Empty for solo steps. ``room`` is where
+    # the Task is finished.
+    slot_rooms: tuple[str, ...] = ()
     # Hook for Fake Tasks: shown like a real Task but never counts toward
     # Productivity or the crew win.
     fake: bool = False
@@ -38,8 +43,14 @@ class Task:
     def kind(self) -> str:
         return self.content.kind
 
+    def slot_room(self, seat: int) -> str:
+        """Where ``seat`` starts its part: its slot room, else the Task's room."""
+        slot = self.assignees.index(seat)
+        return self.slot_rooms[slot] if self.slot_rooms else self.room
+
     def to_record(self) -> dict[str, Any]:
         """Ground truth for the transcript (includes the answer key)."""
+        extra = {"slot_rooms": list(self.slot_rooms)} if self.slot_rooms else {}
         return {
             "id": self.id,
             "kind": self.kind,
@@ -50,6 +61,7 @@ class Task:
             "fake": self.fake,
             "inputs": self.content.inputs,
             "answer": self.content.answer,
+            **extra,
         }
 
 
@@ -107,6 +119,7 @@ def build_task_graph(
     kinds: Sequence[str],
     per_crewmate: int,
     dependency_chance: float,
+    shared_kinds: Sequence[str] = (),
 ) -> TaskGraph:
     """Generate the crew's Tasks and Task Graph from the seed.
 
@@ -115,6 +128,10 @@ def build_task_graph(
     each step then requires, with probability ``dependency_chance``, one earlier
     step held by a *different* Crewmate (so steps unlock other players' steps),
     keeping every chain at most ``MAX_CHAIN`` steps long.
+
+    Then one multi-seat Task is placed per entry of ``shared_kinds`` (see
+    ``place_shared_tasks``), from a separate stream so the solo steps a seed
+    generates do not depend on which shared kinds are configured.
     """
     for name in kinds:
         if task_kind(name).seats != 1:
@@ -137,4 +154,45 @@ def build_task_graph(
             requires = (rng.choice(candidates),)
         depth[task_id] = 1 + max((depth[r] for r in requires), default=-1)
         tasks.append(Task(task_id, rng.choice(rooms), [seat], content, requires))
+    tasks += place_shared_tasks(rng.fork("shared"), crew, rooms, shared_kinds, len(tasks) + 1)
     return TaskGraph(tasks)
+
+
+def place_shared_tasks(
+    rng: GameRng,
+    seats: Sequence[int],
+    rooms: Sequence[str],
+    kinds: Sequence[str],
+    first_index: int,
+) -> list[Task]:
+    """Place one multi-seat Task per entry of ``kinds``, with ids from ``T{first_index}``.
+
+    Each Task gets ``kind.seats`` distinct assignees from ``seats`` (those with
+    the fewest shared Tasks so far first, ties broken by the seed), a starting
+    room per assignee slot (``Task.slot_rooms``, all different while there are
+    enough rooms, so the assignees start their parts apart) and a room where it
+    is finished. Shared Tasks have no prerequisites. A kind needing more seats
+    than ``seats`` has is skipped. Pass Impostors in ``seats`` to give them a
+    part (Fake Tasks / Sabotage).
+    """
+    load = {seat: 0 for seat in seats}
+    tasks: list[Task] = []
+    for name in kinds:
+        kind = task_kind(name)
+        if kind.seats < 2:
+            raise ValueError(f"task kind {name!r} is not a multi-seat kind")
+        if len(seats) < kind.seats:
+            continue
+        task_id = f"T{first_index + len(tasks)}"
+        content = kind.generate(rng.fork(f"content/{task_id}"))
+        order = rng.shuffled(seats)
+        order.sort(key=lambda s: load[s])  # stable: the seeded shuffle breaks ties
+        assignees = order[: kind.seats]
+        for seat in assignees:
+            load[seat] += 1
+        if len(rooms) >= kind.seats:
+            slot_rooms = tuple(rng.sample(rooms, kind.seats))
+        else:
+            slot_rooms = tuple(rng.choice(rooms) for _ in range(kind.seats))
+        tasks.append(Task(task_id, rng.choice(rooms), assignees, content, slot_rooms=slot_rooms))
+    return tasks
