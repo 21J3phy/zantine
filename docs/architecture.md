@@ -23,6 +23,11 @@ ZANTINE_LIVE=1 XAI_API_KEY=... uv run zantine play --seed 7 \
 ZANTINE_LIVE=1 ANTHROPIC_API_KEY=... uv run zantine play --seed 7 \
     --bots 'live:claude-fable-5-1,live:claude-fable-5-1@agent-loop,scripted*8' --live --spend-cap 10
 ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test: one short game per Model whose key is set (paid)
+
+# A scheduled run (v1: 12 blocks + Mirror Matches = 378 games), resumable.
+uv run zantine schedule --blocks 12 --mirror --out runs/v1   # writes runs/v1/manifest.json
+uv run zantine run runs/v1 --dry-run --max-games 3           # scripted stand-ins, $0
+ZANTINE_LIVE=1 uv run zantine run runs/v1 --live --spend-cap 500   # paid; rerun to resume
 ```
 
 ## Module map (`src/zantine/`)
@@ -70,10 +75,13 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test: one short game 
 | `harness/xai_adapter.py`, `harness/meta_adapter.py` | Grok 4.7 and Muse Wonder: `OpenAIAdapter` with the lab's `base_url`, key and usage quirks. |
 | `harness/google_adapter.py` | Gemini API adapter (Argon) via `google-genai`: `thinking_level`, implicit caching, thoughts as output. |
 | `harness/models.toml`, `harness/pricing.py` | Model IDs, provider, effort and prices per 1M tokens; `ModelSpec.cost(usage)`. |
-| `harness/ledger.py` | `Ledger`: every paid call goes through `Ledger.send` (spend cap check, call, price, record). |
+| `harness/ledger.py` | `Ledger`: every paid call goes through `Ledger.send` (spend cap check, `_reserve` hook, call, price, record; `runs.RunLedger` journals the reservation and the record). |
 | `harness/live.py` | `play_live(...)`: the live gate, wiring live Seats into a game, clean abort, the `cost` record. |
 | `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
-| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`. |
+| `schedule.py` | The lineup scheduler (pure data, no engine): Balanced Lobby blocks, Benign Matches, Mirror Matches, Impostor assignment, per-game seeds; `make_manifest(pool, master_seed, blocks=, mirror=)`, `verify(manifest)` (every invariant). The Model Pool is `harness/models.toml`. |
+| `runs.py` | Run directories: `create_run`, `execute` (play/resume a manifest under one run-level spend cap, dry or live), `game_setup` (manifest entry → `GameConfig` + bot spec); the `zantine schedule` / `zantine run` commands. |
+| `seats/dry.py` | `dry:<model>`: a scripted bot standing in for a Model in dry runs; the label is in `describe()` (header only). |
+| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`, `zantine schedule`, `zantine run` (from `runs.py`). |
 | `replay/model.py` | Demo replay viewer: transcript records → Round-by-Round view model (map positions, moves, bodies, log, Meetings). Reads transcripts only. |
 | `replay/render.py`, `replay/viewer.html` | Writes the view model into one self-contained HTML page (inline JS/CSS, no network). |
 
@@ -164,6 +172,30 @@ OpenAI-compatible specifics (`openai_adapter.py`, and xAI/Meta through it): Resp
 **Analysis (Claim Audit, metrics, graphs)**: read transcripts; don't import engine internals. Ground truth is in `event` records, each seat's view in `observation` records.
 
 **Replay viewer** (`zantine replay`, for demos, never scoring): unknown event/observation types appear as generic log lines, and a record with a speaker (`seat`/`speaker`/`sender`) plus `text`/`message` is shown as speech, so new modules replay with no viewer changes. Roles are hidden until the viewer's toggle is on: records whose data has a `role`/`killers`-style key, and actions or events whose name contains `kill`, `sabotage`, `crisis` or `vent`, are hidden or shown without the actor. For a nicer map, a header `map` may carry `layout: {room: [x, y]}`; otherwise rooms sit on a circle. Teach `replay/model.py` a new type only if the generic line isn't enough (e.g. it moves players or leaves bodies).
+
+## Scheduled runs
+
+**Plan** (`schedule.py`, spec in [`sample-size.md`](sample-size.md)). A block is 21 Balanced Lobbies (every 5-of-7 lineup, 2 Seats per Model) plus 7 Benign Matches; every Model plays 15 lobbies, every pair meets in 10, and every Model holds exactly 6 Impostor Seats. Impostors are assigned with a cyclic construction: number the Models 0–6 in pool order; rotating every index by +1 (mod 7) permutes lobbies and Impostor Pairings, and since 7 is prime every orbit has 7 members (lobbies: 3 orbits; pairings: 4 orbits, the same-Model pairs and the different-Model pairs whose indices differ by 1, 2 or 3). Each block gives each lobby orbit one pairing orbit, picks a pairing inside the orbit's first lobby (drawn from the master seed) and rotates it with the lobby, so every Model gets the same Impostor count (42 / 7 = 6). Block b maps lobby orbit j to pairing orbit `(3b + j) mod 4`; any 4 consecutive blocks therefore use each of the 28 Impostor Pairings **exactly 3 times** (84 lobbies = 3 × 28; balance is exact for sliding windows too, as the mapping has period 4). A same-Model pairing makes both of that Model's Seats Impostors. Benign Matches in block b are the 7 lineups of lobby orbit `b mod 3`, so all 21 lineups are covered every 3 blocks and each Model is in 5 per block. Mirror Matches (descriptive only): 6 per Model, all 10 Seats one Model, 2 Impostors, after all blocks. Games are shuffled within each block (seeded) so a run stopped mid-block is not biased by kind. Other prime pool sizes use the same construction with the orbit plan found by bipartite matching; non-prime pools are refused. `verify` re-checks every invariant on every manifest.
+
+**Seeds.** Game seed = `int(sha256("zantine-run/<master_seed>/<game_id>")[:8], big) >> 1`, recorded per game in the manifest, the index and the transcript header. Official master seeds stay private (ADR 0001); the manifest is the explicit seed list a Seed Commitment (#47) hashes. Names, seat order and the map come from the game seed, so they are re-shuffled every game.
+
+**Seating** (`runs.game_setup`). The lineup in spec order is each Model twice (a Mirror Match: one Model ten times); each scheduled Impostor Model marks its next unused entry. The scenario is built from the seed as usual (`scenario.py` is unchanged), and `impostor_seats` is set to the Seats those entries land on, so the roles stream is not used but every other part of the seed's setup is identical. After each game the header is checked against the plan (`check_seating`).
+
+**Hidden Identity.** Players only ever see generated names and seat numbers. Dry-run Seats (`dry:<model>`) and live Seats (`live:<model>`) carry the Model only in `describe()`, i.e. the header's `controller`. `tests/test_hidden_identity.py` scans every context, observation and Neutral Harness prompt (and, for live Seats, every request each provider adapter sends, on fake clients of all five providers) for Model IDs, their name parts and lab names.
+
+**Run directory** (`runs/<run-id>/`; read by graphs #18, Sabotage Damage #33 and reproducibility #47):
+
+| Path | Contents |
+| --- | --- |
+| `manifest.json` | Written once by `zantine schedule`, never changed. `manifest_version`, `master_seed`, `seed_derivation`, `pool`, `blocks`, `block_size`, `pairing_window`, `benign_period`, `mirror_per_model`, `engine` (`scenario_version`, `transcript_schema`, `harness`; a run refuses to resume if these changed), `config` (overrides for every game, e.g. `round_cap`), and `games` in run order: `id` (`b01-lobby-07`, `b01-benign-07`, `mirror-m3-2`), `index`, `block` (1-based; `null` for Mirror), `kind` (`lobby` / `benign` / `mirror`), `lineup_id` (index of the 5-Model lineup in `itertools.combinations(pool, 5)` order; a Benign Match shares it with its lobby), `lineup` (Model IDs), `impostors` (Model IDs, the same one twice for a same-Model pairing; `[]` for Benign), `seed`, `config` (per-game overrides, e.g. `num_impostors: 0`). |
+| `games/<game-id>.jsonl` | The transcript of each **complete** game (has `result` and ends with a `cost` record with `complete: true`). Written to a `.tmp` file and renamed. |
+| `aborted/<game-id>.<attempt>.jsonl` | Transcripts of attempts stopped by the spend cap or a fatal API error (kept so their spend is on record). The game is replayed from scratch on resume. |
+| `index.jsonl` | Append-only, one line per finished attempt: `game`, `attempt`, `mode` (`dry` / `live`), `status` (`complete` / `aborted`), `abort_reason`, `kind`, `block`, `lineup_id`, `seed`, `cost_usd`, `calls`, `winner`, `win_reason`, `rounds`, `transcript` (path relative to the run directory); `recovered: true` if the line was rebuilt from a transcript (complete or aborted) after a crash; its `mode` must match the transcript's own Seats. |
+| `spend.jsonl` | Append-only journal of paid calls. Before each call is sent, `kind: "reserve"` (`reservation` id, `game`, `game_attempt`, `call_attempt`, `model`, `reserved_usd` = the call's worst-case cost); after it, `kind: "call"` (the same `reservation`, `game`, `game_attempt`, `call_attempt` plus the `CallRecord`, whose own `attempt` field is renamed `call_attempt`). `game_attempt` is the attempt at the scheduled game; `call_attempt` the Seat's retry of one decision (1 or 2). Run spend = every settled call + the worst case of every reservation never settled, so a crash at any point mid-call cannot hide spend. Absent in dry runs. |
+| `run.json` | `{"mode": "dry" \| "live"}`, written before the run's first game. A directory without it is checked against its index and the Seats of every transcript before it is claimed. |
+| `run.lock` | `flock`ed by the one invocation using the directory; a second `zantine run` on it fails at once (released when the process exits, however it exits). |
+
+**Executing** (`zantine run <dir>`, `runs.execute`). Plays every game whose transcript is not complete, in manifest order, so resuming after a crash, `--max-games` or the spend cap neither duplicates nor skips a game. `--spend-cap` is the USD limit for the **whole run**: everything already in `spend.jsonl` counts against it, one `Ledger` covers every game of an invocation, and when it refuses a call the attempt is saved under `aborted/` and the run stops; a later invocation with a higher cap continues. `--live` needs `ZANTINE_LIVE=1` and an explicit cap; `--dry-run` plays `dry:<model>` scripted Seats with a $0.000001 cap so no paid call can happen. A run directory holds one mode (`run.json`; recovered transcripts are checked against it). Game attempts are numbered from everything on record (index, spend log and `aborted/` files), so an attempt whose index line was lost is recovered, never overwritten. Appends to `index.jsonl` and `spend.jsonl` first end a torn last line (a crash mid-append) with a newline, so it stays one skipped line instead of swallowing the next record.
 
 ## Transcript format
 

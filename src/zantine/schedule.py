@@ -1,0 +1,398 @@
+"""The lineup scheduler: Balanced Lobby blocks, Benign Matches and Mirror Matches.
+
+``make_manifest(pool, master_seed, blocks=12, mirror=True)`` plans a whole run
+(see ``docs/sample-size.md``) as plain data; ``runs.py`` plays it. Nothing here
+touches the engine, so the plan is cheap to build, inspect and verify.
+
+**Block** (28 games with a Model Pool of 7): one Balanced Lobby for each way to
+choose 5 of the 7 Models (2 Seats each), plus 7 Benign Matches. Every Model
+plays 15 lobbies, every pair of Models meets in 10, and every Model holds
+exactly 6 Impostor Seats.
+
+**Impostor assignment (cyclic construction).** Number the Models 0..n-1 in pool
+order (n = 7, prime). Rotating every Model index by +1 (mod n) maps lobbies to
+lobbies and Impostor Pairings to Impostor Pairings. Because n is prime, every
+orbit has exactly n members: the 21 lobbies fall into 3 orbits of 7, and the 28
+Impostor Pairings into 4 orbits of 7 (same-Model pairs, and different-Model pairs
+whose indices differ by 1, 2 or 3 mod 7). A block's assignment gives each lobby
+orbit one pairing orbit: pick one Impostor Pairing for the orbit's first lobby
+(both Models must be in it; one is drawn from the master seed) and rotate it
+with the lobby, so the orbit's 7 lobbies get each pairing of that pairing orbit
+exactly once. A rotation-invariant assignment gives every Model the same number
+of Impostor Seats, 42 / 7 = 6, in every block.
+
+**Impostor Pairing balance.** Block b assigns lobby orbit j to pairing orbit
+``(3b + j) mod 4``. Over any 4 consecutive blocks the 12 (block, lobby orbit)
+slots hit each pairing orbit 3 times, so each of the 28 Impostor Pairings
+appears exactly 3 times in every 4-block window (84 lobbies = 3 x 28). The
+balance is exact, not approximate, and holds for sliding windows too because
+the orbit mapping repeats with period 4. (Other prime pool sizes get the same
+construction, with the orbit plan found by bipartite matching; ``verify``
+checks every invariant either way.)
+
+**Benign Matches**: block b uses lobby orbit ``b mod 3`` as its 7 lineups, so
+all 21 lineups are covered every 3 blocks and every Model is in exactly 5 of a
+block's Benign Matches.
+
+**Mirror Matches** (descriptive only): 6 per Model, all 10 Seats one Model, 2
+Impostors. They come after every block in the run order.
+
+**Seeds**: every game's seed is derived from the run's master seed and the
+game's id (``game_seed``), so it differs per game, is reproducible, and is
+listed explicitly in the manifest (for Seed Commitments, ADR 0001). Names, seat
+order and the map are drawn from that seed, so they are re-shuffled every game.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import math
+from collections import Counter
+from collections.abc import Iterable, Sequence
+from itertools import combinations
+from typing import Any
+
+from zantine.harness import neutral
+from zantine.harness.pricing import load_models
+from zantine.rng import GameRng
+from zantine.scenario import SCENARIO_VERSION
+from zantine.transcript import SCHEMA_VERSION
+
+MANIFEST_VERSION = 1
+# A Balanced Lobby seats this many Models, each in SEATS_PER_MODEL Seats.
+LOBBY_MODELS = 5
+SEATS_PER_MODEL = 2
+IMPOSTORS = 2
+MIRROR_PER_MODEL = 6
+SEED_DERIVATION = "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >> 1"
+
+Pairing = tuple[str, str]
+
+
+def load_pool() -> list[str]:
+    """The Model Pool, in ``harness/models.toml`` order."""
+    return list(load_models())
+
+
+def game_seed(master_seed: int, game_id: str) -> int:
+    """A game's seed: a 63-bit hash of the master seed and the game id."""
+    digest = hashlib.sha256(f"zantine-run/{master_seed}/{game_id}".encode()).digest()
+    return int.from_bytes(digest[:8], "big") >> 1
+
+
+def lineups(pool: Sequence[str]) -> list[tuple[str, ...]]:
+    """Every Balanced Lobby lineup, in canonical order; a lineup's index is its id."""
+    return list(combinations(pool, LOBBY_MODELS))
+
+
+def pairing_key(a: str, b: str, pool: Sequence[str]) -> Pairing:
+    """An Impostor Pairing in pool order (unordered; the same Model twice is allowed)."""
+    return (a, b) if pool.index(a) <= pool.index(b) else (b, a)
+
+
+class CyclicDesign:
+    """The rotation-orbit structure behind the Impostor assignment (see module doc)."""
+
+    def __init__(self, pool: Sequence[str]) -> None:
+        n = len(pool)
+        if len(set(pool)) != n:
+            raise ValueError("Model Pool has duplicates")
+        if n <= LOBBY_MODELS or not _is_prime(n):
+            raise ValueError(
+                f"the balanced design needs a prime pool size above {LOBBY_MODELS} "
+                f"(rotation orbits must all have n members); got {n} Models"
+            )
+        self.pool = list(pool)
+        self.n = n
+        self.lineups = lineups(pool)
+        index = {frozenset(self._idx(lu)): i for i, lu in enumerate(self.lineups)}
+        # Lobby orbits, in order of first appearance; each starts with its representative.
+        self.orbits: list[list[int]] = []
+        seen: set[int] = set()
+        for i, lu in enumerate(self.lineups):
+            if i in seen:
+                continue
+            base = self._idx(lu)
+            orbit = [index[frozenset((x + t) % n for x in base)] for t in range(n)]
+            seen.update(orbit)
+            self.orbits.append(orbit)
+        # Pairing orbits: 0 = same Model twice, d = indices differ by d (1 .. (n-1)/2).
+        self.num_pairing_orbits = (n + 1) // 2
+        m, p = len(self.orbits), self.num_pairing_orbits
+        self.window = p // math.gcd(m, p)  # blocks until every pairing is equally used
+        self.per_window = m // math.gcd(m, p)  # times each pairing appears per window
+        self.benign_period = m
+        self.plan = self._orbit_plan()
+
+    def _idx(self, models: Iterable[str]) -> list[int]:
+        return [self.pool.index(x) for x in models]
+
+    def options(self, orbit: int, d: int) -> list[tuple[int, int]]:
+        """Impostor Pairings of pairing orbit ``d`` inside the orbit's first lobby."""
+        rep = self._idx(self.lineups[self.orbits[orbit][0]])
+        return [(x, (x + d) % self.n) for x in rep if (x + d) % self.n in rep]
+
+    def _orbit_plan(self) -> list[list[int]]:
+        """plan[phase][lobby orbit] = pairing orbit, for the ``window`` block phases.
+
+        Each pairing orbit must fill exactly ``per_window`` of the window's
+        (phase, lobby orbit) slots, and only slots whose lobbies contain such a
+        pairing. Slot (b, j) prefers ``(b*m + j) mod p``, which for a pool of 7
+        is always feasible and already balanced (each block then uses 3 different
+        pairing orbits); otherwise a bipartite matching (augmenting paths) finds
+        a balanced plan or proves there is none.
+        """
+        m, p = len(self.orbits), self.num_pairing_orbits
+        slots = [(b, j) for b in range(self.window) for j in range(m)]
+        copies = [d for d in range(p) for _ in range(self.per_window)]
+        owner: list[int | None] = [None] * len(copies)
+
+        def candidates(s: int) -> list[int]:
+            b, j = slots[s]
+            preferred = (b * m + j) % p
+            ok = [c for c, d in enumerate(copies) if self.options(j, d)]
+            return sorted(ok, key=lambda c: (copies[c] != preferred, c))
+
+        def place(s: int, seen: set[int]) -> bool:
+            for c in candidates(s):
+                if c in seen:
+                    continue
+                seen.add(c)
+                if owner[c] is None or place(owner[c], seen):
+                    owner[c] = s
+                    return True
+            return False
+
+        for s in range(len(slots)):
+            if not place(s, set()):
+                raise ValueError("no balanced Impostor Pairing plan exists for this pool")
+        plan = [[0] * m for _ in range(self.window)]
+        for c, s in enumerate(owner):
+            assert s is not None
+            b, j = slots[s]
+            plan[b][j] = copies[c]
+        return plan
+
+    def pairing_orbit(self, block: int, orbit: int) -> int:
+        """Block ``block`` (0-based) gives lobby orbit ``orbit`` this pairing orbit."""
+        return self.plan[block % self.window][orbit]
+
+    def assign(self, block: int, rng: GameRng) -> dict[int, Pairing]:
+        """lineup id -> Impostor Pairing for one block (0-based)."""
+        n = self.n
+        out: dict[int, Pairing] = {}
+        for j, orbit in enumerate(self.orbits):
+            options = self.options(j, self.pairing_orbit(block, j))
+            x, y = rng.fork(f"orbit-{j}").choice(options)
+            for t, lineup_id in enumerate(orbit):
+                a, b = self.pool[(x + t) % n], self.pool[(y + t) % n]
+                out[lineup_id] = pairing_key(a, b, self.pool)
+        return out
+
+    def benign(self, block: int) -> list[int]:
+        """The lineup ids used for Benign Matches in block ``block`` (0-based)."""
+        return sorted(self.orbits[block % self.benign_period])
+
+
+def make_manifest(
+    pool: Sequence[str],
+    master_seed: int,
+    *,
+    blocks: int = 12,
+    mirror: bool = False,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The full plan of a run: every game, in run order, with its seed."""
+    if blocks < 0:
+        raise ValueError("blocks must be >= 0")
+    design = CyclicDesign(pool)
+    root = GameRng(master_seed)
+    games: list[dict[str, Any]] = []
+    for b in range(blocks):
+        block = b + 1
+        pairings = design.assign(b, root.fork(f"pairings/block-{block}"))
+        planned = [
+            {
+                "id": f"b{block:02d}-lobby-{lid:02d}",
+                "block": block,
+                "kind": "lobby",
+                "lineup_id": lid,
+                "lineup": list(design.lineups[lid]),
+                "impostors": list(pairings[lid]),
+                "config": {},
+            }
+            for lid in range(len(design.lineups))
+        ]
+        planned += [
+            {
+                "id": f"b{block:02d}-benign-{lid:02d}",
+                "block": block,
+                "kind": "benign",
+                "lineup_id": lid,
+                "lineup": list(design.lineups[lid]),
+                "impostors": [],
+                "config": {"num_impostors": 0},
+            }
+            for lid in design.benign(b)
+        ]
+        # Shuffled within the block, so a run stopped mid-block is not biased by kind.
+        games += root.fork(f"order/block-{block}").shuffled(planned)
+    if mirror:
+        for k in range(MIRROR_PER_MODEL):
+            for i, model in enumerate(design.pool):
+                games.append(
+                    {
+                        "id": f"mirror-m{i}-{k + 1}",
+                        "block": None,
+                        "kind": "mirror",
+                        "lineup_id": None,
+                        "lineup": [model],
+                        "impostors": [model] * IMPOSTORS,
+                        "config": {},
+                    }
+                )
+    for index, game in enumerate(games):
+        game["index"] = index
+        game["seed"] = game_seed(master_seed, game["id"])
+    if len({g["seed"] for g in games}) != len(games):  # astronomically unlikely
+        raise ValueError("seed collision; choose another master seed")
+    manifest = {
+        "manifest_version": MANIFEST_VERSION,
+        "master_seed": master_seed,
+        "seed_derivation": SEED_DERIVATION,
+        "pool": list(design.pool),
+        "blocks": blocks,
+        "block_size": len(design.lineups) + design.n,
+        "pairing_window": design.window,
+        "benign_period": design.benign_period,
+        "mirror_per_model": MIRROR_PER_MODEL if mirror else 0,
+        "engine": engine_versions(),
+        "config": dict(config or {}),
+        "games": games,
+    }
+    problems = verify(manifest)
+    if problems:
+        raise AssertionError(f"scheduler produced an invalid plan: {problems[:5]}")
+    return manifest
+
+
+def engine_versions() -> dict[str, Any]:
+    """Versions that must not change in the middle of a run."""
+    return {
+        "scenario_version": SCENARIO_VERSION,
+        "transcript_schema": SCHEMA_VERSION,
+        "harness": f"{neutral.HARNESS_NAME}-v{neutral.HARNESS_VERSION}",
+    }
+
+
+def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
+    """The game's 10 Seats in lineup (spec) order, and which positions are Impostors.
+
+    Each lobby Model holds 2 consecutive positions; a Mirror Match repeats one
+    Model 10 times. Each Impostor Model takes its next unused position, so a
+    same-Model pairing makes both of that Model's Seats Impostors. Which Seat a
+    position fills is decided later by the game seed (``Scenario.seat_order``).
+    """
+    models = game["lineup"]
+    per_model = SEATS_PER_MODEL * LOBBY_MODELS // len(models)
+    entries = [m for m in models for _ in range(per_model)]
+    impostors: set[int] = set()
+    for model in game["impostors"]:
+        pos = next(i for i, m in enumerate(entries) if m == model and i not in impostors)
+        impostors.add(pos)
+    return entries, impostors
+
+
+# Invariants --------------------------------------------------------------------------
+
+
+def verify(manifest: dict[str, Any]) -> list[str]:
+    """Every scheduling invariant; returns the problems found (empty = valid)."""
+    pool = manifest["pool"]
+    design = CyclicDesign(pool)
+    games = manifest["games"]
+    out: list[str] = []
+    if len({g["id"] for g in games}) != len(games):
+        out.append("duplicate game ids")
+    if len({g["seed"] for g in games}) != len(games):
+        out.append("duplicate seeds")
+    for g in games:
+        if g["seed"] != game_seed(manifest["master_seed"], g["id"]):
+            out.append(f"{g['id']}: seed is not derived from the master seed")
+        if not set(g["impostors"]) <= set(g["lineup"]):
+            out.append(f"{g['id']}: an Impostor Model is not in the lineup")
+        if len(g["impostors"]) != (0 if g["kind"] == "benign" else IMPOSTORS):
+            out.append(f"{g['id']}: wrong number of Impostors")
+    blocks = manifest["blocks"]
+    by_block = [[g for g in games if g["block"] == b + 1] for b in range(blocks)]
+    for b, block in enumerate(by_block, start=1):
+        out += [f"block {b}: {p}" for p in block_problems(block, pool)]
+    window = design.window
+    pairing_counts = [lobby_pairings(block, pool) for block in by_block]
+    for start in range(blocks - window + 1):
+        total = sum(pairing_counts[start : start + window], Counter())
+        expected = {p: design.per_window for p in all_pairings(pool)}
+        if total != expected:
+            out.append(f"blocks {start + 1}-{start + window}: Impostor Pairings unbalanced")
+    period = design.benign_period
+    for start in range(blocks - period + 1):
+        covered = sorted(
+            g["lineup_id"]
+            for block in by_block[start : start + period]
+            for g in block
+            if g["kind"] == "benign"
+        )
+        if covered != list(range(len(design.lineups))):
+            out.append(f"blocks {start + 1}-{start + period}: Benign lineups not each used once")
+    mirrors = Counter(g["lineup"][0] for g in games if g["kind"] == "mirror")
+    if mirrors and mirrors != dict.fromkeys(pool, manifest["mirror_per_model"]):
+        out.append(f"Mirror Matches unbalanced: {dict(mirrors)}")
+    return out
+
+
+def block_problems(block: Sequence[dict[str, Any]], pool: Sequence[str]) -> list[str]:
+    n = len(pool)
+    lobbies = [g for g in block if g["kind"] == "lobby"]
+    benign = [g for g in block if g["kind"] == "benign"]
+    out: list[str] = []
+    if sorted(tuple(g["lineup"]) for g in lobbies) != sorted(lineups(pool)):
+        out.append("lobbies are not every 5-of-n lineup exactly once")
+    if len(benign) != n or len({tuple(g["lineup"]) for g in benign}) != n:
+        out.append(f"need {n} distinct Benign Match lineups")
+    if not {tuple(g["lineup"]) for g in benign} <= set(lineups(pool)):
+        out.append("a Benign Match lineup is not a Balanced Lobby lineup")
+    plays = Counter(m for g in lobbies for m in g["lineup"])
+    meets = Counter(p for g in lobbies for p in combinations(g["lineup"], 2))
+    seats = Counter(m for g in lobbies for m in g["impostors"])
+    want_plays = math.comb(n - 1, LOBBY_MODELS - 1)
+    want_meets = math.comb(n - 2, LOBBY_MODELS - 2)
+    want_seats = IMPOSTORS * math.comb(n, LOBBY_MODELS) // n
+    if set(plays.values()) != {want_plays}:
+        out.append(f"lobby appearances per Model {dict(plays)} != {want_plays}")
+    if len(meets) != math.comb(n, 2) or set(meets.values()) != {want_meets}:
+        out.append(f"pairs do not all meet {want_meets} times")
+    if seats != dict.fromkeys(pool, want_seats):
+        out.append(f"Impostor Seats per Model {dict(seats)} != {want_seats}")
+    return out
+
+
+def lobby_pairings(block: Iterable[dict[str, Any]], pool: Sequence[str]) -> Counter[Pairing]:
+    return Counter(pairing_key(*g["impostors"], pool=pool) for g in block if g["kind"] == "lobby")
+
+
+def all_pairings(pool: Sequence[str]) -> list[Pairing]:
+    return [(a, b) for i, a in enumerate(pool) for b in pool[i:]]
+
+
+def summary(manifest: dict[str, Any]) -> str:
+    kinds = Counter(g["kind"] for g in manifest["games"])
+    return (
+        f"{len(manifest['games'])} games: {manifest['blocks']} blocks x "
+        f"{manifest['block_size']} ({kinds['lobby']} Balanced Lobby, {kinds['benign']} Benign), "
+        f"{kinds['mirror']} Mirror; pool of {len(manifest['pool'])}; Impostor Pairings balanced "
+        f"every {manifest['pairing_window']} blocks"
+    )
+
+
+def _is_prime(n: int) -> bool:
+    return n >= 2 and all(n % k for k in range(2, math.isqrt(n) + 1))

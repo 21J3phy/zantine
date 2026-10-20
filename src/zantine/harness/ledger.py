@@ -109,6 +109,7 @@ class Ledger:
             "harness": harness,
             "harness_version": harness_version,
         }
+        self._reserve(model, needed, attempt)
         try:
             response = adapter.send(request)
         except ProviderError as exc:
@@ -116,6 +117,11 @@ class Ledger:
             raise
         self._record(model, meta, attempt, response, error=None)
         return response
+
+    def _reserve(self, model: ModelSpec, needed: float, attempt: int) -> None:
+        """Called once a call has passed the cap check, before it is sent; every
+        reservation is followed by exactly one ``_record`` unless the process dies.
+        ``runs.RunLedger`` persists it so a crash mid-call cannot hide spend."""
 
     def _record(
         self,
