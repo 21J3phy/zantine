@@ -6,7 +6,7 @@ How `zantine report <run-dir>` turns a run directory into numbers and graphs (#1
 
 ## Inputs
 
-Only `manifest.json` and the complete transcripts under `games/` (see "Scheduled runs" in [`architecture.md`](architecture.md)). Analysis never imports the engine. A Seat's **Model** is the header's `controller.model` (`dry:<model>` and `live:<model>` Seats both record it). Incomplete or aborted games are left out; a partial run (even one game) or a Mirror-only run still renders, with `n/a` where a measure is not yet estimable.
+`manifest.json` and the complete transcripts under `games/` (see "Scheduled runs" in [`architecture.md`](architecture.md)); the run summary also reads the mode from `run.json` and the whole run's spend from `spend.jsonl` (`runs.spent_usd`). Analysis never uses engine state. A Seat's **Model** is the header's `controller.model` (`dry:<model>` and `live:<model>` Seats both record it). Incomplete or aborted games are left out; a partial run (even one game) or a Mirror-only run still renders, with `n/a` where a measure is not yet estimable.
 
 ## Censoring: restricted completion time
 
@@ -78,4 +78,4 @@ Every chart carries the interval caption. `metrics.json` holds every number behi
 
 ## Progress report (`progress.md`, `metrics.json` → `progress`)
 
-Blocks complete out of the fixed 12 (a block counts when all 28 of its games are complete), games in a partly finished block, **Mirror Matches** complete, spend recorded, and the current width of every interval. **Information only:** v1 is fixed at 12 blocks with no early stopping ([`sample-size.md`](sample-size.md)); the report makes no stop/continue suggestion.
+Blocks complete out of the fixed 12 (a block counts when all 28 of its games are complete), games in a partly finished block, **Mirror Matches** complete, spend (the whole run's, from `spend.jsonl` via `runs.spent_usd`, including aborted attempts; and the part in complete games' transcripts), and the current width of every interval. **Information only:** v1 is fixed at 12 blocks with no early stopping ([`sample-size.md`](sample-size.md)); the report makes no stop/continue suggestion.

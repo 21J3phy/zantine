@@ -26,6 +26,7 @@ from typing import Any
 
 import numpy as np
 
+from zantine import runs
 from zantine.analysis.bootstrap import (
     DEFAULT_REPLICATES,
     DEFAULT_SEED,
@@ -453,8 +454,17 @@ def run_summary(data: RunData) -> dict[str, Any]:
         "games_complete": len(done),
         "by_kind": by_kind,
         "round_caps": sorted({g.round_cap for g in data.games}),
+        "mode": run_mode(data.run_dir),
         "total_cost_usd": round(sum(g.cost_usd for g in data.games), 6),
+        # The whole run's spend (aborted attempts and unsettled reservations too).
+        "run_spend_usd": runs.spent_usd(data.run_dir),
     }
+
+
+def run_mode(run_dir: Path) -> str | None:
+    """``dry`` or ``live`` from ``run.json``; None before the run's first game."""
+    path = run_dir / runs.RUN
+    return json.loads(path.read_text("utf-8")).get("mode") if path.is_file() else None
 
 
 def progress(data: RunData, report: dict[str, Any]) -> dict[str, Any]:
@@ -505,7 +515,8 @@ def progress_markdown(report: dict[str, Any]) -> str:
         f"- Games complete: {run['games_complete']} of {run['games_planned']} "
         f"(lobby {run['by_kind']['lobby']['complete']}, benign "
         f"{run['by_kind']['benign']['complete']}, mirror {run['by_kind']['mirror']['complete']}).",
-        f"- Spend recorded in transcripts: ${run['total_cost_usd']:.2f}.",
+        f"- Spend: ${run['run_spend_usd']:.2f} for the whole run (spend log), "
+        f"${run['total_cost_usd']:.2f} of it in complete games' transcripts.",
         "",
         f"> {p['note']}",
         "",

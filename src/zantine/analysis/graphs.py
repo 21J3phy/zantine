@@ -131,7 +131,8 @@ def note(ax: Any, text: str) -> None:
 
 
 def dry_run(report: dict[str, Any]) -> bool:
-    return report["run"]["total_cost_usd"] == 0
+    mode = report["run"].get("mode")
+    return mode == "dry" if mode else report["run"]["total_cost_usd"] == 0
 
 
 # Opening map --------------------------------------------------------------------------
