@@ -13,6 +13,7 @@ from zantine.engine import Game
 from zantine.harness.pricing import EFFORT_LEVELS
 from zantine.roles import Team
 from zantine.runner import play
+from zantine.seats.live import harness_names
 from zantine.seats.registry import controller_names
 
 
@@ -25,7 +26,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--bots",
         default="scripted",
         help=f"controller spec, e.g. 'scripted' or 'scripted*9,idle' (known: "
-        f"{', '.join(controller_names())})",
+        f"{', '.join(controller_names())}); live Seats: 'live:<model>[@<harness>]' "
+        f"(harnesses: {', '.join(harness_names())}; default neutral)",
     )
     p.add_argument("--round-cap", type=int, default=GameConfig.round_cap)
     p.add_argument(

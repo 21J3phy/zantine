@@ -150,7 +150,7 @@ One seat's prompt tells it that it is the **Leader**. It gets no extra powers.
 ## Later work
 
 - **P7 · v1.6 Reasoning effort sweep.** Low and high effort, per model, in descriptive **Mirror Matches** (140 games).
-- **P8 · v2 Harness comparison.** Keep the model and swap the **Harness**. Candidates: LangGraph, OpenAI Agents SDK, Claude Agent SDK, Google ADK, CrewAI, and coding-agent CLIs.
+- **P8 · v2 Harness comparison.** Keep the model and swap the **Harness**. Candidates: LangGraph, OpenAI Agents SDK, Claude Agent SDK, Google ADK, CrewAI, and coding-agent CLIs. First alternative: the agent-loop Harness, a port of the OpenAI Agents SDK run loop (#27; see `architecture.md`, "Alternative Harnesses").
 - **P9 · v2.x Model pool expansion.** Open-weight models (DeepSeek, Qwen, Muse Spark Open), and Muse Wonder Full if Meta puts it on the API.
 - **P10 · Lopsided splits.** 7 vs 3 and 6 vs 4, only if v1.3 finds an effect.
 - **P11 · Live demo mode.** Real-time play for showing games to people. Never scored. (The replay viewer moved up to the launch track.)

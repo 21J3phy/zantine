@@ -9,6 +9,11 @@ and fatal ``ProviderError`` propagate and stop the run (see ``harness.live``).
 The ``live`` controller name is registered so ``--bots live:<model>`` parses,
 but live Seats are built only by ``harness.live.play_live``, which needs an
 explicit ``--live`` flag plus ``ZANTINE_LIVE=1``.
+
+Alternative Harnesses subclass ``HarnessSeat``, set ``harness_name`` and
+``harness_version``, and register with ``@register_harness``; a Seat picks one
+with ``live:<model>@<harness>`` (default: ``neutral``). Every Harness sends
+through the same ``Ledger`` and adapters, so cost logs compare directly.
 """
 
 from __future__ import annotations
@@ -30,9 +35,15 @@ from zantine.rules.actions import Action, Invalid
 from zantine.seats.base import SeatController
 from zantine.seats.registry import register_controller
 
+DEFAULT_HARNESS = neutral.HARNESS_NAME
+
 
 class HarnessSeat(SeatController):
+    """A live Seat played through the Neutral Harness."""
+
     kind = "live"
+    harness_name = neutral.HARNESS_NAME
+    harness_version = neutral.HARNESS_VERSION
 
     def __init__(
         self, adapter: ProviderAdapter, ledger: Ledger, rules: Rules | None = None
@@ -50,8 +61,12 @@ class HarnessSeat(SeatController):
         return {
             "kind": self.kind,
             **self.adapter.model.describe(),
-            "harness": f"{neutral.HARNESS_NAME}-v{neutral.HARNESS_VERSION}",
+            "harness": self.harness_label(),
         }
+
+    @classmethod
+    def harness_label(cls) -> str:
+        return f"{cls.harness_name}-v{cls.harness_version}"
 
     def _send(
         self, request: HarnessRequest, phase: str, seat: int, round: int, attempt: int
@@ -66,6 +81,8 @@ class HarnessSeat(SeatController):
                 seat=seat,
                 round=round,
                 attempt=attempt,
+                harness=self.harness_name,
+                harness_version=self.harness_version,
             )
         except ProviderError as exc:
             if exc.fatal:
@@ -131,8 +148,41 @@ class HarnessSeat(SeatController):
         return vote
 
 
+_HARNESSES: dict[str, type[HarnessSeat]] = {}
+
+
+def register_harness(cls: type[HarnessSeat]) -> type[HarnessSeat]:
+    if cls.harness_name in _HARNESSES:
+        raise ValueError(f"harness {cls.harness_name!r} already registered")
+    _HARNESSES[cls.harness_name] = cls
+    return cls
+
+
+register_harness(HarnessSeat)
+
+
+def harness_names() -> list[str]:
+    return sorted(_HARNESSES)
+
+
+def parse_live_arg(arg: str | None) -> tuple[str, type[HarnessSeat]]:
+    """``<model>[@<harness>]`` -> (model ID, Seat class for that Harness)."""
+    model, at, harness = (arg or "").partition("@")
+    if not model:
+        raise ValueError("live seats need a model, e.g. live:claude-fable-5-1")
+    if at and not harness:
+        raise ValueError(f"live:{arg} names no Harness; known: {', '.join(harness_names())}")
+    name = harness or DEFAULT_HARNESS
+    if name not in _HARNESSES:
+        raise ValueError(f"unknown harness {name!r}; known: {', '.join(harness_names())}")
+    return model, _HARNESSES[name]
+
+
 @register_controller("live")
 def _live_factory(rng: Any, arg: str | None) -> SeatController:
     raise ValueError(
         "live seats run only via `zantine play --live` with ZANTINE_LIVE=1 and a spend cap"
     )
+
+
+from zantine.seats import agent_loop as _agent_loop  # noqa: E402, F401  (registers "agent-loop")
