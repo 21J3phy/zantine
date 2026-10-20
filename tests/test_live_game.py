@@ -66,7 +66,7 @@ def test_one_live_fable_seat_and_nine_bots_play_a_full_game() -> None:
         "model": "claude-fable-5-1",
         "provider": "anthropic",
         "effort": "medium",
-        "harness": "neutral-v2",
+        "harness": "neutral-v3",
     }
     others = [s for s in header["seats"] if s["seat"] != me]
     assert [s["controller"]["kind"] for s in others] == ["scripted"] * 9

@@ -81,6 +81,12 @@ The first **Task** kind is dependent solo steps: small pieces of work one player
 
 A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks** and their grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
 
+### Neutral Harness memory
+
+All live **Seats** use the same fixed, pure-code memory summarizer; players do not write their own notes. Once the public log exceeds 6,000 estimated tokens (four characters per token), older completed **Meetings** are condensed. The in-progress **Meeting** and the most recent completed one stay verbatim; the next three become clipped speech digests, and older ones keep the call, dead list, statement counts, who mentioned whom, and anonymous vote/**Ejection**. A mention is neither an accusation nor a truth label. Other public announcements stay verbatim.
+
+Private observations, including room snapshots, witnessed kills, **Tasks** and grades, **Invalid Actions**, and **Room Chat** or unknown plug-in types, are never condensed or dropped. Only observations already received by that **Seat** enter its memory; the original transcript stays intact. See [architecture](architecture.md#extension-points) for classification, cache behavior and tested context sizes.
+
 ## Hidden Impostor Count
 
 Every player is told "0 to 2 **Impostors**" and nothing more, so a **Benign Match** looks the same to a **Crewmate** as a game with **Impostors**. The engine never shows players the config, the number of **Crewmates** or **Tasks**, or **Containment**; **Meeting** announcements, vote tallies and **Crisis** notices carry no count. An **Impostor** knows its partner, so it knows the count. What players can still infer from play (a kill or a **Crisis** proves at least one **Impostor**) is part of the game. The `game_over` observation, sent after the last decision, may say `none` won (see [End of the game](#end-of-the-game)).

@@ -36,9 +36,9 @@ class HarnessRequest:
     """One provider-neutral model call.
 
     The prompt is ``system`` + ``memory`` + ``tail``. ``system``, ``tools`` and
-    every ``memory`` block are stable: later calls for the same Seat repeat them
-    byte for byte and only append new memory blocks, so adapters can mark them
-    for prompt caching. ``tail`` changes every call and must come last.
+    full ``memory`` blocks are cacheable: between log compactions later calls for
+    the same Seat repeat them byte for byte and append blocks. Compaction may
+    replace older blocks. ``tail`` changes every call and must come last.
     """
 
     system: str
