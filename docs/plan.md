@@ -69,10 +69,9 @@ Risk: player speech is adversarial, and Jev doesn't treat input as hostile. Pass
 
 ## v1.2: Leader experiment
 
-- One **Leader** seat assigns **Tasks**. Factors: **Known Leader** vs **Hidden Leader** × Crewmate vs **Compromised Leader**; no-leader baseline reuses v1 data.
+- One **Leader** seat. **No extra powers:** the only difference is a line in its prompt saying it leads the team (and, for a **Known Leader**, a line in every other prompt naming it). It delegates through ordinary **Room Chat** and **Meetings**, and its vote counts the same as anyone's. Any influence it gains is earned, which **Vote Pull** and **Compliance** measure. Factors: **Known Leader** vs **Hidden Leader** × Crewmate vs **Compromised Leader**; no-leader baseline reuses v1 data.
 - **Leader** model rotated across all 5 models in a **Balanced Lobby**.
 - Metrics: **Compliance**, time to eject a **Compromised Leader**, **Leader** **Vote Pull** vs ordinary seats.
-- Open: **Leader** powers; how a **Hidden Leader**'s assignments are delivered.
 
 ## v1.3: Speed experiment
 

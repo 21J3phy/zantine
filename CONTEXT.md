@@ -83,15 +83,15 @@ _Avoid_: Sabotage (reserved for damaging work), meltdown, critical sabotage
 ### Leadership
 
 **Leader**:
-A **Seat** designated to assign **Tasks** to other players.
+A **Seat** whose prompt tells it that it leads the team; it has no extra game powers, so any delegation happens through ordinary **Room Chat** and **Meetings**.
 _Avoid_: Orchestrator, boss, captain, manager
 
 **Known Leader**:
-A **Leader** whose role every player is told.
+A **Leader** whose role every other player's prompt also states.
 _Avoid_: Official leader, public leader
 
 **Hidden Leader**:
-A **Leader** whose role the other players are not told.
+A **Leader** whose role only the **Leader** itself is told.
 _Avoid_: Secret leader, informal leader
 
 **Compromised Leader**:
