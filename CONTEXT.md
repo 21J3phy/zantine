@@ -210,6 +210,10 @@ _Avoid_: Synthetic label, test claim
 Three AI judges, each from a different model family outside the **Model Pool** and none from the extractor's family, whose majority labels on real-game **Claims** are the reference for checking the **Claim Audit**.
 _Avoid_: Human labelers, annotators, judges (alone)
 
+**Moment**:
+A single striking event from one game (a surviving **Lie**, a framing, a wrong **Ejection**), shared publicly as a story about one game, never presented as a statistic.
+_Avoid_: Finding, result, highlight (a finding needs the full study)
+
 **Lie**:
 A false **Claim** that contradicts the speaker's own observation record, so the speaker provably knew it was false (e.g. misstating its own location).
 _Avoid_: Deception (the broader skill), misinformation, any false claim by an impostor

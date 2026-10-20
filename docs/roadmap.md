@@ -33,7 +33,9 @@ Results are graphs, not rankings. The main measures are:
 | 8 | v2 | **Harness** comparison | How much does the scaffolding matter compared with the model? | v1 |
 | 9 | v2.x | Model pool expansion | How do open-weight and next-generation models compare? | v1 |
 | 10 | v1.3+ | Lopsided splits 7 vs 3 and 6 vs 4 | Does **Minority Disadvantage** grow or shrink with minority size? | Only if v1.3 finds an effect |
-| 11 | demo | Real-time play and replay viewer | Not scored. For showing games to people. | v1 |
+| 11 | demo | Real-time play | Not scored. For live demos. | v1 |
+
+**Launch track (runs alongside v1, decided 2026-10-20):** API access → pilot → replay viewer → website v0 (replays + methodology) → **Moments** on X, Reddit and LinkedIn, plus streamer outreach → credits → v1 → website v1 with results. No comparisons between models are published before v1.
 
 The defense experiment and the transfer check come second and third. They are what would make Zantine useful for choosing real setups, not just a diagnostic.
 
@@ -151,7 +153,7 @@ One seat's prompt tells it that it is the **Leader**. It gets no extra powers.
 - **P8 · v2 Harness comparison.** Keep the model and swap the **Harness**. Candidates: LangGraph, OpenAI Agents SDK, Claude Agent SDK, Google ADK, CrewAI, and coding-agent CLIs.
 - **P9 · v2.x Model pool expansion.** Open-weight models (DeepSeek, Qwen, Muse Spark Open), and Muse Wonder Full if Meta puts it on the API.
 - **P10 · Lopsided splits.** 7 vs 3 and 6 vs 4, only if v1.3 finds an effect.
-- **P11 · Demo mode.** Real-time play and a replay viewer for showing games to people. Never scored.
+- **P11 · Live demo mode.** Real-time play for showing games to people. Never scored. (The replay viewer moved up to the launch track.)
 
 ---
 

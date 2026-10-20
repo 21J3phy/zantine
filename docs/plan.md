@@ -107,6 +107,15 @@ Moved up on 2026-10-20 so Zantine tests a defense, not only a diagnosis. It answ
 - Known programs (verify before applying): OpenAI Researcher Access Program (~$1K API credits, reviewed quarterly); Anthropic AI for Science (biology-focused, likely poor fit); Meta Model API gives $20 to new accounts. No research-credit program found for xAI or Google Gemini.
 - **Pilot budget: ~$400 out of pocket.** Order: build engine (subscriptions + scripted bots, $0) → micro-pilot of ~8 games → pitch labs, the OpenAI program and a Purdue faculty sponsor with transcripts and real cost-per-game → full v1 on credits.
 
+## Launch & marketing (decided 2026-10-20)
+
+**Before v1 results exist, market the games, not rankings.**
+- **Website v0:** opens with the replay viewer of pilot games. Visitors watch frontier AIs play, lie, accuse and get ejected, with roles revealed at the end. Alongside it: the methodology, the open-source engine, and the v1 plan ("full results coming").
+- **Website v1, after the full run:** results as graphs with error bars, conveyed as quickly and clearly as possible, plus methodology and how to reproduce the results.
+- **Indirect marketing (X, Reddit, LinkedIn):** share **Moments**, always labeled as one game. Real findings are posted only after v1 (and the follow-ups).
+- **Direct marketing (Twitch, YouTube):** pitch streamers such as ThePrimeagen and Theo (t3.gg) to use the replays and, later, the results when they review a model. Hype videos are optional.
+- **Rule:** no comparisons between models are published before v1. One "n = 8" reply would sink the rigor pitch.
+
 ## Openness & contamination
 
 - **Open engine, generated content.** Engine and rules are open source. Tasks, codes, maps and player names are procedurally generated from a seed for each game, so there is no fixed answer key to memorize.
