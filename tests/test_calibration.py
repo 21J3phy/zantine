@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import math
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -86,6 +89,10 @@ def run(
     return result, client
 
 
+def done_trials(path: Path) -> list[dict[str, Any]]:
+    return [r for r in cal.read_trials(path / cal.TRIALS_FILE) if r["status"] == "done"]
+
+
 def cell(summary: dict[str, Any], kind: str, model: str = MODEL) -> dict[str, Any]:
     return next(c for c in summary["cells"] if c["kind"] == kind and c["model"] == model)
 
@@ -124,6 +131,29 @@ def test_known_clopper_pearson_values() -> None:
 
 
 # Seeds and variants -----------------------------------------------------------------
+
+
+def exact_binom_cdf(k: int, n: int, p: float) -> Fraction:
+    """P(X <= k) in exact rational arithmetic at the float ``p`` (independent check)."""
+    q = Fraction(p)
+    return sum(
+        (Fraction(math.comb(n, i)) * q**i * (1 - q) ** (n - i) for i in range(k + 1)),
+        Fraction(0),
+    )
+
+
+@pytest.mark.parametrize(("k", "n"), [(600, 1200), (37, 1500), (1, 2000)])
+def test_large_trial_counts_give_finite_exact_bounds(k: int, n: int) -> None:
+    b = cal.failure_bounds(k, n)
+    upper, (lo, hi) = b["upper_95_one_sided"], b["ci_95_two_sided"]
+    assert 0 < lo < k / n < hi < 1 and k / n < upper < hi
+    exact = [cal.cp_upper(k, n, 0.05), cal.cp_lower(k, n, 0.025), cal.cp_upper(k, n, 0.025)]
+    assert [upper, lo, hi] == [round(x, 6) for x in exact]
+    assert float(exact_binom_cdf(k, n, exact[0])) == pytest.approx(0.05, abs=1e-9)
+    assert float(1 - exact_binom_cdf(k - 1, n, exact[1])) == pytest.approx(0.025, abs=1e-9)
+    assert float(exact_binom_cdf(k, n, exact[2])) == pytest.approx(0.025, abs=1e-9)
+    if 2 * k == n:
+        assert lo == pytest.approx(1 - hi, abs=1e-6)
 
 
 def test_trial_seeds_are_fresh_per_kind_and_index_and_paired_across_models() -> None:
@@ -246,7 +276,7 @@ def test_correct_wrong_and_malformed_answers_are_counted(tmp_path: Path) -> None
     }
     assert s["kinds"]["lookup_value"]["decision"] == "keep"
 
-    records = {(r["kind"], r["trial"]): r for r in cal.read_trials(tmp_path / cal.TRIALS_FILE)}
+    records = {(r["kind"], r["trial"]): r for r in done_trials(tmp_path)}
     unusable = records[("sort_list", 0)]
     assert unusable["correct"] is False and "no tool call" in unusable["error"]
     assert unusable["attempts"] == 2 and unusable["calls"] == 2
@@ -272,15 +302,16 @@ def test_a_crashed_run_resumes_without_redoing_finished_trials(tmp_path: Path) -
 
     with pytest.raises(KeyboardInterrupt):
         run(tmp_path, crashes, trials=3)
-    assert len(cal.read_trials(tmp_path / cal.TRIALS_FILE)) == 3
-    # A truncated last line (crash mid-write) is skipped and doesn't corrupt the next record.
+    assert len(done_trials(tmp_path)) == 3
+    # A truncated last line (crash mid-write) is set aside and doesn't corrupt the next record.
     with (tmp_path / cal.TRIALS_FILE).open("a") as f:
         f.write('{"kind": "sort_li')
 
     result, client = run(tmp_path, solves, trials=3)
     assert len(client.messages.calls) == 3  # only the 3 lookup_value trials
     assert all(c["verdict"] == "pass" and c["n"] == 3 for c in result.summary["cells"])
-    assert len(cal.read_trials(tmp_path / cal.TRIALS_FILE)) == 6
+    assert len(done_trials(tmp_path)) == 6
+    assert (tmp_path / "trials.jsonl.torn").read_text() == '{"kind": "sort_li\n'
     # A different master seed is a different set of variants: nothing is reused.
     _, client = run(tmp_path, solves, trials=3, seed=4)
     assert len(client.messages.calls) == 6
@@ -292,7 +323,7 @@ def test_the_spend_cap_stops_cleanly_and_a_larger_cap_resumes(tmp_path: Path) ->
     assert result.aborted == "spend_cap" and "spend cap reached" in result.detail
     assert len(client.messages.calls) == 2
     records = cal.read_trials(tmp_path / cal.TRIALS_FILE)
-    assert [r["status"] for r in records] == ["done", "done", "aborted"]
+    assert [r["status"] for r in records] == ["call_started", "call", "done"] * 2
     s = result.summary
     assert cell(s, "sort_list")["verdict"] == "incomplete"
     assert s["kinds"]["sort_list"]["decision"] == "incomplete"
@@ -314,8 +345,9 @@ def test_provider_errors_leave_trials_unfinished_or_stop_the_run(tmp_path: Path)
         return ProviderError("overloaded", fatal=False) if flaky.n == 1 else solves(params)
 
     result, _ = run(tmp_path, flaky, trials=2, kinds=["sort_list"])
-    first = cal.read_trials(tmp_path / cal.TRIALS_FILE)[0]
-    assert first["status"] == "provider_error" and "overloaded" in first["error"]
+    first = cal.read_trials(tmp_path / cal.TRIALS_FILE)[1]
+    assert first["status"] == "call" and first["outcome"] == "provider_error"
+    assert "overloaded" in first["error"] and first["attempt"] == 1 and not first["ok"]
     assert cell(result.summary, "sort_list")["n"] == 1
     assert result.summary["kinds"]["sort_list"]["decision"] == "incomplete"
     result, client = run(tmp_path, trials=2, kinds=["sort_list"])
@@ -382,6 +414,169 @@ def test_every_pool_model_is_calibrated_through_its_own_adapter(tmp_path: Path) 
     assert all(c["verdict"] == "pass" and c["n"] == 2 for c in s["cells"])
     assert all(s["kinds"][k]["decision"] == "keep" for k in ["audit", *KINDS])
     assert all(s["models"][m]["cost_usd"] > 0 for m in pool)
+
+
+def invalid(params: dict[str, Any]) -> Any:
+    return message(text("The answer is obvious."), stop_reason="end_turn")
+
+
+def replies(*responders: Any) -> Any:
+    """Answers the n-th call with the n-th responder."""
+    queue = list(responders)
+    return lambda params: queue.pop(0)(params)
+
+
+def tail_of(params: dict[str, Any]) -> str:
+    return params["messages"][0]["content"][-1]["text"]
+
+
+def test_a_charge_survives_an_interrupt_mid_retry_and_the_cap_still_holds(
+    tmp_path: Path,
+) -> None:
+    def interrupted(params: dict[str, Any]) -> Any:
+        raise KeyboardInterrupt
+
+    with pytest.raises(KeyboardInterrupt):
+        run(tmp_path, replies(invalid, interrupted), trials=1, kinds=["sort_list"])
+    records = cal.read_trials(tmp_path / cal.TRIALS_FILE)
+    assert [r["status"] for r in records] == ["call_started", "call", "call_started"]
+    first_cost, reserved = records[1]["cost_usd"], records[2]["reserved_usd"]
+    assert first_cost > 0 and records[1]["outcome"] == "unusable"
+    # The finished call counts at its cost; the one cut off mid-call at its worst case.
+    assert cal.spent_usd(tmp_path / cal.TRIALS_FILE) == pytest.approx(first_cost + reserved)
+
+    # The CLI restores that spend, so a cap just above it allows no further call.
+    cap = first_cost + reserved + reserved / 2
+    client = FakeClient(solves)
+    ledger = Ledger(cap)
+    ledger.spent_usd = cal.spent_usd(tmp_path / cal.TRIALS_FILE)
+    solvers = cal.model_solvers([MODEL], ledger, adapter_factory=fake_factory(client))
+    result = cal.calibrate(
+        [MODEL], ["sort_list"], out=tmp_path, solvers=solvers, trials=1, seed=3, ledger=ledger
+    )
+    assert result.aborted == "spend_cap" and client.messages.calls == []
+
+
+def test_a_resumed_trial_keeps_its_spent_attempt_and_rejection(tmp_path: Path) -> None:
+    # Worst case per Fable call is ~$0.80 and a fake call costs ~$0.11: one call fits.
+    result, client = run(tmp_path, invalid, cap=0.85, trials=1, kinds=["sort_list"])
+    assert result.aborted == "spend_cap" and len(client.messages.calls) == 1
+
+    # A second unusable reply fails the trial; there is no third call.
+    result, client = run(tmp_path, replies(invalid, solves), trials=1, kinds=["sort_list"])
+    assert len(client.messages.calls) == 1
+    assert "Your previous answer was rejected: no tool call" in tail_of(client.messages.calls[0])
+    (trial,) = done_trials(tmp_path)
+    assert trial["correct"] is False and trial["attempts"] == 2 and trial["calls"] == 2
+    assert "no tool call" in trial["error"]
+    assert cell(result.summary, "sort_list")["failures"] == 1
+
+
+def test_a_resumed_trial_can_still_pass_on_its_retry(tmp_path: Path) -> None:
+    run(tmp_path, invalid, cap=0.85, trials=1, kinds=["sort_list"])
+    _, client = run(tmp_path, solves, trials=1, kinds=["sort_list"])
+    assert len(client.messages.calls) == 1 and "rejected" in tail_of(client.messages.calls[0])
+    (trial,) = done_trials(tmp_path)
+    assert trial["correct"] is True and trial["attempts"] == 2
+
+
+def test_an_answer_received_before_a_crash_is_graded_without_a_new_call(
+    tmp_path: Path,
+) -> None:
+    run(tmp_path, trials=1, kinds=["sort_list"])
+    path = tmp_path / cal.TRIALS_FILE
+    lines = path.read_text().splitlines(keepends=True)
+    path.write_text("".join(lines[:-1]))  # drop the done record: the crash came just before
+
+    result, client = run(tmp_path, invalid, trials=1, kinds=["sort_list"])
+    assert client.messages.calls == []
+    assert cell(result.summary, "sort_list")["verdict"] == "pass"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda spec: spec.at_effort("low"),
+        lambda spec: dataclasses.replace(spec, max_output_tokens=spec.max_output_tokens // 2),
+    ],
+    ids=["effort", "max_output_tokens"],
+)
+def test_another_inference_configuration_never_reuses_results(tmp_path: Path, change: Any) -> None:
+    run(tmp_path, trials=2, kinds=["sort_list"])
+    specs = load_models()
+    specs[MODEL] = change(specs[MODEL])
+    client = FakeClient(invalid)
+    ledger = Ledger(100)
+    solvers = cal.model_solvers([MODEL], ledger, adapter_factory=fake_factory(client), specs=specs)
+    result = cal.calibrate(
+        [MODEL], ["sort_list"], out=tmp_path, solvers=solvers, trials=2, seed=3, ledger=ledger
+    )
+    assert len(client.messages.calls) == 4  # both trials, twice each: nothing reused
+    c = cell(result.summary, "sort_list")
+    assert c["n"] == 2 and c["failures"] == 2 and c["verdict"] == "fail"
+    config = result.summary["run"]["configs"][MODEL]
+    assert (config["effort"], config["max_output_tokens"]) == (
+        specs[MODEL].effort,
+        specs[MODEL].max_output_tokens,
+    )
+    assert len({r["config_id"] for r in done_trials(tmp_path)}) == 2
+
+
+def test_a_torn_multibyte_tail_never_hides_intact_records(tmp_path: Path) -> None:
+    out = tmp_path / "base"
+    cal.calibrate([MODEL], ["sort_list"], out=out, solvers=cal.reference_solvers(), trials=2)
+    intact = (out / cal.TRIALS_FILE).read_bytes()
+    assert intact.isascii()  # records are written as ASCII, so a write can't split a character
+    torn = json.dumps({"kind": "sort_list", "answer": "café é"}, ensure_ascii=False).encode()
+    for cut in range(1, len(torn)):
+        d = tmp_path / str(cut)
+        d.mkdir()
+        (d / cal.TRIALS_FILE).write_bytes(intact + torn[:cut])
+        assert len(cal.read_trials(d / cal.TRIALS_FILE)) == 2
+        assert cal.spent_usd(d / cal.TRIALS_FILE) == 0
+        result = cal.calibrate(
+            [MODEL], ["sort_list"], out=d, solvers=cal.reference_solvers(), trials=3
+        )
+        assert result.summary["run"]["new_trials"] == 1
+        assert len(done_trials(d)) == 3
+        assert (d / "trials.jsonl.torn").read_bytes() == torn[:cut] + b"\n"
+
+
+def test_a_damaged_earlier_record_is_an_error(tmp_path: Path) -> None:
+    path = tmp_path / cal.TRIALS_FILE
+    path.write_bytes(b'{"status": "done"}\n{"stat\xc3\n{"status": "done"}\n')
+    with pytest.raises(ValueError, match=":2: damaged record"):
+        cal.read_trials(path)
+
+
+def test_repeated_or_empty_selections_are_rejected_before_any_call(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="listed more than once: claude-fable-5-1"):
+        run(tmp_path, models=[MODEL, MODEL])
+    with pytest.raises(ValueError, match="listed more than once: sort_list"):
+        run(tmp_path, kinds=["sort_list", "sort_list"])
+    with pytest.raises(ValueError, match="no models selected"):
+        cal.calibrate([], KINDS, out=tmp_path, solvers=cal.reference_solvers())
+    with pytest.raises(ValueError, match="no kinds selected"):
+        cal.calibrate([MODEL], [], out=tmp_path, solvers=cal.reference_solvers())
+    assert not (tmp_path / cal.TRIALS_FILE).exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "error"),
+    [
+        (["--models", ","], "no models selected"),
+        (["--models", MODEL, "--kinds", ","], "no kinds selected"),
+        (["--models", f"{MODEL},{MODEL}"], "listed more than once"),
+        (["--models", "nope"], "unknown model"),
+    ],
+)
+def test_cli_rejects_bad_selections_even_in_a_dry_run(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], args: list[str], error: str
+) -> None:
+    with pytest.raises(SystemExit):
+        main(["calibrate", *args, "--out", str(tmp_path), "--dry-run"])
+    assert error in capsys.readouterr().err
+    assert not (tmp_path / cal.TRIALS_FILE).exists()
 
 
 def test_kinds_without_a_solo_form_are_reported_not_run(tmp_path: Path) -> None:

@@ -117,13 +117,19 @@ def _add_calibrate_parser(sub: Any) -> None:
 def calibrate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     from zantine import calibration as cal
     from zantine.harness.ledger import Ledger
+    from zantine.harness.pricing import load_models, model_spec
     from zantine.tasks import task_kind_names
 
-    models = [m.strip() for m in args.models.split(",") if m.strip()]
-    kinds = [k.strip() for k in args.kinds.split(",")] if args.kinds else task_kind_names()
+    models = _names(args.models)
+    kinds = task_kind_names() if args.kinds is None else _names(args.kinds)
     try:
+        cal.check_selection("models", models)
+        cal.check_selection("kinds", kinds)
         ledger = Ledger(args.spend_cap)
         if args.dry_run:
+            pool = load_models()
+            for model_id in models:
+                model_spec(model_id, pool)  # unknown Models fail even at $0
             solvers = cal.reference_solvers()
         else:
             # The cap covers the whole results directory, so resuming never resets it.
@@ -148,6 +154,10 @@ def calibrate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         print(f"ABORTED ({run.aborted}): {run.detail}")
         return 1
     return 0
+
+
+def _names(text: str) -> list[str]:
+    return [name.strip() for name in text.split(",") if name.strip()]
 
 
 def _write(game: Game, out: Path) -> None:

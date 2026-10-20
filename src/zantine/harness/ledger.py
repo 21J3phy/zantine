@@ -86,12 +86,19 @@ class Ledger:
         seat: int | None = None,
         round: int | None = None,
         attempt: int = 1,
+        on_start: Callable[[float], None] | None = None,
     ) -> ProviderResponse:
-        """Make one metered call. Raises ``SpendCapReached`` or ``ProviderError``."""
+        """Make one metered call. Raises ``SpendCapReached`` or ``ProviderError``.
+
+        ``on_start`` gets the call's worst-case cost once the cap allows it, just
+        before the request is sent (so a caller can journal the call as in flight).
+        """
         model = adapter.model
         needed = model.worst_case_cost(request.text_size())
         if self.spent_usd + needed > self.spend_cap_usd:
             raise SpendCapReached(self.spent_usd, self.spend_cap_usd, needed)
+        if on_start is not None:
+            on_start(needed)
         meta = {"purpose": purpose, "phase": phase, "seat": seat, "round": round}
         try:
             response = adapter.send(request)

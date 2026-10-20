@@ -17,7 +17,10 @@ performance is comparable to in-game work:
   retried (grading is private, as in a game).
 
 Every call goes through a ``Ledger`` with ``purpose="calibration"`` and
-``phase=<task kind>``, so the spend cap covers calibration too.
+``phase=<task kind>``, so the spend cap covers calibration too. An optional
+journal hears about each call as it starts (with its worst-case cost) and as it
+returns (with its record and parsed outcome), so a crash never loses a charge,
+and ``history`` resumes a trial whose first reply was already rejected.
 
 Bump ``SOLO_HARNESS_VERSION`` whenever anything a Model sees changes; results
 recorded under another version are not reused.
@@ -26,13 +29,19 @@ recorded under another version are not reused.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from zantine.harness.ledger import CallRecord, Ledger
 from zantine.harness.neutral import action_tool
-from zantine.harness.provider import HarnessRequest, ProviderAdapter, ProviderResponse, ToolSpec
+from zantine.harness.provider import (
+    HarnessRequest,
+    ProviderAdapter,
+    ProviderError,
+    ProviderResponse,
+    ToolSpec,
+)
 from zantine.rules.tasks import WorkOnTask
 from zantine.tasks.base import Answer
 
@@ -125,9 +134,18 @@ class SoloOutcome:
     calls: Sequence[CallRecord] = field(default_factory=tuple)
 
 
-class SoloSolver:
-    """A Model doing one Task alone: ``solver(brief) -> SoloOutcome``.
+# Receives {"event": "started", "attempt", "reserved_usd"} just before each call is
+# sent, and {"event": "call", "attempt", "call": CallRecord, "outcome", "answer",
+# "reason"} when it returns; outcome is "answer", "unusable" or "provider_error".
+Journal = Callable[[Mapping[str, Any]], None]
 
+
+class SoloSolver:
+    """A Model doing one Task alone: ``solver(brief, history, journal) -> SoloOutcome``.
+
+    ``history`` holds the reasons for unusable replies this trial already got (in
+    an earlier, interrupted run): they count as spent attempts, and the next
+    request carries the last reason, exactly as an uninterrupted retry would.
     Raises ``SpendCapReached`` or ``ProviderError`` from the ledger; the
     calibration runner decides what those mean for the trial.
     """
@@ -137,18 +155,46 @@ class SoloSolver:
         self.ledger = ledger
         self.kind = kind
 
-    def __call__(self, brief: Mapping[str, Any]) -> SoloOutcome:
+    def __call__(
+        self,
+        brief: Mapping[str, Any],
+        history: Sequence[str] = (),
+        journal: Journal | None = None,
+    ) -> SoloOutcome:
+        note = journal or (lambda event: None)
         first = len(self.ledger.records)
-        retry: str | None = None
-        for attempt in range(1, MAX_ATTEMPTS + 1):
-            response = self.ledger.send(
-                self.adapter,
-                solo_request(brief, retry),
-                purpose=PURPOSE,
-                phase=self.kind,
-                attempt=attempt,
-            )
+        retry: str | None = history[-1] if history else None
+        for attempt in range(len(history) + 1, MAX_ATTEMPTS + 1):
+            try:
+                response = self.ledger.send(
+                    self.adapter,
+                    solo_request(brief, retry),
+                    purpose=PURPOSE,
+                    phase=self.kind,
+                    attempt=attempt,
+                    on_start=lambda needed, a=attempt: note(
+                        {"event": "started", "attempt": a, "reserved_usd": needed}
+                    ),
+                )
+            except ProviderError as exc:
+                note(_call(attempt, self.ledger.records[-1], "provider_error", None, str(exc)))
+                raise
             answer, retry = parse_answer(response)
+            outcome = "answer" if retry is None else "unusable"
+            note(_call(attempt, self.ledger.records[-1], outcome, answer, retry))
             if retry is None:
                 return SoloOutcome(answer, None, attempt, tuple(self.ledger.records[first:]))
         return SoloOutcome(None, retry, MAX_ATTEMPTS, tuple(self.ledger.records[first:]))
+
+
+def _call(
+    attempt: int, call: CallRecord, outcome: str, answer: Answer, reason: str | None
+) -> dict[str, Any]:
+    return {
+        "event": "call",
+        "attempt": attempt,
+        "call": call,
+        "outcome": outcome,
+        "answer": answer,
+        "reason": reason,
+    }
