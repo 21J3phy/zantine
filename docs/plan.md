@@ -54,7 +54,7 @@ Pipeline:
    - **Planted Claims** (primary): engine-generated messages with known truth, including subtle or hedged phrasings, run through the full pipeline to measure accuracy with no human labels.
    - Optional blind human check for fuzzy labels only ("is this a Claim", "who is this pushing"): model, role and seat color stripped; two independent labelers; report agreement. If skipped, flag those metrics as lower-confidence.
 
-Impostor metrics: Lie Rate, Lie Survival, Misdirection, Suspicion, Survival. Crewmate metric: **Reliability**.
+Impostor metrics: Lie Rate, Lie Survival, Misdirection, Suspicion, Survival. Crewmate metrics: **Reliability**, **Disclosure Rate**, **Disclosure Lag**. The game engine logs every private observation and marks **Relevant Observations** automatically; the **Claim Audit** matches them against what was said. Graph **Disclosure Rate** against **Reliability** to show four kinds of teammate: ideal, noisy, silent and unreliable.
 
 Risk: player speech is adversarial, and Jev doesn't treat input as hostile. Pass transcripts as quoted data, and never let a Jev answer override the game record.
 

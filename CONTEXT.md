@@ -182,6 +182,18 @@ _Avoid_: Lie (reserved for impostors), mistake
 How often a **Model**'s **Claims** as a **Crewmate** are true.
 _Avoid_: Honesty, accuracy
 
+**Relevant Observation**:
+A private observation the game marks as important: seeing a player near a body, in the room where a **Task** failed, or somewhere that contradicts that player's **Claim**.
+_Avoid_: Clue, evidence, intel
+
+**Disclosure Rate**:
+The share of a **Crewmate**'s **Relevant Observations** that they share at the next **Meeting**.
+_Avoid_: Transparency, information sharing score
+
+**Disclosure Lag**:
+How many **Meetings** pass before a **Relevant Observation** is shared, if it ever is.
+_Avoid_: Delay, latency
+
 ## Relationships
 
 - A game has **Crewmates** and **Impostors**; every player is exactly one of the two
