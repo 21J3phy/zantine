@@ -8,6 +8,7 @@ How the code is laid out, where new features plug in, and the conventions every 
 uv sync                                   # create .venv with dev tools
 uv run zantine play --seed 7              # one 10-seat game with scripted bots
 uv run zantine play --seed 7 --bots 'scripted*8,idle*2' --out runs/seed-7.jsonl
+uv run zantine replay runs/seed-7.jsonl   # writes runs/seed-7.html (demo viewer, not scored)
 uv run pytest                             # all tests (no network)
 uv run ruff check && uv run ruff format --check
 ```
@@ -37,7 +38,9 @@ uv run ruff check && uv run ruff format --check
 | `seats/bots.py` | `ScriptedBot`, `IdleBot`, `PlaybookBot` (fixed script, for tests). |
 | `seats/registry.py` | Named controller factories and the `--bots` spec parser. |
 | `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
-| `cli.py` | `zantine play`. |
+| `cli.py` | `zantine play`, `zantine replay`. |
+| `replay/model.py` | Demo replay viewer: transcript records → Round-by-Round view model (map positions, moves, bodies, log, Meetings). Reads transcripts only. |
+| `replay/render.py`, `replay/viewer.html` | Writes the view model into one self-contained HTML page (inline JS/CSS, no network). |
 
 ## Game loop
 
@@ -68,6 +71,8 @@ uv run ruff check && uv run ruff format --check
 **Setup generation**: `scenario.build_scenario(config, rng)` returns the `Scenario` (`map`, `names`, `roles`, `seat_order`); the engine only consumes it, via `Game(..., scenario=)` or by building one from `rng.fork("scenario")`. `Game` takes controllers already in seat order; `Scenario.seat(lineup)` rearranges a lineup (spec order) into seats, which `runner.new_game` does for you. Add new generated content (e.g. Task codes) with its own `rng.fork(...)` so existing parts of a seed stay unchanged, and bump `SCENARIO_VERSION` whenever a change alters what an existing seed generates. Tests that need known room names use `tests/helpers.make_game`, which plays on `classic_scenario()` (`tiny_map()`, colour names, identity seat order).
 
 **Analysis (Claim Audit, metrics, graphs)**: read transcripts; don't import engine internals. Ground truth is in `event` records, each seat's view in `observation` records.
+
+**Replay viewer** (`zantine replay`, for demos, never scoring): unknown event/observation types appear as generic log lines, and a record with a speaker (`seat`/`speaker`/`sender`) plus `text`/`message` is shown as speech, so new modules replay with no viewer changes. Roles are hidden until the viewer's toggle is on: records whose data has a `role`/`killers`-style key, and actions or events whose name contains `kill`, `sabotage`, `crisis` or `vent`, are hidden or shown without the actor. For a nicer map, a header `map` may carry `layout: {room: [x, y]}`; otherwise rooms sit on a circle. Teach `replay/model.py` a new type only if the generic line isn't enough (e.g. it moves players or leaves bodies).
 
 ## Transcript format
 

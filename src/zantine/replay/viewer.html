@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__REPLAY_TITLE__</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2330; --muted: #677084; --line: #d9dee7;
+    --accent: #2b59c3; --danger: #c62f2f; --room: #eef1f6; --meeting: #fff6dd;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1b2029; --ink: #e5e9f0; --muted: #98a2b5; --line: #2e3542;
+      --accent: #7da2ff; --danger: #ff6b6b; --room: #232a35; --meeting: #3a3220;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--ink); }
+  header { padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+           position: sticky; top: 0; z-index: 2; }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+  .controls button { font: inherit; padding: 4px 10px; border: 1px solid var(--line);
+                     border-radius: 6px; background: var(--panel); color: var(--ink);
+                     cursor: pointer; min-width: 34px; }
+  .controls button:hover { border-color: var(--accent); }
+  .controls input[type=range] { flex: 1 1 200px; min-width: 140px; }
+  .controls label { display: inline-flex; align-items: center; gap: 4px; color: var(--muted);
+                    user-select: none; cursor: pointer; }
+  #round-label { font-weight: 600; min-width: 110px; text-align: center; }
+  main { display: grid; grid-template-columns: minmax(380px, 1.1fr) minmax(340px, 1fr);
+         gap: 16px; padding: 16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+            padding: 12px 14px; margin-bottom: 16px; }
+  h2 { font-size: 14px; margin: 0 0 8px; }
+  h3 { font-size: 13px; margin: 12px 0 4px; color: var(--muted); }
+  svg { width: 100%; height: auto; display: block; }
+  .room rect { fill: var(--room); stroke: var(--line); stroke-width: 2; }
+  .room.meeting-room rect { stroke: var(--accent); stroke-dasharray: 6 4; }
+  .room text { fill: var(--muted); font-size: 15px; font-weight: 600; }
+  .edge { stroke: var(--line); stroke-width: 10; stroke-linecap: round; }
+  .token text { font-size: 10px; font-weight: 700; pointer-events: none; }
+  .token circle { stroke: #0006; stroke-width: 1.5; }
+  .token.impostor circle { stroke: var(--danger); stroke-width: 4; }
+  .body-mark line { stroke-width: 5; stroke-linecap: round; }
+  .move-arrow { stroke-width: 3; fill: none; opacity: .75; }
+  table { border-collapse: collapse; width: 100%; }
+  td, th { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--line);
+           vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  .dot { display: inline-block; width: 11px; height: 11px; border-radius: 50%;
+         border: 1px solid #0006; vertical-align: -1px; margin-right: 5px; }
+  .gone { color: var(--muted); text-decoration: line-through; }
+  .role-impostor { color: var(--danger); font-weight: 600; }
+  .muted { color: var(--muted); }
+  ul.log { list-style: none; padding: 0; margin: 0; }
+  ul.log li { padding: 4px 0 4px 8px; border-left: 3px solid transparent;
+              white-space: pre-wrap; overflow-wrap: anywhere; }
+  ul.log li .tag { color: var(--muted); font-size: 11px; margin-right: 6px;
+                   text-transform: uppercase; letter-spacing: .03em; }
+  li.cat-kill, li.cat-ejection { border-color: var(--danger); }
+  li.cat-meeting, li.cat-vote { border-color: #d7a326; }
+  li.cat-speech { border-color: var(--accent); }
+  li.cat-invalid { border-color: #9d5bd2; }
+  li.cat-game { border-color: var(--ink); font-weight: 600; }
+  li.detail { color: var(--muted); font-size: 12.5px; }
+  .meeting { background: var(--meeting); border-radius: 8px; padding: 8px 10px;
+             margin-bottom: 10px; }
+  .speech { margin: 3px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .speech b { margin-right: 4px; }
+  .empty { color: var(--muted); font-style: italic; }
+  kbd { border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title"></h1>
+  <div class="sub" id="subtitle"></div>
+  <div class="controls">
+    <button id="first" title="First Round (Home)">⏮</button>
+    <button id="prev" title="Previous Round (←)">◀</button>
+    <span id="round-label"></span>
+    <button id="next" title="Next Round (→)">▶</button>
+    <button id="last" title="Last Round (End)">⏭</button>
+    <button id="play" title="Play / pause (Space)">Play</button>
+    <input id="slider" type="range" min="0" value="0" aria-label="Round">
+    <label><input id="reveal" type="checkbox"> Reveal roles</label>
+    <label><input id="details" type="checkbox"> Engine details</label>
+    <label><input id="observations" type="checkbox"> Player observations</label>
+  </div>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>Map <span class="muted" id="map-note"></span></h2>
+      <svg id="map" viewBox="0 0 1000 680" role="img" aria-label="Map"></svg>
+    </section>
+    <section>
+      <h2>Seats</h2>
+      <table id="seats"></table>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Round log</h2>
+      <ul class="log" id="log"></ul>
+    </section>
+    <section id="meetings-section">
+      <h2>Meetings this Round</h2>
+      <div id="meetings"></div>
+    </section>
+    <p class="muted">Keys: <kbd>←</kbd> <kbd>→</kbd> step, <kbd>Space</kbd> play,
+      <kbd>R</kbd> reveal roles. Not used for scoring.</p>
+  </div>
+</main>
+<script type="application/json" id="replay-data">__REPLAY_DATA__</script>
+<script>
+"use strict";
+const DATA = JSON.parse(document.getElementById("replay-data").textContent);
+const SVGNS = "http://www.w3.org/2000/svg";
+const W = 1000, H = 680, ROOM_W = 190, ROOM_H = 118;
+const seats = new Map(DATA.seats.map(s => [s.seat, s]));
+const meetings = new Map(DATA.meetings.map(m => [m.meeting, m]));
+const $ = id => document.getElementById(id);
+let index = 0, timer = null;
+
+function el(tag, attrs, ...children) {
+  const node = tag.startsWith("svg:") ? document.createElementNS(SVGNS, tag.slice(4))
+                                      : document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v !== null && v !== undefined) node.setAttribute(k, v);
+  }
+  for (const c of children) {
+    if (c === null || c === undefined) continue;
+    node.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return node;
+}
+const reveal = () => $("reveal").checked;
+const name = s => (seats.get(s) || {}).name || (s === null || s === undefined ? "nobody" : "Seat " + s);
+const color = s => (seats.get(s) || {}).color || "#888";
+const isImpostor = s => ((seats.get(s) || {}).role || "") === "impostor";
+function dot(s) { return el("span", {class: "dot", style: "background:" + color(s)}); }
+function initials(n) { return n.replace(/[^\p{L}\p{N}]/gu, "").slice(0, 2) || "?"; }
+function inkFor(hex) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || "");
+  if (!m) return "#000";
+  const v = parseInt(m[1], 16), r = v >> 16, g = (v >> 8) & 255, b = v & 255;
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150 ? "#111" : "#fff";
+}
+
+const centres = {};
+(function layoutRooms() {
+  const mx = ROOM_W / 2 + 14, my = ROOM_H / 2 + 14;
+  for (const room of DATA.map.rooms) {
+    const [x, y] = DATA.map.layout[room] || [0.5, 0.5];
+    centres[room] = [mx + x * (W - 2 * mx), my + y * (H - 2 * my)];
+  }
+})();
+
+function slotsIn(room, count) {
+  const [cx, cy] = centres[room] || [W / 2, H / 2];
+  const cols = 5, out = [];
+  for (let i = 0; i < count; i++) {
+    const row = Math.floor(i / cols), col = i % cols;
+    out.push([cx - ROOM_W / 2 + 22 + col * 36, cy - ROOM_H / 2 + 44 + row * 34]);
+  }
+  return out;
+}
+
+function drawMap(frame) {
+  const svg = $("map");
+  svg.replaceChildren();
+  const defs = el("svg:defs");
+  const marker = el("svg:marker", {id: "arrow", viewBox: "0 0 10 10", refX: "8", refY: "5",
+                                   markerWidth: "6", markerHeight: "6", orient: "auto-start-reverse"});
+  marker.append(el("svg:path", {d: "M0,0 L10,5 L0,10 z", fill: "context-stroke"}));
+  defs.append(marker);
+  svg.append(defs);
+  for (const [a, b] of DATA.map.edges) {
+    if (!centres[a] || !centres[b]) continue;
+    svg.append(el("svg:line", {class: "edge", x1: centres[a][0], y1: centres[a][1],
+                               x2: centres[b][0], y2: centres[b][1]}));
+  }
+  for (const room of DATA.map.rooms) {
+    const [cx, cy] = centres[room];
+    const cls = "room" + (room === DATA.map.meeting_room ? " meeting-room" : "");
+    svg.append(el("svg:g", {class: cls},
+      el("svg:rect", {x: cx - ROOM_W / 2, y: cy - ROOM_H / 2, width: ROOM_W, height: ROOM_H, rx: 14}),
+      el("svg:text", {x: cx - ROOM_W / 2 + 10, y: cy - ROOM_H / 2 + 20}, room)));
+  }
+  const occupants = {};
+  for (const p of frame.positions || []) (occupants[p.room] = occupants[p.room] || []).push({seat: p.seat});
+  for (const b of frame.bodies || []) (occupants[b.room] = occupants[b.room] || []).push({seat: b.victim, body: true});
+  for (const [room, list] of Object.entries(occupants)) {
+    if (!centres[room]) continue;
+    slotsIn(room, list.length).forEach(([x, y], i) => {
+      const o = list[i], c = color(o.seat);
+      if (o.body) {
+        svg.append(el("svg:g", {class: "body-mark"},
+          el("svg:title", {}, name(o.seat) + " (body)"),
+          el("svg:line", {x1: x - 9, y1: y - 9, x2: x + 9, y2: y + 9, stroke: c}),
+          el("svg:line", {x1: x - 9, y1: y + 9, x2: x + 9, y2: y - 9, stroke: c})));
+        return;
+      }
+      const cls = "token" + (reveal() && isImpostor(o.seat) ? " impostor" : "");
+      svg.append(el("svg:g", {class: cls},
+        el("svg:title", {}, name(o.seat) + (reveal() && isImpostor(o.seat) ? " (Impostor)" : "")),
+        el("svg:circle", {cx: x, cy: y, r: 14, fill: c}),
+        el("svg:text", {x: x, y: y + 3.5, "text-anchor": "middle", fill: inkFor(c)},
+           initials(name(o.seat)))));
+    });
+  }
+  const perEdge = {};
+  for (const mv of frame.moves || []) {
+    const a = centres[mv.from], b = centres[mv.to];
+    if (!a || !b) continue;
+    const key = mv.from + "→" + mv.to;
+    const k = perEdge[key] = (perEdge[key] || 0) + 1;
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len, ny = dx / len, off = 8 + (k - 1) * 6, trim = 70;
+    const x1 = a[0] + dx / len * trim + nx * off, y1 = a[1] + dy / len * trim + ny * off;
+    const x2 = b[0] - dx / len * trim + nx * off, y2 = b[1] - dy / len * trim + ny * off;
+    svg.append(el("svg:line", {class: "move-arrow", x1, y1, x2, y2, stroke: color(mv.seat),
+                               "marker-end": "url(#arrow)"},
+      el("svg:title", {}, name(mv.seat) + ": " + mv.from + " → " + mv.to)));
+  }
+  $("map-note").textContent = frame.meetings.length ? "(as the Meeting was called)" : "(end of Round)";
+}
+
+function drawSeats(frame) {
+  const status = new Map((frame.status || []).map(s => [s.seat, s.status]));
+  const where = new Map((frame.positions || []).map(p => [p.seat, p.room]));
+  const head = el("tr", {}, el("th", {}, "Seat"), el("th", {}, "Room"), el("th", {}, "Status"),
+                  el("th", {}, "Role"), el("th", {}, "Controller"));
+  const rows = DATA.seats.map(s => {
+    const st = status.get(s.seat) || "alive";
+    const role = reveal() ? (s.role || "unknown") : "hidden";
+    return el("tr", {},
+      el("td", {class: st === "alive" ? "" : "gone"}, dot(s.seat), s.name),
+      el("td", {}, st === "alive" ? (where.get(s.seat) || "?") : "—"),
+      el("td", {}, st),
+      el("td", {class: reveal() && s.role === "impostor" ? "role-impostor" : "muted"}, role),
+      el("td", {class: "muted"}, s.controller || ""));
+  });
+  $("seats").replaceChildren(head, ...rows);
+}
+
+function voteLabel(v) {
+  if (v.value === null || v.value === undefined) return "skip";
+  return typeof v.value === "number" ? name(v.value) : String(v.value);
+}
+
+function drawMeeting(m) {
+  const box = el("div", {class: "meeting"}, el("h2", {}, m.title || ("Meeting " + m.meeting)));
+  const passes = [...new Set(m.statements.map(s => s.pass_index))];
+  for (const p of passes) {
+    box.append(el("h3", {}, "Discussion pass " + p));
+    for (const s of m.statements.filter(s => s.pass_index === p)) {
+      box.append(el("div", {class: "speech"}, dot(s.speaker), el("b", {}, name(s.speaker) + ":"),
+        s.text || el("span", {class: "empty"}, "(silent)"),
+        s.truncated ? el("span", {class: "muted"}, " [cut at Talk Budget]") : null));
+    }
+  }
+  if (m.votes.length) {
+    box.append(el("h3", {}, "Votes (secret; players only see the counts)"));
+    const rows = m.votes.map(v => el("tr", {},
+      el("td", {}, dot(v.seat), name(v.seat)),
+      el("td", {}, voteLabel(v)),
+      el("td", {class: "muted"}, v.valid ? "" : "invalid: " + (v.reason || "") )));
+    box.append(el("table", {}, el("tr", {}, el("th", {}, "Voter"), el("th", {}, "Vote"), el("th", {})), ...rows));
+  }
+  if (m.tally) {
+    const counts = (m.tally.counts || []).map(c => name(c.seat) + " " + c.votes).join(", ");
+    box.append(el("p", {}, "Tally: " + (counts || "no votes") + "; skips " + m.tally.skips + ". "));
+  }
+  if (m.ejection) {
+    const role = reveal() && m.ejection.role ? " (" + m.ejection.role + ")" : "";
+    box.append(el("p", {}, el("b", {}, name(m.ejection.seat) + " was ejected" + role)));
+  } else if (m.tally) {
+    box.append(el("p", {}, el("b", {}, "No one was ejected")));
+  }
+  return box;
+}
+
+function drawLog(frame) {
+  const showDetails = $("details").checked, showObs = $("observations").checked;
+  const items = [];
+  for (const it of frame.items) {
+    if (it.kind === "observation" ? !showObs : (it.detail && !showDetails)) continue;
+    const text = reveal() ? it.text : it.public;
+    if (text === null || text === undefined) continue;
+    const cls = "cat-" + it.category + (it.detail ? " detail" : "");
+    items.push(el("li", {class: cls, title: it.kind + " " + it.type + " #" + it.seq},
+      el("span", {class: "tag"}, it.category), text));
+  }
+  $("log").replaceChildren(...(items.length ? items : [el("li", {class: "empty"}, "Nothing to show")]));
+}
+
+function show(i) {
+  index = Math.max(0, Math.min(DATA.rounds.length - 1, i));
+  const frame = DATA.rounds[index];
+  $("slider").value = index;
+  $("round-label").textContent = (frame.round === 0 ? "Setup" : "Round " + frame.round) +
+    " (" + (index + 1) + "/" + DATA.rounds.length + ")";
+  drawMap(frame);
+  drawSeats(frame);
+  const ms = frame.meetings.map(n => meetings.get(n)).filter(Boolean);
+  $("meetings-section").hidden = ms.length === 0;
+  $("meetings").replaceChildren(...ms.map(drawMeeting));
+  drawLog(frame);
+  history.replaceState(null, "", "#round=" + frame.round);
+}
+
+function togglePlay() {
+  if (timer) { clearInterval(timer); timer = null; $("play").textContent = "Play"; return; }
+  if (index >= DATA.rounds.length - 1) show(0);
+  $("play").textContent = "Pause";
+  timer = setInterval(() => {
+    if (index >= DATA.rounds.length - 1) return togglePlay();
+    show(index + 1);
+  }, 1500);
+}
+
+$("title").textContent = DATA.title;
+const bits = [];
+if (DATA.result) bits.push(DATA.result.text);
+bits.push(DATA.rounds.length + " frames", DATA.meetings.length + " Meetings");
+if (DATA.modules && DATA.modules.length) bits.push("modules: " + DATA.modules.join(", "));
+$("subtitle").textContent = bits.join(" · ");
+$("slider").max = DATA.rounds.length - 1;
+$("first").onclick = () => show(0);
+$("prev").onclick = () => show(index - 1);
+$("next").onclick = () => show(index + 1);
+$("last").onclick = () => show(DATA.rounds.length - 1);
+$("play").onclick = togglePlay;
+$("slider").oninput = e => show(Number(e.target.value));
+for (const id of ["reveal", "details", "observations"]) $(id).onchange = () => show(index);
+document.addEventListener("keydown", e => {
+  if (e.target instanceof HTMLInputElement && e.target.type !== "checkbox") return;
+  if (e.key === "ArrowRight") show(index + 1);
+  else if (e.key === "ArrowLeft") show(index - 1);
+  else if (e.key === "Home") show(0);
+  else if (e.key === "End") show(DATA.rounds.length - 1);
+  else if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "r" || e.key === "R") { $("reveal").checked = !$("reveal").checked; show(index); }
+  else return;
+});
+const start = /round=(-?\d+)/.exec(location.hash);
+const startIndex = start ? DATA.rounds.findIndex(f => f.round === Number(start[1])) : 0;
+show(startIndex < 0 ? 0 : startIndex);
+</script>
+</body>
+</html>

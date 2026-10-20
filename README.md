@@ -6,11 +6,12 @@ The first benchmark is a text-based social-deduction game that asks: **Can a tea
 
 ## Status
 
-The game engine's tracer bullet works: 10 scripted bot **Seats** play a complete game (simultaneous **Rounds**, kills, reports, **Meetings** with a secret vote, hidden-role **Ejection**, all win conditions) and the full game is written to a JSONL transcript. **Tasks**, **Room Chat**, live model **Seats** and the evaluation pipeline are not implemented yet.
+The game engine's tracer bullet works: 10 scripted bot **Seats** play a complete game (simultaneous **Rounds**, kills, reports, **Meetings** with a secret vote, hidden-role **Ejection**, all win conditions) and the full game is written to a JSONL transcript. `zantine replay` turns a transcript into a static HTML page that steps through the game Round by Round (a demo viewer, never used for scoring). **Tasks**, **Room Chat**, live model **Seats** and the evaluation pipeline are not implemented yet.
 
 ```sh
 uv sync
 uv run zantine play --seed 7 --out runs/seed-7.jsonl
+uv run zantine replay runs/seed-7.jsonl   # static HTML replay with a role-reveal toggle
 uv run pytest
 ```
 

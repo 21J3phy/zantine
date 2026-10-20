@@ -28,7 +28,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--round-cap", type=int, default=GameConfig.round_cap)
     p.add_argument("--out", type=Path, help="write the JSONL transcript here")
     p.add_argument("--quiet", action="store_true", help="print only the result line")
+    r = sub.add_parser("replay", help="write a static HTML replay of a transcript (not scored)")
+    r.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
+    r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
     args = parser.parse_args(argv)
+    if args.command == "replay":
+        return replay(parser, args.transcript, args.out)
 
     try:
         config = GameConfig(seed=args.seed, round_cap=args.round_cap)
@@ -42,6 +47,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         game.transcript.write(args.out)
         print(f"transcript: {args.out}")
+    return 0
+
+
+def replay(parser: argparse.ArgumentParser, transcript: Path, out: Path | None) -> int:
+    from zantine.replay import write_replay
+
+    if not transcript.is_file():
+        parser.error(f"no such transcript: {transcript}")
+    out = out or transcript.with_suffix(".html")
+    view = write_replay(transcript, out)
+    print(f"replay: {out} ({len(view['rounds'])} frames, {len(view['meetings'])} Meetings)")
     return 0
 
 
