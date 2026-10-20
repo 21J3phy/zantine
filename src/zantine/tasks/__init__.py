@@ -4,8 +4,9 @@ Game rules for Tasks live in ``zantine.rules.tasks``. Importing this package
 registers the built-in kinds.
 """
 
-from zantine.tasks import relay as _relay  # noqa: F401  (registers built-in kinds)
-from zantine.tasks import steps as _steps  # noqa: F401  (registers built-in kinds)
+from zantine.tasks import audit as _audit  # noqa: F401  (registers built-in kinds)
+from zantine.tasks import relay as _relay  # noqa: F401
+from zantine.tasks import steps as _steps  # noqa: F401
 from zantine.tasks.base import (
     Answer,
     Solver,

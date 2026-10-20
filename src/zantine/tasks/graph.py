@@ -102,8 +102,8 @@ class TaskGraph:
         return [t.id for t in self if task_id in t.requires]
 
     def counted(self) -> list[Task]:
-        """Tasks that count toward Productivity and the crew win (not fake)."""
-        return [t for t in self if not t.fake]
+        """Required, real Tasks that count toward Productivity and the crew win."""
+        return [t for t in self if not t.fake and task_kind(t.kind).required_for_completion]
 
     def all_done(self) -> bool:
         counted = self.counted()

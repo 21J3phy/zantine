@@ -36,6 +36,9 @@ class GameConfig:
     task_kinds: tuple[str, ...] = ("sort_list", "lookup_value")
     # Chain relays (rules/relay.py) per game, each carried by 2 Crewmates.
     relay_tasks: int = 2
+    # Optional Audit Tasks (rules/audit.py): maximum targets checked by two other
+    # Crewmates at setup; these do not gate completion of the submitted work.
+    audit_tasks: int = 4
     # Fixed Impostor seats (tests). None = drawn from the seed.
     impostor_seats: tuple[int, ...] | None = None
 
@@ -49,6 +52,7 @@ class GameConfig:
         if (
             self.tasks_per_crewmate < 0
             or self.relay_tasks < 0
+            or self.audit_tasks < 0
             or not 0 <= self.task_dependency_chance <= 1
         ):
             raise ValueError("bad task settings")

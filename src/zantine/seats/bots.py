@@ -10,10 +10,12 @@ from zantine.observations import ActionContext, MeetingContext, Observation
 from zantine.rng import GameRng
 from zantine.roles import Role
 from zantine.rules.actions import Action, CallMeeting, Kill, Move, Report, Wait
+from zantine.rules.audit import CheckAudit, ShareSpec
 from zantine.rules.relay import Deliver, HandOff, PickUp
 from zantine.rules.tasks import WorkOnTask
 from zantine.seats.base import SeatController
 from zantine.tasks import task_kind
+from zantine.tasks.audit import APPROVE, REJECT, merge_spec, verdict_for
 
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
 _ACCUSE = re.compile(r"I accuse (\w+)")
@@ -77,6 +79,10 @@ class ScriptedBot(SeatController):
     a blocked Task is retried after a couple of Rounds), and wander when idle.
     Carriers handle relays in Task id order, walking to each next step and
     holding in the handoff room until their partner arrives.
+    Audits: a spec holder shares its half whenever the auditor is in its room;
+    an auditor with a reading and both halves goes to check it (wrongly in a
+    ``mistakes`` share of checks); with nothing else to do, both wait for each
+    other in the audit's room.
     In Meetings they say what they saw ("I saw X kill Y ... I accuse X.") and
     vote for a killer they saw, else the most-accused player.
     Impostors wander and kill when alone with one Crewmate (sometimes with one
@@ -114,6 +120,10 @@ class ScriptedBot(SeatController):
         return self._task_action(ctx) or self._wander(ctx)
 
     def _task_action(self, ctx: ActionContext) -> Action | None:
+        audits = [a for a in ctx.extra.get("audit", {}).get("audits", []) if not a["done"]]
+        for a in audits:
+            if a["duty"] == "spec_holder" and not a["shared"] and a["partner"] in ctx.players_here:
+                return ShareSpec(task=a["task"])
         blocked = {o.data["task"]: o.round for o in ctx.observations if o.type == "tasks.blocked"}
         tasks = [
             t
@@ -122,7 +132,7 @@ class ScriptedBot(SeatController):
             and WorkOnTask.kind in task_kind(t["kind"]).work_actions
             and ctx.round - blocked.get(t["task"], -10) > self.retry_after
         ]
-        # A shared ordering avoids cycles when carriers share several relays.
+        # Preserve the shared relay ordering so carriers cannot wait in a cycle.
         relays = [r for r in ctx.extra.get("relay", {}).get("relays", []) if r["next"]]
         if relays:
             relay = min(relays, key=lambda r: r["task"])
@@ -131,14 +141,41 @@ class ScriptedBot(SeatController):
             if relay["status"] == "holding" or self.rng.random() < self.diligence:
                 return Move(to=_path(relay)[0])
             return Wait()
-        if not tasks or self.rng.random() >= self.diligence:
+        checks = [a for a in audits if a["duty"] == "auditor" and a["spec_received"]]
+        checks = [a for a in checks if a["reading"]]
+        waits = [
+            a
+            for a in audits
+            if (a["duty"] == "auditor" and a["reading"] and not a["spec_received"])
+            or (a["duty"] == "spec_holder" and not a["shared"])
+        ]
+        if not (checks or tasks or waits) or self.rng.random() >= self.diligence:
             return None
-        task = min(tasks, key=lambda t: len(t["path"]))
-        if _path(task):
-            return Move(to=_path(task)[0])
+        nearest_check = min(checks, key=lambda a: len(a["path"])) if checks else None
+        nearest_task = min(tasks, key=lambda t: len(t["path"])) if tasks else None
+        if nearest_check and (
+            nearest_task is None or len(nearest_check["path"]) < len(nearest_task["path"])
+        ):
+            return self._audit_check(nearest_check)
+        if tasks:
+            task = min(tasks, key=lambda t: len(t["path"]))
+            if task["path"]:
+                return Move(to=task["path"][0])
+            if self.rng.random() < self.mistakes:
+                return WorkOnTask(task=task["task"], answer="no idea")
+            return WorkOnTask(task=task["task"], answer=task_kind(task["kind"]).solve(task))
+        # Nothing else to do: wait for the audit partner in the audit's room.
+        audit = min(waits, key=lambda a: len(a["path"]))
+        return Move(to=audit["path"][0]) if audit["path"] else Wait()
+
+    def _audit_check(self, audit: dict) -> Action:
+        if audit["path"]:
+            return Move(to=audit["path"][0])
+        spec = merge_spec(audit["spec"], audit["spec_received"])
+        verdict = verdict_for(spec, audit["spec_length"], audit["reading"]["items"])
         if self.rng.random() < self.mistakes:
-            return WorkOnTask(task=task["task"], answer="no idea")
-        return WorkOnTask(task=task["task"], answer=task_kind(task["kind"]).solve(task))
+            verdict = REJECT if verdict == APPROVE else APPROVE
+        return CheckAudit(task=audit["task"], verdict=verdict)
 
     def _impostor_action(self, ctx: ActionContext) -> Action:
         fellows = _fellow_impostors(ctx.observations)
