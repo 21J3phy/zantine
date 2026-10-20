@@ -11,6 +11,8 @@ class GameConfig:
     seed: int = 0
     num_seats: int = 10
     num_impostors: int = 2
+    # Rooms on the seeded map (see scenario.generate_map).
+    num_rooms: int = 8
     round_cap: int = 30
     # Rounds an Impostor must wait between kills; also the cooldown at game
     # start and after every Meeting.

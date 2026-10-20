@@ -18,8 +18,8 @@ uv run ruff check && uv run ruff format --check
 | --- | --- |
 | `config.py` | `GameConfig`: every tunable number (seats, Impostors, round cap, cooldowns, Talk Budget, ...). |
 | `rng.py` | `GameRng`: the only source of randomness. `fork(label)` gives independent named streams. |
-| `scenario.py` | Builds the `Scenario` (map, names, roles) from the seed. Issue #2's procedural generation goes here. |
-| `map.py` | `GameMap` (rooms, corridors, meeting room) and the hard-coded `tiny_map()`. |
+| `scenario.py` | Builds the `Scenario` (generated map, names, seat order, roles) from the seed; `classic_scenario()` is the fixed setup for tests. `SCENARIO_VERSION` is recorded in the header. |
+| `map.py` | `GameMap` (rooms, corridors, meeting room) and the hard-coded `tiny_map()` used by `classic_scenario()`. |
 | `state.py` | Ground-truth `GameState`, `PlayerState`, `Body`. `GameState.ext` holds per-module state. |
 | `roles.py` | `Role` (crewmate/impostor) and `Team` (winner). |
 | `rules/actions.py` | `Action` base class and core actions. Each action validates itself. `Invalid` = unacceptable response. |
@@ -35,7 +35,7 @@ uv run ruff check && uv run ruff format --check
 | `seats/base.py` | `SeatController`: the interface for scripted bots now and live Model Harnesses later. |
 | `seats/bots.py` | `ScriptedBot`, `IdleBot`, `PlaybookBot` (fixed script, for tests). |
 | `seats/registry.py` | Named controller factories and the `--bots` spec parser. |
-| `runner.py` | `new_game(config, bots)` / `play(...)`. |
+| `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
 | `cli.py` | `zantine play`. |
 
 ## Game loop
@@ -64,7 +64,7 @@ uv run ruff check && uv run ruff format --check
 
 **New seat controllers (live Models, other Harnesses)**: subclass `SeatController` (`choose_action`, `speak`, `vote`, and `describe()` for the transcript header, e.g. the model ID). Put it in its own module under `seats/`, register a factory with `@register_controller("name")`, and import that module at the bottom of `seats/registry.py`; it then works as `--bots name:arg`. A Harness turns `ActionContext` / `MeetingContext` into a prompt and parses the reply with `game.rules.parse_action(dict)`; unparseable output should be returned as `Invalid(reason, raw)` so the engine's retry/forfeit applies and is logged.
 
-**Setup generation**: replace internals of `scenario.build_scenario`; the engine only consumes the `Scenario`.
+**Setup generation**: `scenario.build_scenario(config, rng)` returns the `Scenario` (`map`, `names`, `roles`, `seat_order`); the engine only consumes it, via `Game(..., scenario=)` or by building one from `rng.fork("scenario")`. `Game` takes controllers already in seat order; `Scenario.seat(lineup)` rearranges a lineup (spec order) into seats, which `runner.new_game` does for you. Add new generated content (e.g. Task codes) with its own `rng.fork(...)` so existing parts of a seed stay unchanged, and bump `SCENARIO_VERSION` whenever a change alters what an existing seed generates. Tests that need known room names use `tests/helpers.make_game`, which plays on `classic_scenario()` (`tiny_map()`, colour names, identity seat order).
 
 **Analysis (Claim Audit, metrics, graphs)**: read transcripts; don't import engine internals. Ground truth is in `event` records, each seat's view in `observation` records.
 
@@ -72,7 +72,7 @@ uv run ruff check && uv run ruff format --check
 
 JSON Lines, keys sorted, one record per line, each with `seq` and `kind`:
 
-- `header`: `schema`, `seed`, `config`, `map`, `modules`, `seats` (`seat`, `name`, `role`, `controller`).
+- `header`: `schema`, `seed`, `scenario_version`, `config`, `map`, `modules`, `seats` (`seat`, `name`, `role`, `controller`).
 - `event`: ground truth, `{round, type, data}`. Core types: `action`/`vote` (every attempt, with `valid`/`reason`), `kill`, `move`, `meeting_requested`, `meeting_started`, `bodies_cleared`, `speaking_order`, `statement`, `vote_tally`, `ejection` (with role), `meeting_ended`, `game_over`.
 - `observation`: `{round, seat, type, data}`, exactly what that seat was told. Types are listed in `observations.py`.
 - `result`: `winner`, `reason`, `rounds`, `meetings`, `killed`, `ejected`, `survivors`.
