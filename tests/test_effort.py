@@ -416,3 +416,137 @@ def test_effort_combines_with_a_seat_harness() -> None:
             adapter_factory=fake_adapter,
             models=MODELS,
         )
+
+
+# Review fixes: thinking telemetry, compatible setups, mode, unique keys --------------------
+
+
+def live_sweep(tmp_path: Path, think: Any, name: str = "live", cap: int = 2) -> Path:
+    """A fake-live sweep of GPT-6.1 Sol whose n-th call reports ``think(n)`` thinking tokens."""
+    run_dir = tmp_path / name
+    create_run(
+        run_dir,
+        make_effort_manifest(["gpt-6.1-sol"], 9, per_level=1, config={"round_cap": cap}),
+    )
+    counter = iter(range(10**6))
+
+    def factory(spec: ModelSpec) -> ProviderAdapter:
+        adapter = fake_adapter(spec)
+
+        def reply(p: dict[str, Any]) -> Any:
+            t = think(next(counter))
+            out = 500 + (t or 0)
+            return openai_reply(polite_call(openai_tail(p)), output_tokens=out, reasoning_tokens=t)
+
+        adapter.client = OpenAIFake(reply)  # type: ignore[attr-defined]
+        return adapter
+
+    report = execute(
+        run_dir, mode="live", spend_cap_usd=500.0, adapter_factory=factory, models=MODELS
+    )
+    assert report.finished
+    return run_dir
+
+
+def thinking_cells(run_dir: Path, tmp_path: Path) -> dict[str, Any]:
+    _, rep = write_effort_report(run_dir, out_dir=tmp_path / "r", replicates=20, graphs=False)
+    return rep["metrics"]["thinking_per_call"]["per_model"]["gpt-6.1-sol"]
+
+
+def test_missing_thinking_telemetry_is_na_not_a_measured_zero(tmp_path: Path) -> None:
+    cells = thinking_cells(live_sweep(tmp_path, lambda n: None), tmp_path)
+    for level in ("low", "high"):
+        assert cells[level]["estimate"] is None and cells[level]["n_units"] == 0
+
+
+def test_mixed_thinking_telemetry_averages_only_reported_calls(tmp_path: Path) -> None:
+    run_dir = live_sweep(tmp_path, lambda n: 1000 if n % 2 else None)
+    cells = thinking_cells(run_dir, tmp_path)
+    calls = [r for r in read_jsonl(run_dir / "spend.jsonl") if r["kind"] == "call"]
+    reported = sum(r["thinking_tokens"] is not None for r in calls)
+    assert 0 < reported < len(calls)
+    assert cells["low"]["estimate"] == pytest.approx(1000)
+    assert cells["low"]["n_units"] + cells["high"]["n_units"] == reported
+
+
+def test_a_reported_zero_is_a_measured_zero(tmp_path: Path) -> None:
+    cells = thinking_cells(live_sweep(tmp_path, lambda n: 0), tmp_path)
+    for level in ("low", "high"):
+        assert cells[level]["estimate"] == 0 and cells[level]["n_units"] > 0
+
+
+def dry_pair(tmp_path: Path, sweep_cap: int, v1_cap: int, v1_seed: int = 6) -> tuple[Path, Path]:
+    sweep_dir, v1_dir = tmp_path / "sweep", tmp_path / f"v1-{v1_seed}"
+    if not sweep_dir.exists():
+        cfg = {"round_cap": sweep_cap}
+        create_run(sweep_dir, make_effort_manifest(POOL, 5, per_level=1, config=cfg))
+        execute(sweep_dir, mode="dry")
+    cfg = {"round_cap": v1_cap}
+    create_run(v1_dir, make_manifest(POOL, v1_seed, blocks=0, mirror=True, config=cfg))
+    execute(v1_dir, mode="dry")
+    return sweep_dir, v1_dir
+
+
+def test_a_medium_run_with_another_round_cap_is_refused(tmp_path: Path) -> None:
+    sweep_dir, v1_dir = dry_pair(tmp_path, 2, 9)
+    with pytest.raises(ValueError, match=r"config\.round_cap 2 vs 9"):
+        load_effort(sweep_dir, [v1_dir])
+
+
+def rewrite_header(path: Path, edit: Any) -> None:
+    lines = path.read_text("utf-8").splitlines()
+    header = json.loads(lines[0])
+    edit(header)
+    lines[0] = json.dumps(header, sort_keys=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_a_medium_game_under_another_harness_or_engine_is_refused(tmp_path: Path) -> None:
+    sweep_dir, v1_dir = dry_pair(tmp_path, 3, 3)
+    load_effort(sweep_dir, [v1_dir])  # same setup: accepted
+
+    def other_harness(header: dict[str, Any]) -> None:
+        for s in header["seats"]:
+            s["controller"]["harness"] = "agent-loop-v1"
+
+    game = sorted((v1_dir / "games").glob("*.jsonl"))[0]
+    original = game.read_text("utf-8")
+    rewrite_header(game, other_harness)
+    with pytest.raises(ValueError, match="seats"):
+        load_effort(sweep_dir, [v1_dir])
+    game.write_text(original, encoding="utf-8")
+
+    manifest = json.loads((v1_dir / "manifest.json").read_text("utf-8"))
+    manifest["engine"]["scenario_version"] = -1
+    (v1_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"engine\.scenario_version"):
+        load_effort(sweep_dir, [v1_dir])
+
+
+def test_mode_comes_from_the_transcripts_when_run_json_is_missing_or_wrong(
+    tmp_path: Path,
+) -> None:
+    live_dir = live_sweep(tmp_path, lambda n: 100)
+    _, v1_dir = dry_pair(tmp_path, 2, 2)
+    (v1_dir / "run.json").unlink()
+    with pytest.raises(ValueError, match=r"is a dry run but .* is live"):
+        load_effort(live_dir, [v1_dir])
+    (v1_dir / "run.json").write_text('{"mode": "live"}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match=r"run\.json says live but its transcripts are dry"):
+        load_effort(live_dir, [v1_dir])
+
+
+def test_games_from_several_runs_keep_an_unambiguous_key(tmp_path: Path) -> None:
+    sweep_dir, v1_a = dry_pair(tmp_path, 4, 4, v1_seed=6)
+    _, v1_b = dry_pair(tmp_path, 4, 4, v1_seed=7)
+    out, _ = write_effort_report(
+        sweep_dir, medium=[v1_a, v1_b], out_dir=tmp_path / "r", replicates=10, graphs=False
+    )
+    for name in ("metrics.json", "metrics.public.json"):
+        data = json.loads((out / name).read_text("utf-8"))
+        keys = [g["key"] for g in data["games"]]
+        assert len(keys) == len(set(keys)) == 14 + 2 * 42
+        assert "medium-1/mirror-m0-1" in keys and "medium-2/mirror-m0-1" in keys
+        seats = Counter(s["key"] for s in data["seats"])
+        assert set(seats) == set(keys) and set(seats.values()) == {10}
+        assert [r["run"] for r in data["run"]["medium_runs"]] == ["medium-1", "medium-2"]

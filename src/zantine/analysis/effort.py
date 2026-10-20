@@ -125,11 +125,13 @@ METRICS: tuple[EffortMetric, ...] = (
         "Thinking tokens per call",
         "tokens per call (mean)",
         "resource",
-        "Thinking tokens / paid calls, pooled over every Seat of the games (each lab's own "
-        "count; billed as output). Dry runs make no calls.",
+        "Thinking tokens / calls that reported a thinking count, pooled over every Seat of "
+        "the games (each lab's own count; billed as output). Calls whose provider reported "
+        "none are left out, so missing telemetry is n/a, never a measured zero. Dry runs "
+        "make no calls.",
         _seats(
             lambda g: sum(s.thinking_tokens for s in g.seats),
-            lambda g: sum(s.calls for s in g.seats),
+            lambda g: sum(s.thinking_calls for s in g.seats),
         ),
     ),
     EffortMetric(
@@ -150,7 +152,13 @@ class EffortGame:
     model: str
     level: str
     source: str  # "sweep" (the effort run) or "medium" (a v1 run's Mirror Matches)
+    run: str  # "sweep", or "medium-<n>" for the n-th --medium run (seed-free)
     run_dir: Path
+
+    @property
+    def key(self) -> str:
+        """Unique across every run in the report (local game ids repeat between runs)."""
+        return f"{self.run}/{self.row.id}"
 
 
 def game_level(g: GameRow) -> str | None:
@@ -159,14 +167,77 @@ def game_level(g: GameRow) -> str | None:
     return levels.pop() if len(levels) == 1 else None
 
 
-def mirror_games(data: RunData, source: str, keep: Callable[[str], bool]) -> list[EffortGame]:
+def mirror_games(
+    data: RunData, source: str, run: str, keep: Callable[[str], bool]
+) -> list[EffortGame]:
     out = []
     for g in data.of_kind("mirror"):
         models = {s.model for s in g.seats}
         level = game_level(g)
         if len(models) == 1 and level is not None and keep(level):
-            out.append(EffortGame(g, models.pop(), level, source, data.run_dir))
+            out.append(EffortGame(g, models.pop(), level, source, run, data.run_dir))
     return out
+
+
+# Config keys that differ between games by design; everything else must match to pool.
+PER_GAME_CONFIG = ("seed", "impostor_seats")
+ENGINE_KEYS = ("scenario_version", "transcript_schema")
+
+
+def game_mode(g: GameRow) -> str | None:
+    """``dry`` or ``live`` from the header's Seat controllers; None if neither or mixed."""
+    kinds = {s.controller for s in g.seats}
+    return kinds.pop() if len(kinds) == 1 and kinds <= set(runs.MODES) else None
+
+
+def setup(g: GameRow) -> dict[str, Any]:
+    """Everything that must match for two games to sit on one effort curve: the
+    effective game config (but its seed), the engine versions, and each Seat's
+    controller kind and Harness. Effort and the seed are the permitted differences."""
+    return {
+        "config": {k: v for k, v in sorted(g.config.items()) if k not in PER_GAME_CONFIG},
+        "engine": {k: g.engine.get(k) for k in ENGINE_KEYS},
+        "seats": sorted({f"{s.controller}/{s.harness}" for s in g.seats}),
+    }
+
+
+def check_mode(data: RunData, games: list[EffortGame], label: str) -> str | None:
+    """The run's mode from its transcripts, checked against ``run.json`` when present."""
+    modes = {game_mode(g.row) for g in games}
+    if None in modes:
+        bad = next(g.key for g in games if game_mode(g.row) is None)
+        raise ValueError(f"{label}: {bad} is neither a dry nor a live game")
+    if len(modes) > 1:
+        raise ValueError(f"{label} mixes dry and live games")
+    declared = run_mode(data.run_dir)
+    if declared and modes and modes != {declared}:
+        raise ValueError(f"{label}: run.json says {declared} but its transcripts are {modes.pop()}")
+    return modes.pop() if modes else declared
+
+
+def check_compatible(games: list[EffortGame]) -> None:
+    """Refuse to pool games whose setup differs (e.g. a different round cap would make
+    a different restricted-mean outcome, and look like an effort effect)."""
+    if not games:
+        return
+    ref = games[0]
+    want = setup(ref.row)
+    for g in games[1:]:
+        have = setup(g.row)
+        if have != want:
+            diff = {
+                f"{part}.{k}": (want[part].get(k), have[part].get(k))
+                for part in ("config", "engine")
+                for k in sorted(set(want[part]) | set(have[part]))
+                if want[part].get(k) != have[part].get(k)
+            }
+            if want["seats"] != have["seats"]:
+                diff["seats"] = (want["seats"], have["seats"])
+            raise ValueError(
+                f"{g.key} was played under a different setup from {ref.key}: "
+                + "; ".join(f"{k} {a!r} vs {b!r}" for k, (a, b) in diff.items())
+                + ". Only effort and seeds may differ within one effort report."
+            )
 
 
 @dataclass
@@ -174,6 +245,8 @@ class EffortData:
     sweep: RunData
     medium: list[RunData]
     games: list[EffortGame]
+    # dry / live, from the transcripts (checked against each run.json); None if no games.
+    mode: str | None = None
 
     @property
     def levels(self) -> list[str]:
@@ -195,25 +268,28 @@ def load_effort(run_dir: str | Path, medium: Sequence[str | Path] = ()) -> Effor
         raise ValueError(f"{run_dir} is not an effort sweep (schedule it with --experiment effort)")
     swept = set(sweep.manifest["effort_levels"])
     pool = set(sweep.pool)
-    games = mirror_games(sweep, "sweep", lambda level: level in swept)
-    mode = run_mode(sweep.run_dir)
+    games = mirror_games(sweep, "sweep", "sweep", lambda level: level in swept)
+    mode = check_mode(sweep, games, str(run_dir))
     seen = {Path(run_dir).resolve()}
     others = []
-    for path in medium:
+    for n, path in enumerate(medium, start=1):
         if Path(path).resolve() in seen:
             raise ValueError(f"{path} is given twice (or is the sweep itself)")
         seen.add(Path(path).resolve())
         data = load_run(path)
-        other = run_mode(data.run_dir)
-        if mode and other and other != mode:
-            raise ValueError(f"{path} is a {other} run but {run_dir} is {mode}; do not mix them")
-        others.append(data)
-        games += [
+        found = [
             g
-            for g in mirror_games(data, "medium", lambda level: level == "medium")
+            for g in mirror_games(data, "medium", f"medium-{n}", lambda level: level == "medium")
             if g.model in pool
         ]
-    return EffortData(sweep=sweep, medium=others, games=games)
+        other = check_mode(data, found, str(path))
+        if mode and other and other != mode:
+            raise ValueError(f"{path} is a {other} run but {run_dir} is {mode}; do not mix them")
+        mode = mode or other
+        others.append(data)
+        games += found
+    check_compatible(games)
+    return EffortData(sweep=sweep, medium=others, games=games, mode=mode)
 
 
 def build_effort_report(
@@ -263,7 +339,7 @@ def build_effort_report(
             "run_dir": data.sweep.run_dir.as_posix(),
             "master_seed": data.sweep.manifest.get("master_seed"),
             "pool": data.sweep.pool,
-            "mode": run_mode(data.sweep.run_dir),
+            "mode": data.mode or run_mode(data.sweep.run_dir),
             "games_planned": len(data.sweep.manifest["games"]),
             "games_complete": sweep_done,
             "transcripts_not_complete": list(data.sweep.not_complete),
@@ -272,14 +348,15 @@ def build_effort_report(
             "run_spend_usd": runs.spent_usd(data.sweep.run_dir),
             "medium_runs": [
                 {
+                    "run": f"medium-{n}",
                     "run_dir": m.run_dir.as_posix(),
                     "master_seed": m.manifest.get("master_seed"),
-                    "mode": run_mode(m.run_dir),
+                    "mode": data.mode,
                     "mirror_games_used": sum(
                         g.source == "medium" and g.run_dir == m.run_dir for g in games
                     ),
                 }
-                for m in data.medium
+                for n, m in enumerate(data.medium, start=1)
             ],
         },
         "method": {
@@ -308,10 +385,12 @@ def build_effort_report(
             for m in models
         },
         "games": [
-            g.row.to_dict() | {"model": g.model, "effort": g.level, "source": g.source}
+            g.row.to_dict()
+            | {"key": g.key, "run": g.run, "model": g.model, "effort": g.level, "source": g.source}
             for g in games
         ],
-        "seats": [s.__dict__ for g in games for s in g.row.seats],
+        # ``key`` joins a Seat to its game; ``game`` alone repeats across runs.
+        "seats": [s.__dict__ | {"key": g.key, "run": g.run} for g in games for s in g.row.seats],
     }
 
 
