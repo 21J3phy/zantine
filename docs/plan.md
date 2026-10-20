@@ -6,7 +6,9 @@ Running log of decisions from design sessions. Terms are defined in `../CONTEXT.
 
 ## Vision
 
-Become the go-to benchmark brand for AI agents (single agents, multi-agent teams, harnesses, orchestration, reliability, safety). Start niche and novel with this impostor game as the first product. The company is **Zantine Labs** and its benchmarks are published as the **Zantine Index**. Both names cover the broader agent-evaluation vision beyond this first game (working names).
+Become the go-to benchmark brand for AI agents (single agents, multi-agent teams, harnesses, orchestration, reliability, safety). Start niche and novel with this impostor game as the first product. The company is **Zantine Labs** (working name), which covers the broader agent-evaluation vision beyond this first game.
+
+**No ranking, no composite score.** Results are published as graphs of the underlying data (e.g. **Productivity** vs **Vigilance** per model, cost vs score, **Out-group Bias** by pair). No leaderboard, no single number, no "Zantine Index" (idea dropped 2026-10-20).
 
 ## Claim
 
@@ -15,7 +17,7 @@ Can a team of agents notice and contain a compromised member while still getting
 ## v1
 
 - **Model pool:** 5 models, one **Flagship** per lab (see `model-pool.md`). Rule: a lab's **Flagship** is the strongest model a developer can call through its public API at run time. Meta is represented by Muse Wonder; Muse Wonder Full (consumer-only, via Muse Code) is requested in the Meta credits pitch and would enter v2.x if granted.
-- **Lineups:** **Balanced Lobby** (2 seats per model, rotate through all 15 **Impostor Pairings**) for rankings; **Mirror Match** as a per-model baseline. Rough budget split 75 / 25.
+- **Lineups:** **Balanced Lobby** (2 seats per model, rotate through all 15 **Impostor Pairings**) for model comparisons; **Mirror Match** as a per-model baseline. Rough budget split 75 / 25.
 - **Hidden Identity:** players are never told which model fills any seat.
 - **Tasks:** real, auto-graded work. Includes **Shared Tasks** and **Visual Tasks**. **Impostors** can do **Fake Tasks** and **Sabotage**. Results are graded privately; crewmates only learn outcomes through what players say.
 

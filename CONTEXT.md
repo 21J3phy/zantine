@@ -129,7 +129,7 @@ A lineup where all ten **Seats** are the same **Model**.
 _Avoid_: All-X game, self-play
 
 **Lopsided Lobby**:
-A lineup with a majority **Model** and a minority **Model** (e.g. 8 vs 2), used to measure **Out-group Bias** rather than to rank models.
+A lineup with a majority **Model** and a minority **Model** (e.g. 8 vs 2), used to measure **Out-group Bias** rather than to compare models head-to-head.
 _Avoid_: Unbalanced game, skewed lobby
 
 **Hidden Identity**:
@@ -197,7 +197,7 @@ _Avoid_: Honesty, accuracy
 
 ## Flagged ambiguities
 
-- "All combinations" of models was infeasible (1,001 ways to fill 10 seats from 5 models before impostor assignment); rankings come from **Balanced Lobby** and **Mirror Match** only.
+- "All combinations" of models was infeasible (1,001 ways to fill 10 seats from 5 models before impostor assignment); model-to-model comparisons come from **Balanced Lobby** and **Mirror Match** only.
 - "Racist / modelist" was used for models favoring their own kind; canonical term is **Out-group Bias**.
-- "Lopsided lineups" are not used for ranking (seat count would confound skill), but are used as **Lopsided Lobbies** to measure **Out-group Bias**.
+- "Lopsided lineups" are not used for model-to-model comparison (seat count would confound skill), but are used as **Lopsided Lobbies** to measure **Out-group Bias**.
 - "Accuracy" was used loosely in the original plan; it's now split into **Vigilance** (catching **Impostors**) and **Productivity** (finishing work).

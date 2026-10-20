@@ -14,7 +14,7 @@ Each later experiment reuses the v1 engine and changes exactly one thing, so its
 
 | Priority | Version | Benchmark | Question it answers | Depends on |
 | --- | --- | --- | --- | --- |
-| 1 | v1 | Core ranking (**Balanced Lobby**) | Which model is the best crewmate and the best **Impostor**? | Game engine, **Claim Audit** |
+| 1 | v1 | Core comparison (**Balanced Lobby**) | How do models compare as crewmates and as **Impostors**? | Game engine, **Claim Audit** |
 | 1 | v1 | **Mirror Match** baseline | How does a team made entirely of one model behave? | Game engine |
 | 1 | v1 | **Claim Audit** validation (**Planted Claims**) | Can we trust the deception and **Reliability** scores? | **Claim Audit** pipeline |
 | 2 | v1.1 | **Out-group Bias** (**Lopsided Lobby**, 8 vs 2) | Do models vote out players just because they seem like a different model? | v1 |
@@ -33,7 +33,7 @@ The **Leader** experiment is placed ahead of the speed experiment because orches
 
 ## P1 · v1 core benchmark
 
-v1 ranks five models in identical conditions. Only the model changes from seat to seat.
+v1 compares five models in identical conditions. Results are graphs, not a ranking. Only the model changes from seat to seat.
 
 ### Model pool
 
@@ -157,7 +157,7 @@ This tests whether a player who can talk more ends up steering the team, even wh
 - [ ] **Claim extractor:** which model extracts **Claims**, and whether to use two extractors from different labs.
 - [ ] **Teamwork metric:** **Productivity**, **Vote Pull** and **Compliance** cover part of "teamwork". Is anything else needed, such as information sharing?
 - [ ] **Model pool checks:** confirm `gpt-6-astra` against OpenAI's own docs, and record Opus 5.5 pricing.
-- [x] **Publishing:** open engine and rules; tasks, codes, maps and names generated from a seed for each game; sample transcripts published; official seeds kept private. Still open: public leaderboard?
+- [x] **Publishing:** open engine and rules; tasks, codes, maps and names generated from a seed for each game; sample transcripts published; official seeds kept private. No leaderboard or composite score; results are published as graphs.
 
 ## Sources
 
