@@ -30,8 +30,8 @@ from zantine.tasks.steps import SortList
 
 
 def started(**config: Any) -> Game:
-    """A started game of idle PlaybookBots; Impostors are seats 0 and 1. No relays."""
-    game = make_game(**{"relay_tasks": 0, **config})
+    """A started game of idle PlaybookBots; seats 0 and 1 are Impostors. Solo steps only."""
+    game = make_game(**{"relay_tasks": 0, "audit_tasks": 0, **config})
     game.start()
     return game
 
@@ -289,7 +289,7 @@ def test_a_dead_crewmates_tasks_are_reassigned_after_the_next_meeting() -> None:
 
 
 def test_assignments_are_private_and_never_include_the_answer_key() -> None:
-    game = play(GameConfig(seed=9))
+    game = play(GameConfig(seed=9, audit_tasks=0))
     b = board(game.state)
     answers = {json.dumps(t.content.answer) for t in b.graph}
     for seat in range(10):

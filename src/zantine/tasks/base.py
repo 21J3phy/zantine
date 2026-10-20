@@ -45,6 +45,16 @@ class TaskKind(ABC):
     # Action kinds that work a Task of this kind. Kinds with their own actions
     # (e.g. a relay's handoffs) leave out ``tasks.work``, which then rejects them.
     work_actions: ClassVar[tuple[str, ...]] = ("tasks.work",)
+    # Optional Task kinds do not gate the crew win or team completion count.
+    required_for_completion: ClassVar[bool] = True
+    # Kinds with extra independence constraints handle Meeting reassignment in
+    # their own GameModule instead of the generic TasksModule hook.
+    manages_reassignment: ClassVar[bool] = False
+    # Whether another player can audit a submission of this kind against its
+    # answer key (``zantine.rules.audit``). Needs ``audit_items``, and the
+    # kind's submissions must be graded through ``tasks.work`` (or reported the
+    # same way, see ``zantine.rules.tasks.GRADED``).
+    auditable: ClassVar[bool] = False
 
     @abstractmethod
     def generate(self, rng: GameRng) -> TaskContent:
@@ -73,6 +83,19 @@ class TaskKind(ABC):
     def solo_brief(self, content: TaskContent) -> dict[str, Any]:
         """The brief for one player doing the whole Task alone (calibration)."""
         return self.brief(content)
+
+    def audit_items(self, answer: Answer) -> list[str] | None:
+        """``answer`` (a submission or the answer key) as items an auditor compares.
+
+        A submission passes an audit exactly when its items equal the answer
+        key's, so overrides must agree with ``grade``. Default: a list's
+        elements, or the characters of a text or number; None if unreadable.
+        """
+        if isinstance(answer, list | tuple):
+            return [str(x).strip() for x in answer]
+        if isinstance(answer, str | int) and not isinstance(answer, bool):
+            return list(str(answer).strip())
+        return None
 
 
 _KINDS: dict[str, TaskKind] = {}

@@ -26,6 +26,10 @@ if TYPE_CHECKING:
     from zantine.state import GameState, PlayerState
 
 NAME = "tasks"
+# Round scratch key: every answer graded this Round, as (seat, task id, answer,
+# correct), for modules that check work (audits; later Sabotage and Verification
+# Protocols). Kinds worked through their own action may append to it too.
+GRADED = "tasks.graded"
 
 
 @dataclass
@@ -175,7 +179,7 @@ class TasksModule(GameModule):
         living_crew = [p.seat for p in state.living() if not p.is_impostor]
         rng = game.rng.fork(f"{NAME}/reassign/{meeting}")
         for task in b.graph:
-            if task.done or task.fake or task.closed:
+            if task.done or task.fake or task.closed or task_kind(task.kind).manages_reassignment:
                 continue
             for slot, seat in enumerate(task.assignees):
                 options = [s for s in living_crew if s not in task.assignees]
@@ -227,6 +231,7 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
             continue
         correct = task_kind(task.kind).grade(task.content, action.answer)
         game.event("tasks.graded", seat=seat, task=task.id, correct=correct, fake=task.fake)
+        rc.scratch.setdefault(GRADED, []).append((seat, task.id, action.answer, correct))
         # Private: only the worker learns the grade.
         game.observe(seat, "tasks.graded", task=task.id, correct=correct)
         if not correct:

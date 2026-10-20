@@ -50,6 +50,7 @@ class SortList(TaskKind):
     """Sort a short list of numbers into ascending order."""
 
     name = "sort_list"
+    auditable = True
     size = 6
 
     def generate(self, rng: GameRng) -> TaskContent:
@@ -72,12 +73,17 @@ class SortList(TaskKind):
     def solve(self, brief: dict[str, Any]) -> Answer:
         return sorted(brief["inputs"]["values"])
 
+    def audit_items(self, answer: Answer) -> list[str] | None:
+        return _as_list(answer)
+
 
 @register_task_kind
 class LookupValue(TaskKind):
     """Find the value for one key in a small table."""
 
     name = "lookup_value"
+    # Audited digit by digit.
+    auditable = True
     size = 6
 
     def generate(self, rng: GameRng) -> TaskContent:
@@ -102,6 +108,10 @@ class LookupValue(TaskKind):
     def solve(self, brief: dict[str, Any]) -> Answer:
         inputs = brief["inputs"]
         return inputs["table"][inputs["key"]]
+
+    def audit_items(self, answer: Answer) -> list[str] | None:
+        scalar = _as_scalar(answer)
+        return list(scalar) if scalar is not None else None
 
 
 # Answer normalization: accept the obvious shapes a Harness might produce.

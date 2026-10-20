@@ -33,6 +33,8 @@ The whole setup is generated from the game seed (`src/zantine/scenario.py`), so 
 | `relay.pick_up(task)` | current carrier | the part is unheld in your room, and your leg is open |
 | `relay.hand_off(task)` | first carrier | you hold the part in the handoff room; the second carrier must also finish the **Round** there for it to succeed |
 | `relay.deliver(task)` | second carrier | you hold the handed-off part in the delivery room |
+| `audit.share(task)` | spec holder | the auditor of this unfinished audit is alive and in your room at the start of the **Round** |
+| `audit.check(task, verdict)` | auditor | in the audit's room, with a submitted reading and the other player's shared spec half; never your own work |
 | `tasks.work(task, answer)` | assignee | the **Task** is assigned to you, not yet done, and in your room; `answer` is text, a number, or a list of those |
 
 **Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip. For live **Models**, an unusable reply (no tool call, the wrong tool, bad arguments, a refusal, or a transient API error) counts as an **Invalid Action** too. Meeting speech from a live **Model** follows the same rule: one retry, then the **Seat** says nothing that pass.
@@ -53,7 +55,7 @@ Every living player chooses an action from the same start-of-**Round** state; no
 6. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
 7. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
 
-Plug-in modules add steps between these (see `docs/architecture.md`); the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
+Plug-in modules add steps between these (see `docs/architecture.md`); audit checks, shares and reading delivery run at order 475, and the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
 
 ## Crisis
 
@@ -68,12 +70,12 @@ Implemented in `src/zantine/rules/crisis.py`. Defaults: `crisis_cooldown = 6`, `
 
 ## Tasks
 
-The **Task** kinds include dependent solo steps and chain relays. Dependent solo steps are: small pieces of work one player can do alone, linked into the crew's **Task Graph**. Settings are in `GameConfig` (`tasks_per_crewmate`, `task_dependency_chance`, `task_kinds`).
+The **Task** kinds include dependent solo steps, chain relays and optional audits. Dependent solo steps are small pieces of work one player can do alone, linked into the crew's **Task Graph**. Settings are in `GameConfig` (`tasks_per_crewmate`, `task_dependency_chance`, `task_kinds`).
 
 - **Content.** Each step is generated from the game seed, so there is no fixed answer key. Step kinds:
   - `sort_list`: sort 6 numbers from smallest to largest (answer: the list, or the numbers as text separated by commas or spaces).
   - `lookup_value`: find the value for one sector in a 6-row table (answer: that value).
-- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Step ids are distinct numbers drawn from `T10` to `T99` by the seed, unrelated to who holds them or to how many steps there are (sequential ids would reveal the crew size, and so the **Impostor** count). A game has at most 90 **Tasks**, including relays.
+- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Step ids are distinct numbers drawn from `T10` to `T99` by the seed, unrelated to who holds them or to how many steps there are (sequential ids would reveal the crew size, and so the **Impostor** count). A game has at most 90 **Tasks**, including relays and optional audits.
 - **Task Graph.** Going through the steps in generation order, each step requires, with probability `task_dependency_chance` (default 0.5), one earlier step held by a *different* **Crewmate**. Chains are at most 3 steps long.
 - **What players are told.** At setup each **Crewmate** privately receives its steps (`tasks.assigned`): id, title, room, instructions and inputs, the steps it requires and the steps it unlocks (id, title, room, assignee). Its action context also shows, for each of its own steps, whether it has been told the step is done and the shortest route to the step's room. Nobody is told anything about other players' progress.
 - **Working.** `tasks.work` takes the whole **Round** in the step's room. Grading is automatic and **private**: only the worker is told whether the answer was right (`tasks.graded`). A wrong answer can be retried in a later **Round**; there is no penalty beyond the lost **Round**.
@@ -95,9 +97,21 @@ Implemented by `tasks/relay.py` (`chain_relay`, a two-player **TaskKind**) and `
 
 Scripted bots use their contexts to perform relay actions and wait for handoffs. They handle multiple relays in Task id order to avoid carriers waiting on each other in a cycle. A relay has no solo puzzle to calibrate: `solve(brief)` returns a carrier's action plan, while standalone solo trials are unsupported.
 
+## Audit Tasks
+
+Implemented in `tasks/audit.py` and `rules/audit.py`. `audit_tasks` (default 4, 0 to disable) caps the number of optional audits placed at setup on auditable **Tasks**, subject to available ids and independent players. Each audit gets a seeded unused `T10`–`T99` id, a room, an auditor and a different spec holder. Neither assignee holds the submitted **Task**. The built-in solo steps support audits; other kinds can opt in through the Task-kind registry.
+
+- **Split spec.** The submitted **Task**'s answer key is normalized into items. The auditor privately receives odd positions and the spec holder even positions. A sorted list is checked number by number; a lookup value digit by digit. Neither brief includes the other half or an audit outcome.
+- **Reading.** After work is submitted, only the auditor is shown that submission, its author and its per-**Task** submission number (`audit.reading`). Wrong answers are readings too. Blocked or killed workers produce no reading. A newer submission replaces the reading from the next **Round**; a simultaneous check still checks the reading known at the start of its **Round**.
+- **Sharing.** The spec holder spends a **Round** on `audit.share(task)` with the auditor in the same room at the start of the **Round**. Only the auditor receives that half (`audit.spec_shared`); the holder gets a delivery notice. Either participant being killed that **Round** cancels delivery. Sharing is separate from **Room Chat** and works without it. The holder shares the genuine half; deliberate false halves belong to the later **Sabotage** rules.
+- **Checking.** The auditor spends a **Round** in the audit's room on `audit.check(task, verdict)`, answering `approve` if every item matches, otherwise `reject`. Both a reading and the other player's shared half must be known before the **Round**; guessing without the half is an **Invalid Action**. Current holders of the submitted **Task** and the actual submission author cannot audit it. Only the auditor receives `audit.result`: submission number, verdict, ground-truth outcome (`pass` / `fail`) and whether the verdict was correct. An incorrect verdict leaves the audit open for retry. A correct verdict completes the audit, including a correct rejection of bad work; the holder learns only that it closed (`audit.closed`).
+- **Optional Verification Protocol.** Audits do not gate the submitted **Task**'s completion, its dependents or the crew win, and are excluded from the team's required **Task** totals. They consume actions when players choose to perform them. Mandatory independent verification before work counts is reserved for the later **Verification Protocol** rule. Per-**Seat** work statistics include assigned audits and completed audit duties.
+- **Reassignment.** After a **Meeting**, dead assignees and assignees who now hold the submitted **Task** are replaced by living **Crewmates**, excluding its current holders, every recorded submission author and the other audit assignee. Replacement uses the least unfinished work, with seeded ties. New partners are announced privately. A new auditor receives only its own half and the latest reading; a changed holder must share again. If there is no eligible replacement, the optional audit remains unavailable.
+- **Transcript.** Ground-truth events record placement (`audit.placed`, full spec), every delivered share (`audit.shared`, sender, recipient, half), every check (`audit.checked`, target, submission, author, answer, received half, verdict and true outcome), and reassignment (`audit.reassigned`). Observations record exactly what each recipient was told, including private outcomes. Rejected attempts also appear in the ordinary action/Invalid Action records. Scripted bots share halves, check readings using only observed specs, and travel to the audit room when needed.
+
 ## Visibility
 
-A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks** and their grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
+A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks**, audit briefs, shared spec halves, readings and private grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
 
 ### Neutral Harness memory
 
@@ -127,7 +141,7 @@ Win conditions are checked after the Round's resolution and again after any **Me
 
 1. **Parity**: living **Impostors** ≥ living **Crewmates** → **Impostors** win (`parity`). A kill that reaches parity ends the game before any **Meeting** requested that Round. (With no **Impostors** in play it can only happen if no **Crewmate** is alive, which the rules never allow.)
 2. **Unresolved Crisis** → **Impostors** win (`crisis`). A **Crisis** already active when the last **Impostor** is ejected must still be resolved.
-3. **All Tasks done**: every **Task** is complete → crew wins (`tasks_done`). Checked after parity and **Crisis**, so a Round that also reaches parity or fails a **Crisis** is an **Impostor** win. A game with no **Tasks** never ends this way.
+3. **All Tasks done**: every required **Task** is complete → crew wins (`tasks_done`). Checked after parity and **Crisis**, so a Round that also reaches parity or fails a **Crisis** is an **Impostor** win. A game with no **Tasks** never ends this way.
 4. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), the **Impostors** win (`round_cap`) if any **Impostor** is still in play; otherwise (after **Containment**, or in a **Benign Match**) nobody wins (winner `none`, reason `round_cap`).
 
 **Containment** (every **Impostor** ejected) does **not** end the game, so **Productivity** (Rounds to finish all **Tasks**) is never cut short by catching the **Impostors** early. When the **Meeting** that ejects the last **Impostor** ends, the transcript records a `containment` event (`meeting`, `impostors`; its `round` is the Containment round). Players are not told, since that would reveal the **Impostor** count. The `result` record always has `containment`: `contained`, and the `round` and `meeting` of **Containment** (`null` if it never happened, including every **Benign Match**).
