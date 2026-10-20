@@ -14,8 +14,9 @@ never by a model's judgment:
   Moment near the end of its game ranks above the same Moment early on.
 
 Ties break on transcript, Round, Meeting and type, so the order is stable.
-Every Moment links into the replay viewer at its Meeting (``#meeting=M``) or,
-for action-phase Moments, its Round (``#round=N``).
+Every Moment links into the replay viewer at its Meeting (``#meeting=M&round=N``,
+so viewers older than Meeting links still open the right Round) or, for
+action-phase Moments, its Round (``#round=N``).
 """
 
 from __future__ import annotations
@@ -42,16 +43,11 @@ def find_moments(
 ) -> dict[str, Any]:
     """Every candidate Moment in one game, plus the Moment types that were skipped."""
     facts = build_facts(records, audit)
-    if audit is not None and audit.get("game", {}).get("seed") != facts.seed:
-        raise ValueError(
-            f"audit report is for seed {audit.get('game', {}).get('seed')}, "
-            f"transcript is seed {facts.seed}"
-        )
     caps = capabilities(facts)
     moments: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
     for det in DETECTORS.values():
-        reason = missing(det, caps)
+        reason = missing(det, caps, facts)
         if reason is not None:
             skipped.append({"type": det.name, "reason": reason})
             continue
@@ -61,14 +57,17 @@ def find_moments(
         "transcript": transcript,
         "replay": replay,
         "seed": facts.seed,
-        "audit": _audit_info(audit),
+        "audit": _audit_info(facts.audit),
+        "audit_rejected": facts.audit_problem,
         "skipped": skipped,
         "moments": rank(moments),
     }
 
 
 def link(replay: str | None, round: int, meeting: int | None) -> str:
-    target = f"#meeting={meeting}" if meeting is not None else f"#round={round}"
+    """``#round=N``, or ``#meeting=M&round=N`` for a Meeting: viewers that predate
+    Meeting links still open the right Round."""
+    target = f"#meeting={meeting}&round={round}" if meeting is not None else f"#round={round}"
     return f"{replay or ''}{target}"
 
 
@@ -160,6 +159,21 @@ def replay_path(transcript: Path) -> Path:
     return transcript.with_suffix(".html")
 
 
+# In every replay page that understands ``#meeting=M`` links.
+DEEP_LINK_MARKER = "function deepLinkTarget("
+# In every Zantine replay page (the embedded view model).
+REPLAY_MARKER = 'id="replay-data"'
+
+
+def replay_needs_update(path: Path) -> bool:
+    """Missing, or a Zantine replay from before Meeting links. Other files at
+    that path are left alone."""
+    if not path.is_file():
+        return True
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return REPLAY_MARKER in text and DEEP_LINK_MARKER not in text
+
+
 def relative(path: Path, start: Path) -> str:
     try:
         return Path(os.path.relpath(path.resolve(), start.resolve())).as_posix()
@@ -195,8 +209,9 @@ def find_in_path(
     path: Path, *, out_dir: Path, top: int | None = None, write_replays: bool = True
 ) -> dict[str, Any]:
     """Moments from a transcript or a run dir. Uses each transcript's
-    ``.audit.json`` when present, and writes a missing replay page so every
-    link resolves (``write_replays``). Links are relative to ``out_dir``."""
+    ``.audit.json`` when it matches the transcript, and (``write_replays``)
+    writes a missing replay page, or rewrites one from before Meeting links,
+    so every link resolves. Links are relative to ``out_dir``."""
     from zantine.replay import write_replay
 
     games: list[dict[str, Any]] = []
@@ -206,7 +221,7 @@ def find_in_path(
         audit_file = audit_path(transcript)
         audit = json.loads(audit_file.read_text(encoding="utf-8")) if audit_file.is_file() else None
         replay = replay_path(transcript)
-        if write_replays and not replay.is_file():
+        if write_replays and replay_needs_update(replay):
             write_replay(transcript, replay)
         game = find_moments(
             records,

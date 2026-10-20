@@ -308,7 +308,8 @@ function drawLog(frame) {
 
 // <deep-link>
 // Deep links: "#round=N" opens Round N; "#meeting=M" opens the Round of Meeting M
-// and highlights it. Returns {index, meeting} or null for an unknown target.
+// and highlights it (and wins over "round" when both are given). Returns
+// {index, meeting} or null for an unknown target.
 function deepLinkTarget(hash, data) {
   const params = new URLSearchParams(String(hash || "").replace(/^#/, ""));
   const meeting = params.get("meeting"), round = params.get("round");

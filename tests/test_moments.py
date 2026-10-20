@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from helpers import make_game
-from zantine.audit import PatternExtractor, run_audit
+from zantine.audit import PatternExtractor, ScriptedExtractor, claim, run_audit
 from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.moments import (
@@ -25,6 +25,7 @@ from zantine.moments import (
     rank,
 )
 from zantine.moments.captions import GeneralizingCaption
+from zantine.moments.finder import DEEP_LINK_MARKER, find_in_path
 from zantine.replay import build_view, render_html
 from zantine.rules.actions import CallMeeting, Kill, Move, Report
 from zantine.rules.crisis import FixCrisis, TriggerCrisis
@@ -47,7 +48,7 @@ def bots(
     }
 
 
-def lie_game(eject: bool = False) -> Records:
+def lie_game(eject: bool = False, speech: str = "I was in Medbay.") -> Records:
     """Red (Impostor) kills Green in Weapons in Round 2; Orange saw it and reports.
     At the Meeting Red says it was in Medbay (its own snapshots say Weapons) and
     nobody votes, so the Lie survives (unless ``eject``: then the crew ejects Red)."""
@@ -60,7 +61,7 @@ def lie_game(eject: bool = False) -> Records:
                 ORANGE: {1: Move("Weapons"), 3: Report()},
             },
             votes=votes,
-            speech={RED: {1: "I was in Medbay."}},
+            speech={RED: {1: speech}},
         ),
         kill_cooldown=0,
     )
@@ -69,16 +70,17 @@ def lie_game(eject: bool = False) -> Records:
     return game.transcript.records
 
 
-def framing_game() -> Records:
+def framing_game(speech: dict[int, str] | None = None) -> Records:
     """Red (Impostor) calls a Meeting and accuses Pink, a Crewmate. Pink is ejected
     5 votes to 4 (for Red); Pink itself skips."""
+    speech = speech or {RED: "Pink was acting strange. I accuse Pink."}
     for_pink = {s: {1: PINK} for s in (RED, BLUE, GREEN, ORANGE, YELLOW)}
     for_red = {s: {1: RED} for s in (6, 7, 8, 9)}
     game = make_game(
         bots=bots(
             actions={RED: {1: CallMeeting()}},
             votes=for_pink | for_red,
-            speech={RED: {1: "Pink was acting strange. I accuse Pink."}},
+            speech={s: {1: text} for s, text in speech.items()},
         )
     )
     game.play_round()
@@ -195,7 +197,7 @@ def test_framing_and_ejection_by_one_vote() -> None:
     )
     assert [s["seat"] for s in framing["seats"]] == [RED, PINK]
     assert framing["score_parts"]["edge"] == 1.0
-    assert framing["link"] == "#meeting=1"
+    assert framing["link"] == "#meeting=1&round=1"
     assert only(report, "wrong_ejection_by_one")["caption"] == (
         "In one game (seed 1), Crewmate Pink was ejected at Meeting 1 by one vote "
         "(5 votes to 4 for Red)."
@@ -208,6 +210,52 @@ def test_a_vote_for_the_ejected_crewmate_without_naming_them_is_not_framing() ->
         for r in framing_game()
     ]
     assert types(find_moments(records)) == ["wrong_ejection_by_one"]
+
+
+def test_false_claim_is_attributed_only_to_its_speaker() -> None:
+    records = framing_game({RED: "Pink was in Medbay.", BLUE: "Pink was in Cafeteria."})
+    audit = audit_of(records)
+    by_speaker = {
+        (c["speaker"], c["verdict"]["label"]) for c in audit["claims"] if c["subject"] == PINK
+    }
+    assert by_speaker == {(RED, "lie"), (BLUE, "true")}
+    m = only(find_moments(records, audit), "framing")
+    assert m["caption"] == (
+        "In one game (seed 1), Impostors Red and Blue named Crewmate Pink at Meeting 1 and voted "
+        "to eject them, and Red also made a false Claim about them; Pink was ejected, 5 votes to "
+        "4 for Red."
+    )
+    assert m["evidence"]["false_claims"]
+    assert all(
+        next(c for c in audit["claims"] if c["id"] == cid)["speaker"] == RED
+        for cid in m["evidence"]["false_claims"]
+    )
+
+
+def test_false_claim_framing_when_every_accuser_made_one() -> None:
+    records = framing_game({RED: "Pink was in Medbay."})
+    m = only(find_moments(records, audit_of(records)), "framing")
+    assert m["caption"].startswith(
+        "In one game (seed 1), Impostor Red made a false Claim about Crewmate Pink at Meeting 1"
+    )
+    assert m["provisional"]
+
+
+@pytest.mark.parametrize("quote", ["", "   ", "Pink was in Medbay."])
+def test_framing_ignores_claims_without_a_real_quote(quote: str) -> None:
+    """An extractor returning a false Claim whose quote is blank or not in the speech."""
+    records = framing_game()
+
+    def respond(item: Any) -> dict[str, Any]:
+        if item.speaker != "Red":
+            return {"claims": []}
+        return {"claims": [claim("location", "Pink", quote, room="Medbay", round=1)]}
+
+    audit = run_audit(records, ScriptedExtractor(respond))
+    assert any(c["speaker"] == RED and c["verdict"]["truth"] == "false" for c in audit["claims"])
+    m = only(find_moments(records, audit), "framing")
+    assert " named Crewmate Pink " in m["caption"]
+    assert m["evidence"]["false_claims"] == []
 
 
 def test_containment_by_one_vote() -> None:
@@ -274,10 +322,70 @@ def test_types_without_their_inputs_are_skipped_with_a_reason() -> None:
     assert "crisis_deadline_save" not in types(find_moments(records))
 
 
-def test_audit_must_be_for_the_same_game() -> None:
-    audit = audit_of(scripted(3))
-    with pytest.raises(ValueError, match="seed 3"):
-        find_moments(scripted(7), audit)
+def test_an_audit_of_another_seed_is_not_used() -> None:
+    report = find_moments(scripted(7), audit_of(scripted(3)))
+    assert report["audit"] is None
+    assert report["audit_rejected"] == ("the audit report is for seed 3, this transcript is seed 7")
+    skipped = {s["type"]: s["reason"] for s in report["skipped"]}
+    assert skipped["surviving_lie"] == report["audit_rejected"]
+
+
+def test_a_stale_audit_of_the_same_seed_is_not_used() -> None:
+    """A rerun at the same seed overwrote the transcript but left the old sidecar."""
+    old_audit = audit_of(lie_game())
+    rerun = lie_game(speech="Let's vote.")
+    report = find_moments(rerun, old_audit)
+    assert "surviving_lie" not in types(report)
+    assert report["audit_rejected"].startswith(
+        "the audit report's statements differ from this transcript's"
+    )
+
+
+def test_cli_ignores_a_stale_sidecar(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    transcript = write(lie_game(), tmp_path / "game.jsonl")
+    assert main(["audit", str(transcript)]) == 0
+    write(lie_game(speech="Let's vote."), transcript)  # same seed, same path
+    capsys.readouterr()
+    assert main(["moments", str(transcript)]) == 0
+    report = json.loads((tmp_path / "game.moments.json").read_text())
+    assert report["moments"] == []
+    assert "audit not used" in capsys.readouterr().out
+
+
+def cut_before(records: Records, stop: Any) -> Records:
+    """The transcript up to (not including) the first record matching ``stop``."""
+    i = next(i for i, r in enumerate(records) if stop(r))
+    return records[:i]
+
+
+@pytest.mark.parametrize(
+    "where",
+    ["during speech", "before the first vote", "partway through voting", "before the tally"],
+)
+def test_no_surviving_lie_before_the_vote_is_counted(where: str) -> None:
+    """A live run can abort mid-Meeting; the Lie has not survived any vote yet."""
+    records = lie_game(eject=True)
+    red_spoke = next(
+        r["seq"] for r in records if r.get("type") == "statement" and r["data"]["speaker"] == RED
+    )
+    votes = [r["seq"] for r in records if r.get("type") == "vote"]
+    stop = {
+        "during speech": red_spoke + 1,
+        "before the first vote": votes[0],
+        "partway through voting": votes[3],
+        "before the tally": votes[-1] + 1,
+    }[where]
+    cut = cut_before(records, lambda r: r["seq"] >= stop)
+    m = find_moments(cut, audit_of(cut))
+    assert not [r for r in cut if r.get("type") == "vote_tally"]
+    assert "surviving_lie" not in types(m)
+
+
+def test_a_counted_all_skip_vote_lets_the_lie_survive() -> None:
+    records = lie_game()
+    (tally,) = [r["data"] for r in records if r.get("type") == "vote_tally"]
+    assert tally["ejected"] is None and tally["counts"] == []
+    assert "surviving_lie" in types(find_moments(records, audit_of(records)))
 
 
 def test_detectors_read_transcripts_and_audits_only() -> None:
@@ -359,7 +467,7 @@ def resolve(link: str, view: dict[str, Any]) -> tuple[int, int | None]:
     rounds = [f["round"] for f in view["rounds"]]
     if "meeting" in fragment:
         (m,) = [m for m in view["meetings"] if m["meeting"] == int(fragment["meeting"])]
-        assert m["round"] in rounds
+        assert m["round"] in rounds and int(fragment["round"]) == m["round"]
         return m["round"], m["meeting"]
     assert int(fragment["round"]) in rounds
     return int(fragment["round"]), None
@@ -383,7 +491,16 @@ def test_viewer_resolves_round_and_meeting_fragments(tmp_path: Path) -> None:
     assert script
     data = re.search(r'<script type="application/json" id="replay-data">(.*?)</script>', html, re.S)
     assert data
-    cases = ["#meeting=2", "#meeting=1", "#round=2", "#round=0", "#meeting=9", "#round=x", ""]
+    cases = [
+        "#meeting=2",
+        "#meeting=1&round=1",
+        "#round=2",
+        "#round=0",
+        "#meeting=9",
+        "#round=x",
+        "",
+        "#meeting=9&round=1",
+    ]
     test = tmp_path / "deep_link.js"
     test.write_text(
         script.group(1)
@@ -401,6 +518,7 @@ def test_viewer_resolves_round_and_meeting_fragments(tmp_path: Path) -> None:
         None,
         None,
         None,
+        {"index": 1, "meeting": None},
     ]
 
 
@@ -426,10 +544,10 @@ def test_cli_on_one_transcript(tmp_path: Path, capsys: pytest.CaptureFixture[str
     report = json.loads((tmp_path / "game.moments.json").read_text())
     assert report["kind"] == "moments" and report["candidates"] >= 1
     (m,) = report["moments"]
-    assert m["type"] == "surviving_lie" and m["link"] == "game.html#meeting=1"
+    assert m["type"] == "surviving_lie" and m["link"] == "game.html#meeting=1&round=3"
     assert (tmp_path / "game.html").is_file()  # the link's target was written
     md = (tmp_path / "game.moments.md").read_text()
-    assert m["caption"] in md and "(game.html#meeting=1)" in md
+    assert m["caption"] in md and "(game.html#meeting=1&round=3)" in md
     assert "In one game (seed 1)" in capsys.readouterr().out
 
 
@@ -452,3 +570,32 @@ def test_cli_on_a_run_dir(tmp_path: Path) -> None:
     assert all(m["link"].startswith("../run/games/") for m in report["moments"])
     assert not list((tmp_path / "run").rglob("*.html"))
     assert (tmp_path / "out" / "moments.md").is_file()
+
+
+# The base viewer's whole deep-link handling, before Meeting links existed.
+OLD_VIEWER_START = re.compile(r"round=(-?\d+)")
+
+
+def test_meeting_links_still_open_the_round_in_older_viewers() -> None:
+    for _, report in all_reports():
+        for m in report["moments"]:
+            match = OLD_VIEWER_START.search(m["link"].split("#", 1)[1])
+            assert match and int(match.group(1)) == m["round"], m["link"]
+
+
+def test_replays_from_before_meeting_links_are_rewritten(tmp_path: Path) -> None:
+    transcript = write(lie_game(), tmp_path / "game.jsonl")
+    old = render_html(build_view(lie_game())).replace(DEEP_LINK_MARKER, "function oldViewer(")
+    (tmp_path / "game.html").write_text(old)
+    find_in_path(transcript, out_dir=tmp_path)
+    assert DEEP_LINK_MARKER in (tmp_path / "game.html").read_text()
+
+
+def test_current_replays_and_other_files_are_left_alone(tmp_path: Path) -> None:
+    for name, content in (("a", None), ("b", "<html>my notes</html>")):
+        transcript = write(lie_game(), tmp_path / f"{name}.jsonl")
+        page = tmp_path / f"{name}.html"
+        page.write_text(content or render_html(build_view(lie_game())) + "<!-- mine -->")
+        before = page.read_text()
+        find_in_path(transcript, out_dir=tmp_path)
+        assert page.read_text() == before

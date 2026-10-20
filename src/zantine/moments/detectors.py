@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from zantine.moments.captions import caption, check_template
+from zantine.moments.captions import caption, check_template, join
 from zantine.moments.facts import GameFacts, MeetingFacts
 
 
@@ -94,12 +94,14 @@ def capabilities(facts: GameFacts) -> set[str]:
     return caps
 
 
-def missing(det: Detector, caps: set[str]) -> str | None:
+def missing(det: Detector, caps: set[str], facts: GameFacts) -> str | None:
     """Why ``det`` can't run on this game, or None if it can."""
     for req in det.requires:
         if req not in caps:
             if req.startswith("module:"):
                 return f"the {req.removeprefix('module:')} module was not in play"
+            if req == "audit" and facts.audit_problem:
+                return facts.audit_problem
             return REQUIREMENT_REASONS.get(req, f"needs {req}")
     return None
 
@@ -150,7 +152,7 @@ def surviving_lie(facts: GameFacts) -> list[Moment]:
     first: dict[tuple[int, int], dict[str, Any]] = {}
     for c in facts.audit.get("claims", []):
         # Only Claims whose quote really is in the statement (an extractor can invent one).
-        if c["verdict"]["label"] != "lie" or not c.get("quote_in_text") or not c["quote"].strip():
+        if c["verdict"]["label"] != "lie" or not facts.quoted(c):
             continue
         key = (c["meeting"], c["speaker"])
         if key not in first or c["statement_seq"] < first[key]["statement_seq"]:
@@ -158,7 +160,8 @@ def surviving_lie(facts: GameFacts) -> list[Moment]:
     out = []
     for (meeting, speaker), c in sorted(first.items()):
         m = facts.meetings.get(meeting)
-        if m is None or m.ejected == speaker:
+        # Only once the vote was counted: a transcript can stop mid-Meeting.
+        if m is None or not m.tallied or m.ejected == speaker:
             continue
         out.append(
             Moment(
@@ -194,18 +197,22 @@ FRAMING_CLAIM = (
     "{impostors} made a false Claim about {victim} at Meeting {meeting} and voted to eject them; "
     "{victim_name} was ejected, {votes}."
 )
+FRAMING_SOME_CLAIM = (
+    "{impostors} named {victim} at Meeting {meeting} and voted to eject them, and {claimers} "
+    "also made a false Claim about them; {victim_name} was ejected, {votes}."
+)
 
 
 @detector(
     "framing",
     title="An Impostor's accusation ejected a Crewmate",
     weight=3.0,
-    templates=(FRAMING, FRAMING_CLAIM),
+    templates=(FRAMING, FRAMING_CLAIM, FRAMING_SOME_CLAIM),
     edge_rule="1 / (winning votes - strongest alternative): 1.0 for an Ejection by one vote",
 )
 def framing(facts: GameFacts) -> list[Moment]:
     """An Impostor named the ejected Crewmate in a statement and voted for them.
-    With an audit, a false Claim by that Impostor about them is cited too."""
+    With an audit, false Claims about them are cited, attributed to their speakers only."""
     out = []
     for m in facts.meetings.values():
         victim = m.ejected
@@ -224,14 +231,21 @@ def framing(facts: GameFacts) -> list[Moment]:
         if not accusers:
             continue
         false_claims = [
-            c["id"]
+            c
             for c in (facts.audit or {}).get("claims", [])
             if c["meeting"] == m.meeting
             and c["speaker"] in accusers
             and victim in (c.get("subject"), c.get("object"))
             and c["verdict"]["label"] in ("lie", "misstatement")
-            and c.get("quote_in_text")
+            and facts.quoted(c)
         ]
+        claimers = sorted({c["speaker"] for c in false_claims})
+        if not claimers:
+            template = FRAMING
+        elif claimers == accusers:
+            template = FRAMING_CLAIM
+        else:
+            template = FRAMING_SOME_CLAIM
         top, second = m.margin() or (0, 0)
         out.append(
             Moment(
@@ -241,8 +255,9 @@ def framing(facts: GameFacts) -> list[Moment]:
                 (*accusers, victim),
                 caption(
                     facts.seed,
-                    FRAMING_CLAIM if false_claims else FRAMING,
+                    template,
                     impostors=facts.who_all(accusers),
+                    claimers=join(facts.name(s) for s in claimers),
                     victim=facts.who(victim),
                     victim_name=name,
                     meeting=m.meeting,
@@ -254,7 +269,7 @@ def framing(facts: GameFacts) -> list[Moment]:
                         seq for seq, speaker, _ in m.statements if speaker in accusers
                     ],
                     "votes": {str(s): victim for s in accusers},
-                    "false_claims": false_claims,
+                    "false_claims": [c["id"] for c in false_claims],
                 },
                 provisional=bool(false_claims) and _provisional(facts),
             )

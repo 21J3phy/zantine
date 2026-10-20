@@ -7,6 +7,7 @@ here is ground truth about this one game.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -27,6 +28,9 @@ class MeetingFacts:
     # (seq, speaker, text) for every statement, in order.
     statements: list[tuple[int, int, str]] = field(default_factory=list)
     containment: bool = False
+    # The vote was counted (a ``vote_tally`` exists); False if the transcript
+    # stops mid-Meeting, e.g. a live run aborted during discussion or voting.
+    tallied: bool = False
 
     def margin(self) -> tuple[int, int] | None:
         """For an Ejection: the winning count and the strongest alternative
@@ -79,7 +83,11 @@ class GameFacts:
     winner: str | None = None
     win_reason: str | None = None
     header: dict[str, Any] = field(default_factory=dict)
+    # seq -> (meeting, pass_index, order, speaker, text) for every statement.
+    statements: dict[int, tuple[int, int, int, int, str]] = field(default_factory=dict)
     audit: dict[str, Any] | None = None
+    # Why a given audit report was not used (it belongs to another transcript).
+    audit_problem: str | None = None
 
     def name(self, seat: int | None) -> str:
         return "nobody" if seat is None else self.names.get(seat, f"Seat {seat}")
@@ -100,6 +108,19 @@ class GameFacts:
             (role,) = roles
             return f"{role.capitalize()}s {join([self.name(s) for s in seats])}"
         return join([self.who(s) for s in seats])
+
+    def quoted(self, claim: dict[str, Any]) -> bool:
+        """The Claim's quote is non-blank and really is in its statement in this
+        transcript, said by its speaker (an extractor can invent a quote)."""
+        quote = _normal(claim.get("quote") or "")
+        st = self.statements.get(claim.get("statement_seq", -1))
+        return (
+            bool(quote)
+            and bool(claim.get("quote_in_text"))
+            and st is not None
+            and st[3] == claim.get("speaker")
+            and quote in _normal(st[4])
+        )
 
     def alive_at_end(self, seat: int) -> bool:
         return seat not in self.fates
@@ -149,6 +170,13 @@ def build_facts(
                 facts.meetings[data["meeting"]].statements.append(
                     (r["seq"], data["speaker"], data["text"])
                 )
+                facts.statements[r["seq"]] = (
+                    data["meeting"],
+                    data["pass_index"],
+                    data["order"],
+                    data["speaker"],
+                    data["text"],
+                )
             case "vote":
                 meeting = facts.meetings[data["meeting"]]
                 value = data.get("value") if data.get("valid") else None
@@ -157,6 +185,7 @@ def build_facts(
                 meeting = facts.meetings[data["meeting"]]
                 meeting.counts = {c["seat"]: c["votes"] for c in data["counts"]}
                 meeting.skips, meeting.ejected = data["skips"], data["ejected"]
+                meeting.tallied = True
             case "ejection":
                 facts.fates[data["seat"]] = ("ejected", rnd)
             case "containment":
@@ -170,4 +199,38 @@ def build_facts(
                 crisis.fixers = tuple(data.get("fixers", ()))
             case "crisis.failed" if data["number"] in facts.crises:
                 facts.crises[data["number"]].failed = rnd
+    if audit is not None:
+        facts.audit_problem = audit_mismatch(facts, audit)
+        if facts.audit_problem is not None:
+            facts.audit = None
     return facts
+
+
+def audit_mismatch(facts: GameFacts, audit: dict[str, Any]) -> str | None:
+    """Why ``audit`` is not this transcript's report, or None if it is.
+
+    The seed alone is not enough (runs reuse seeds, and a rerun can overwrite a
+    transcript next to an old ``.audit.json``), so every audited statement must
+    match this transcript's statement at the same ``seq``, and vice versa.
+    """
+    seed = audit.get("game", {}).get("seed")
+    if seed != facts.seed:
+        return f"the audit report is for seed {seed}, this transcript is seed {facts.seed}"
+    audited = {
+        st.get("seq"): (
+            st.get("meeting"),
+            st.get("pass_index"),
+            st.get("order"),
+            st.get("speaker"),
+            st.get("text"),
+        )
+        for st in audit.get("statements", [])
+    }
+    for seq in sorted(set(audited) | set(facts.statements)):
+        if audited.get(seq) != facts.statements.get(seq):
+            return f"the audit report's statements differ from this transcript's (seq {seq})"
+    return None
+
+
+def _normal(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()

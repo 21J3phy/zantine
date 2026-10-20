@@ -256,6 +256,9 @@ def moments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if md == out:
         md = out.with_name(out.name + ".md")
     md.write_text(to_markdown(report), encoding="utf-8")
+    for g in report["games"]:
+        if g["audit_rejected"]:
+            print(f"warning: {g['transcript']}: audit not used: {g['audit_rejected']}")
     for i, m in enumerate(report["moments"], 1):
         print(f"{i:>3}. [{m['score']:.2f}] {m['caption']}  -> {m['link']}")
     shown = len(report["moments"])
