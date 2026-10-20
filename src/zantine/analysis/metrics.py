@@ -281,6 +281,8 @@ def game_row(
         row = by_seat[c["seat"]]
         row.cost_usd = float(c.get("cost_usd") or 0.0)
         row.calls = int(c.get("calls") or 0)
+        row.invalid_actions = int(c.get("invalid_actions") or 0)
+        row.forfeits = int(c.get("forfeits") or 0)
 
     for e in events:
         if e["type"] != "harness.call":
@@ -290,8 +292,6 @@ def game_row(
             row = by_seat[d["seat"]]
             row.thinking_tokens += int(d["thinking_tokens"])
             row.thinking_calls += 1
-        row.invalid_actions = int(c.get("invalid_actions") or 0)
-        row.forfeits = int(c.get("forfeits") or 0)
 
     for seat, counts in (claims or {}).items():
         if seat in by_seat:

@@ -550,3 +550,35 @@ def test_games_from_several_runs_keep_an_unambiguous_key(tmp_path: Path) -> None
         seats = Counter(s["key"] for s in data["seats"])
         assert set(seats) == set(keys) and set(seats.values()) == {10}
         assert [r["run"] for r in data["run"]["medium_runs"]] == ["medium-1", "medium-2"]
+
+
+@pytest.mark.parametrize("think", [None, 0, 700])
+def test_every_exported_seat_keeps_its_own_invalid_action_and_forfeit_counts(
+    think: int | None,
+) -> None:
+    from zantine.analysis.metrics import game_row
+
+    def factory(spec: ModelSpec) -> ProviderAdapter:
+        adapter = fake_adapter(spec)
+        reply = openai_reply(
+            text="no tool call", output_tokens=500 + (think or 0), reasoning_tokens=think
+        )
+        adapter.client = OpenAIFake(lambda p: reply)  # type: ignore[attr-defined]
+        return adapter
+
+    run = play_live(
+        GameConfig(seed=3, round_cap=3),
+        "live:gpt-6.1-sol,scripted*9",
+        spend_cap_usd=50,
+        adapter_factory=factory,
+        models=MODELS,
+    )
+    records = run.game.transcript.records
+    row = game_row({"id": "g", "kind": "lobby", "seed": 3}, records)
+    cost = {c["seat"]: c for c in run.cost["seats"]}
+    assert len({(c["invalid_actions"], c["forfeits"]) for c in cost.values()}) > 1
+    for seat in row.seats:
+        assert (seat.invalid_actions, seat.forfeits) == (
+            cost[seat.seat]["invalid_actions"],
+            cost[seat.seat]["forfeits"],
+        )
