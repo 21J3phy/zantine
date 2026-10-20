@@ -96,6 +96,11 @@ def seat(report: dict[str, Any], s: int) -> dict[str, Any]:
     return next(x for x in report["seats"] if x["seat"] == s)
 
 
+def spots(facts: list[list[Any]]) -> list[list[Any]]:
+    """[room, Round] of each sighting or contradicted fact (dropping the seq it dates from)."""
+    return [f[:2] for f in facts]
+
+
 def marks(game: Any) -> list[tuple[int, str, int]]:
     return [(m["observer"], m["kind"], m["subject"]) for m in events(game, "relevance.marked")]
 
@@ -309,8 +314,8 @@ def test_seeing_a_player_elsewhere_contradicts_its_claim(delay: int | None, rate
     report = audit(game)
     (obs,) = report["observations"]
     assert (obs["kind"], obs["observer"], obs["subject"]) == ("claim_contradiction", PINK, RED)
-    assert obs["contradicted"] == [["Medbay", 1], ["Medbay", 2], ["Medbay", 3]]
-    assert ["Weapons", 2] in obs["sightings"]
+    assert spots(obs["contradicted"]) == [["Medbay", 1], ["Medbay", 2], ["Medbay", 3]]
+    assert ["Weapons", 2] in spots(obs["sightings"])
     records = game.transcript.records
     assert all(records[s]["seat"] == PINK for s in obs["evidence"])
     m = seat(report, PINK)
@@ -378,7 +383,8 @@ def test_a_snapshot_is_a_sighting_at_the_start_of_the_next_round_too() -> None:
     """Pink's end-of-Round-1 view is also its start-of-Round-2 view of Red in Weapons."""
     game = apart_game("I was in Cafeteria in round 2.", "Red was in Weapons in round 2.")
     obs = pink_contradiction(game)
-    assert ["Weapons", 1] in obs["sightings"] and ["Weapons", 2] in obs["sightings"]
+    assert ["Weapons", 1] in spots(obs["sightings"])
+    assert ["Weapons", 2] in spots(obs["sightings"])
     assert (obs["status"], obs["lag"]) == ("disclosed", 0)
 
 
@@ -394,7 +400,7 @@ def test_a_snapshot_after_a_meeting_is_a_sighting_at_the_next_round_start() -> N
     for _ in range(3):
         game.play_round()
     obs = pink_contradiction(game)
-    assert ["Cafeteria", 3] in obs["sightings"]
+    assert ["Cafeteria", 3] in spots(obs["sightings"])
     assert (obs["first_meeting"], obs["status"], obs["lag"]) == (2, "disclosed", 0)
 
 
@@ -449,3 +455,50 @@ def test_kill_accusations_must_be_about_the_kill_round(orange: str, status: str)
     (obs,) = [o for o in report["observations"] if o["observer"] == ORANGE]
     assert (obs["kind"], obs["subject"], obs["kill_round"]) == ("near_body", RED, 2)
     assert obs["status"] == status
+
+
+class Lines(PlaybookBot):
+    """Says ``lines[pass_index]`` at Meeting 1 (nothing in other passes)."""
+
+    def __init__(self, actions: Mapping[int, Action], lines: Mapping[int, str]) -> None:
+        super().__init__(actions=actions)
+        self.lines = dict(lines)
+
+    def speak(self, ctx: MeetingContext) -> str:
+        return self.lines.get(ctx.pass_index, "") if ctx.meeting == 1 else ""
+
+
+@pytest.mark.parametrize(
+    ("red", "pink", "status"),
+    [
+        # Pink's denial is about Medbay, which only Red's later Claim makes relevant.
+        (
+            {1: "I was in Cafeteria in round 2."},
+            {2: "Red was not in Medbay in round 2."},
+            "undisclosed",
+        ),
+        (
+            {1: "I was in Cafeteria in round 2.", 3: "I was in Medbay in round 2."},
+            {2: "Red was not in Medbay in round 2."},
+            "undisclosed",
+        ),
+        # Spoken after the Medbay Claim, the same denial discloses it.
+        (
+            {1: "I was in Cafeteria in round 2.", 2: "I was in Medbay in round 2."},
+            {3: "Red was not in Medbay in round 2."},
+            "disclosed",
+        ),
+    ],
+)
+def test_a_later_claim_never_makes_an_earlier_statement_a_disclosure(
+    red: dict[int, str], pink: dict[int, str], status: str
+) -> None:
+    bots = {
+        RED: Lines({1: Move("Weapons")}, red),
+        PINK: Lines({1: Move("Weapons")}, pink),
+        CALLER: PlaybookBot(actions={3: CallMeeting()}),
+    }
+    game = make_game(bots=bots)
+    for _ in range(3):
+        game.play_round()
+    assert pink_contradiction(game)["status"] == status

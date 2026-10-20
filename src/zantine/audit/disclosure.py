@@ -41,7 +41,10 @@ the observed fact:
   them).
 
 A snapshot is a view of the end of its Round and, when nothing happened in
-between, of the start of the next; both Rounds count as sightings.
+between, of the start of the next; both Rounds count as sightings. In a
+contradiction, each sighting and contradicted Round counts only for Claims made
+after the contradicted Claim it came from, so a later Claim never makes an
+earlier statement a disclosure.
 
 Truth does not matter here (the Claim Audit scores that); a Claim matching the
 observation is consistent with it by construction.
@@ -192,7 +195,8 @@ def contradiction_marks(rec: GameRecord, claims: list[dict[str, Any]]) -> list[d
                     "claim": c["id"],
                     "claim_seq": c["statement_seq"],
                     "first_seq": c["statement_seq"],
-                    # [room, Round] pairs the contradicted Claims cover.
+                    # [room, Round, Claim seq]: what each contradicted Claim covered,
+                    # usable only after that Claim was made.
                     "contradicted": [],
                     "evidence": [],
                     "sightings": [],
@@ -204,14 +208,12 @@ def contradiction_marks(rec: GameRecord, claims: list[dict[str, Any]]) -> list[d
                 else rec.meeting(c["meeting"]).window
             )
             for r in covered if c["room"] is not None else ():
-                if [c["room"], r] not in group["contradicted"]:
-                    group["contradicted"].append([c["room"], r])
+                _add_fact(group["contradicted"], c["room"], r, c["statement_seq"])
             for snap in seen:
                 if snap["seq"] not in group["evidence"]:
                     group["evidence"].append(snap["seq"])
                 for r in _snapshot_rounds(rec, observer, snap):
-                    if [snap["data"]["room"], r] not in group["sightings"]:
-                        group["sightings"].append([snap["data"]["room"], r])
+                    _add_fact(group["sightings"], snap["data"]["room"], r, c["statement_seq"])
     out = list(groups.values())
     for group in out:
         group["evidence"].sort()
@@ -220,8 +222,14 @@ def contradiction_marks(rec: GameRecord, claims: list[dict[str, Any]]) -> list[d
     return out
 
 
+def _add_fact(facts: list[list[Any]], room: str, rnd: int, since: int) -> None:
+    """Add [room, Round, since]; a fact already made relevant earlier keeps its seq."""
+    if not any(f[0] == room and f[1] == rnd for f in facts):
+        facts.append([room, rnd, since])
+
+
 def _sightings(rec: GameRecord, mark: dict[str, Any], rnd: int) -> list[list[Any]]:
-    """[room, Round] pairs where the observer saw what was marked.
+    """[room, Round, source seq] where the observer saw what was marked.
 
     A failed Task: only its Round. A body: every Round of the Meeting window,
     from the mark on, in which the observer saw the subject with that body.
@@ -239,7 +247,7 @@ def _sightings(rec: GameRecord, mark: dict[str, Any], rnd: int) -> list[list[Any
                 and mark["body"] in snap["data"]["bodies"]
             ):
                 rounds.add(r)
-    return [[room, r] for r in sorted(rounds)]
+    return [[room, r, mark["source_seq"]] for r in sorted(rounds)]
 
 
 def _window_of(rec: GameRecord, rnd: int) -> range:
@@ -341,14 +349,19 @@ def _discloses(c: dict[str, Any], obs: dict[str, Any], rec: GameRecord) -> bool:
         return (
             obs["kind"] == "claim_contradiction"
             and c["subject"] == subject
-            and _in_time(c, [r for room, r in obs["contradicted"] if room == c["room"]], rec)
+            and _in_time(c, _facts_in(obs["contradicted"], c), rec)
         )
     names_subject = (c["kind"] == "location" and c["subject"] == subject) or (
         c["kind"] == "together" and subject in (c["subject"], c["object"])
     )
     if c["negated"] or not names_subject:
         return False
-    return _in_time(c, [r for room, r in obs["sightings"] if room == c["room"]], rec)
+    return _in_time(c, _facts_in(obs["sightings"], c), rec)
+
+
+def _facts_in(facts: list[list[Any]], c: dict[str, Any]) -> list[int]:
+    """Rounds of the facts in the Claim's room that were relevant before it was said."""
+    return [r for room, r, since in facts if room == c["room"] and since < c["statement_seq"]]
 
 
 def _in_time(c: dict[str, Any], rounds: list[int], rec: GameRecord) -> bool:
