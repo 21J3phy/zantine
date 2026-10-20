@@ -2,8 +2,9 @@
 
 ``send`` refuses to start a call whose worst-case cost would take total spend
 past the cap (raising ``SpendCapReached``), makes the call, prices its
-``Usage`` and records a ``CallRecord``. Seats, the Claim extractor, Jev calls and
-the log summarizer all share one ledger per run, so one cap covers everything.
+``Usage`` and records a ``CallRecord``. Seats, the Claim extractor and Jev calls
+share one ledger per run, so one cap covers everything. Log summarization is
+pure code and makes no paid calls.
 
 ``sink`` (optional) receives every record as it is made; the live runner uses
 it to write ``harness.call`` events into the game transcript.
@@ -42,7 +43,7 @@ class SpendCapReached(Exception):
 @dataclass(frozen=True)
 class CallRecord:
     model: str
-    purpose: str  # "seat" for players; "extractor", "jev", "summarizer", ...
+    purpose: str  # "seat" for players; "extractor", "jev", ...
     phase: str  # e.g. "action", "speak", "vote"
     seat: int | None
     round: int | None
