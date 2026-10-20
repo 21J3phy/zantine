@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -76,9 +77,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     a.add_argument("--out", type=Path, help="JSON to write (default: <transcript>.audit.json)")
     a.add_argument("--live", action="store_true", help="allow paid extractor calls")
     a.add_argument("--spend-cap", type=float, default=2.0, help="USD cap on extractor spend")
+    mo = sub.add_parser("moments", help="find candidate single-game Moments for sharing")
+    mo.add_argument("path", type=Path, help="a JSONL transcript or a run dir of transcripts")
+    mo.add_argument("--top", type=int, help="keep only the N highest-scoring Moments")
+    mo.add_argument(
+        "--out",
+        type=Path,
+        help="JSON to write, plus a .md list beside it "
+        "(default: <transcript>.moments.json, or <run dir>/moments.json)",
+    )
+    mo.add_argument(
+        "--no-replay", action="store_true", help="don't write missing replay pages for the links"
+    )
     args = parser.parse_args(argv)
     if args.command == "report":
         return report.command(parser, args)
+    if args.command == "moments":
+        return moments(parser, args)
     if args.command == "replay":
         return replay(parser, args.transcript, args.out)
     if args.command in ("schedule", "run"):
@@ -214,6 +229,39 @@ def audit(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     print_audit(report)
     print(f"audit: {out}")
     return 0 if report["complete"] else 1
+
+
+def moments(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from zantine.moments import find_in_path, to_markdown
+
+    if not args.path.exists():
+        parser.error(f"no such transcript or run dir: {args.path}")
+    if args.top is not None and args.top < 1:
+        parser.error("--top must be at least 1")
+    default = (
+        args.path / "moments.json" if args.path.is_dir() else args.path.with_suffix(".moments.json")
+    )
+    out = args.out or default
+    try:
+        report = find_in_path(
+            args.path, out_dir=out.parent, top=args.top, write_replays=not args.no_replay
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not report["games"]:
+        parser.error(f"no transcripts found in {args.path}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(report, sort_keys=True, indent=1) + "\n", encoding="utf-8")
+    md = out.with_suffix(".md")
+    if md == out:
+        md = out.with_name(out.name + ".md")
+    md.write_text(to_markdown(report), encoding="utf-8")
+    for i, m in enumerate(report["moments"], 1):
+        print(f"{i:>3}. [{m['score']:.2f}] {m['caption']}  -> {m['link']}")
+    shown = len(report["moments"])
+    print(f"{shown} of {report['candidates']} Moments from {len(report['games'])} games")
+    print(f"moments: {out} and {md}")
+    return 0
 
 
 def print_audit(report: dict[str, Any]) -> None:
