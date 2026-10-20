@@ -1,4 +1,4 @@
-"""Command-line interface: ``zantine play ...``."""
+"""Command-line interface: ``zantine play ...``, ``zantine replay``, ``zantine calibrate``."""
 
 from __future__ import annotations
 
@@ -56,9 +56,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     r = sub.add_parser("replay", help="write a static HTML replay of a transcript (not scored)")
     r.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
     r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
+    _add_calibrate_parser(sub)
     args = parser.parse_args(argv)
     if args.command == "replay":
         return replay(parser, args.transcript, args.out)
+    if args.command == "calibrate":
+        return calibrate(parser, args)
 
     try:
         config = GameConfig(seed=args.seed, round_cap=args.round_cap, num_impostors=args.impostors)
@@ -83,6 +86,67 @@ def replay(parser: argparse.ArgumentParser, transcript: Path, out: Path | None) 
     out = out or transcript.with_suffix(".html")
     view = write_replay(transcript, out)
     print(f"replay: {out} ({len(view['rounds'])} frames, {len(view['meetings'])} Meetings)")
+    return 0
+
+
+def _add_calibrate_parser(sub: Any) -> None:
+    c = sub.add_parser(
+        "calibrate", help="solo task calibration: each Task kind alone, N trials per Model"
+    )
+    c.add_argument("--models", required=True, help="comma-separated Model IDs (models.toml)")
+    c.add_argument("--kinds", help="comma-separated Task kinds (default: every registered kind)")
+    c.add_argument("--trials", type=int, default=60, help="trials per kind per Model (default 60)")
+    c.add_argument("--seed", type=int, default=0, help="master seed for the trial variants")
+    c.add_argument("--out", type=Path, default=Path("runs/calibration"), help="results directory")
+    mode = c.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--dry-run", action="store_true", help="use each kind's reference solver ($0, no API)"
+    )
+    mode.add_argument(
+        "--live", action="store_true", help="allow paid API calls (also needs ZANTINE_LIVE=1)"
+    )
+    c.add_argument(
+        "--spend-cap",
+        type=float,
+        default=5.0,
+        help="hard limit in USD on calibration spend recorded in --out, earlier runs "
+        "included (default 5)",
+    )
+
+
+def calibrate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from zantine import calibration as cal
+    from zantine.harness.ledger import Ledger
+    from zantine.tasks import task_kind_names
+
+    models = [m.strip() for m in args.models.split(",") if m.strip()]
+    kinds = [k.strip() for k in args.kinds.split(",")] if args.kinds else task_kind_names()
+    try:
+        ledger = Ledger(args.spend_cap)
+        if args.dry_run:
+            solvers = cal.reference_solvers()
+        else:
+            # The cap covers the whole results directory, so resuming never resets it.
+            ledger.spent_usd = cal.spent_usd(args.out / cal.TRIALS_FILE)
+            solvers = cal.model_solvers(models, ledger, live=args.live)
+        run = cal.calibrate(
+            models,
+            kinds,
+            out=args.out,
+            solvers=solvers,
+            trials=args.trials,
+            seed=args.seed,
+            ledger=ledger,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(cal.render_markdown(run.summary), end="")
+    if not args.dry_run:
+        print(f"spent ${ledger.spent_usd:.4f} of ${ledger.spend_cap_usd:.2f} cap (all runs)")
+    print(f"results: {args.out / cal.TRIALS_FILE}, {args.out / cal.SUMMARY_MD}")
+    if run.aborted:
+        print(f"ABORTED ({run.aborted}): {run.detail}")
+        return 1
     return 0
 
 

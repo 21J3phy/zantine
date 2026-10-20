@@ -20,6 +20,11 @@ ZANTINE_LIVE=1 ANTHROPIC_API_KEY=... uv run zantine play --seed 7 \
 ZANTINE_LIVE=1 XAI_API_KEY=... uv run zantine play --seed 7 \
     --bots 'live:grok-4.7*2,scripted*8' --live --spend-cap 10 --effort medium
 ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test: one short game per Model whose key is set (paid)
+
+# Solo task calibration: each Task kind alone, 60 fresh variants per Model.
+uv run zantine calibrate --models claude-fable-5-1,claude-opus-5-5 --dry-run   # reference solvers, $0
+ZANTINE_LIVE=1 ANTHROPIC_API_KEY=... uv run zantine calibrate --models claude-fable-5-1 \
+    --kinds sort_list,lookup_value --trials 60 --seed 1 --out runs/calibration --live --spend-cap 5
 ```
 
 ## Module map (`src/zantine/`)
@@ -47,6 +52,7 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test: one short game 
 | `tasks/steps.py` | Solo step kinds (`sort_list`, `lookup_value`): the dependent-solo family. |
 | `tasks/graph.py` | `Task` (a placed instance), `TaskGraph` (dependencies), `build_task_graph` (seeded). |
 | `tasks/trial.py` | `run_solo_trial(s)`: one Task alone, outside a game (solo calibration). |
+| `calibration.py` | Solo task calibration: `calibrate(models, kinds, trials=60, seed, ...)` over paired trial seeds, resumable `trials.jsonl`, exact Clopper-Pearson bounds, keep/simplify decisions, cost per Model (`summary.json`/`summary.md`). |
 | `rules/__init__.py` | `default_modules()` / `default_rules()`: the list of modules a normal game uses. |
 | `engine.py` | `Game`: the Round loop, asking seats (with the Invalid Action retry), contexts, recording. |
 | `meeting.py` | Meeting flow, secret vote, `tally()`, Ejection. |
@@ -58,6 +64,7 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test: one short game 
 | `seats/registry.py` | Named controller factories and the `--bots` spec parser. |
 | `seats/live.py` | `HarnessSeat`: a Seat played by a live Model through the Neutral Harness. |
 | `harness/neutral.py` | **The Neutral Harness**: system prompt, tools, memory format, request building and reply parsing. Everything a Model sees is defined here. |
+| `harness/solo.py` | **The Solo Harness** (calibration only): one standalone Task, one `submit_answer` tool with the in-game answer schema, one retry for unusable replies. `SOLO_HARNESS_VERSION`. |
 | `harness/summarizer.py` | Fixed, deterministic, pure-code condensation of older public Meeting observations; private observations stay verbatim. |
 | `harness/provider.py` | Provider-adapter interface: `HarnessRequest` → `ProviderResponse` with normalized `Usage`; `@register_provider`. |
 | `harness/anthropic_adapter.py` | Anthropic Messages API adapter (Fable 5.1, Opus 5.5): effort, prompt caching, usage incl. thinking tokens. |
@@ -68,7 +75,7 @@ ZANTINE_LIVE=1 uv run pytest --live       # the live smoke test: one short game 
 | `harness/ledger.py` | `Ledger`: every paid call goes through `Ledger.send` (spend cap check, call, price, record). |
 | `harness/live.py` | `play_live(...)`: the live gate, wiring live Seats into a game, clean abort, the `cost` record. |
 | `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
-| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`. |
+| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`, `zantine calibrate` (`--dry-run`, or `--live` + `--spend-cap`). |
 | `replay/model.py` | Demo replay viewer: transcript records → Round-by-Round view model (map positions, moves, bodies, log, Meetings). Reads transcripts only. |
 | `replay/render.py`, `replay/viewer.html` | Writes the view model into one self-contained HTML page (inline JS/CSS, no network). |
 
@@ -135,6 +142,15 @@ Hooks for later rules: `Task.fake` marks a Fake Task (shown and worked like a re
 Anthropic specifics (`anthropic_adapter.py`): `output_config.effort` from `models.toml` (Fable 5.1 at `medium`); `thinking` omitted (always on; disabling is a 400); `tool_choice` `auto` with parallel calls off (forced tool choice is a 400 on Fable 5.1, so the prompt asks for exactly one call and tools are `strict`); cache breakpoints at the end of the system prompt (covers tools + system, shared by every Seat on the Model) and on the last memory block; thinking tokens from `usage.output_tokens_details.thinking_tokens`. No refusal `fallbacks`: they would let a different Model play the Seat, so a refusal is an Invalid Action instead.
 
 OpenAI-compatible specifics (`openai_adapter.py`, and xAI/Meta through it): Responses API; system prompt in `instructions`, memory blocks then the tail as `input_text` parts of one user message (implicit prefix caching); `reasoning.effort`; function tools `strict`, `tool_choice` `auto`, `parallel_tool_calls` off; `store` off. Usage: cache reads and writes are subtracted from `input_tokens`; xAI's `reasoning_tokens` are added to `output_tokens` (OpenAI's and Meta's already include them). Google specifics (`google_adapter.py`): `system_instruction`, memory + tail as parts of one user turn, `thinking_config.thinking_level`, `function_calling_config` `AUTO`, `parameters_json_schema`, automatic function calling off; output = `candidates_token_count` + `thoughts_token_count`.
+
+**Solo calibration** (`calibration.py`, `harness/solo.py`; `docs/plan.md` "Task catalog"): every Task kind is run alone 60 times per Model, outside any game; a kind is kept only if every Model gets all 60 right, so low Productivity reflects teamwork, not raw ability.
+
+- *Variants.* Trial `i` of kind `k` uses `trial_seed(seed, k, i)` (first 63 bits of SHA-256 over `zantine-calibration/v1:{seed}:{k}:{i}`) and is generated exactly as `run_solo_trial` does (`generate(GameRng(s).fork("solo/<kind>"))`, then `solo_brief`). Seeds differ across kinds and trials; the Model is not in the seed, so every Model gets the same 60 variants (paired design).
+- *Solo Harness.* `SOLO_SYSTEM_PROMPT` says it is one standalone Task; the tail is the brief as one sorted-key JSON object (as Tasks appear in game contexts) and the request. The only tool, `submit_answer`, reuses the `answer` schema of the in-game `tasks.work` tool. Replies are parsed with the Neutral Harness's rules; an unusable reply (refusal, no or several tool calls, bad answer shape) gets one retry with the reason, like an Invalid Action, and a second one is a failed trial with the reason recorded. Wrong answers are never retried. It is separate from the Neutral Harness; bump `SOLO_HARNESS_VERSION` when anything it shows changes.
+- *Kinds without a solo form.* A kind whose `solo_brief` raises `NotImplementedError` (e.g. `chain_relay`) is reported as `not_solo_calibratable` with the reason, at no cost. A multi-seat kind can opt in by overriding `solo_brief` with the full information of every seat.
+- *Records and resume.* `<out>/trials.jsonl` gets one line per trial as it finishes (`status: done`, with `brief`, `answer`, `expected`, `correct`, `error`, `attempts`, calls, tokens, `cost_usd`), keyed by solver (`solo-v<N>` or `reference`), master seed, kind, Model, trial and seed. Reruns skip finished trials. Calls that did not finish a trial are still logged for cost: `provider_error` (transient; redone next run) or `aborted` (spend cap or fatal API error; the run stops cleanly).
+- *Report.* `summary.json` / `summary.md`, per kind × Model: `n`, `failures`, `unusable`, `failed_trials`, verdict (`pass` iff 0 failures over all trials, `fail` on any failure, else `incomplete`), and exact Clopper-Pearson bounds on the failure rate: `upper_95_one_sided` solves P(X ≤ k | n, U) = 0.05 (0/60 → 1 − 0.05^(1/60) = 0.0487), `ci_95_two_sided` uses 0.025 per tail (0/60 → [0, 0.0596]); `rule_of_three` (3/n) for reference. Per kind: `keep`, `simplify` (any Model failed; lists them), `incomplete`, or `not_solo_calibratable`. Per Model: calls, tokens and cost.
+- *Cost.* Paid calls need `--live` plus `ZANTINE_LIVE=1` and go through a `Ledger` with `purpose="calibration"`, `phase=<kind>`. The CLI's `--spend-cap` (default $5) covers everything recorded in `--out`, earlier runs included, so resuming never resets it. `--dry-run` uses each kind's reference `solve` at $0.
 
 **Setup generation**: `scenario.build_scenario(config, rng)` returns the `Scenario` (`map`, `names`, `roles`, `seat_order`); the engine only consumes it, via `Game(..., scenario=)` or by building one from `rng.fork("scenario")`. `Game` takes controllers already in seat order; `Scenario.seat(lineup)` rearranges a lineup (spec order) into seats, which `runner.new_game` does for you. Add new generated content (e.g. Task codes) with its own `rng.fork(...)` so existing parts of a seed stay unchanged, and bump `SCENARIO_VERSION` whenever a change alters what an existing seed generates. Tests that need known room names use `tests/helpers.make_game`, which plays on `classic_scenario()` (`tiny_map()`, colour names, identity seat order).
 
