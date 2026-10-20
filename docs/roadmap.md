@@ -86,7 +86,7 @@ Exact IDs should be re-checked before each run.
 
 ### Claim Audit pipeline
 
-1. An extractor model turns **Meeting** speech into structured **Claims**.
+1. A fixed-weight open-weight model from outside the pool turns **Meeting** speech into structured **Claims**.
 2. Plain code checks each **Claim** against the game record.
 3. [Jev](https://www.braintrust.dev/articles/what-is-jev) (TypeSafe, a lab outside the pool) makes the fuzzy judgments: is this a **Claim** or a hedge, was it challenged, and who is this message pushing to eject.
 4. **Planted Claims** validate the pipeline. These are engine-generated messages whose truth is already known, including hedged and subtle phrasings.
@@ -154,7 +154,7 @@ This tests whether a player who can talk more ends up steering the team, even wh
 - [ ] **Games per configuration:** how many repeats does each **Impostor Pairing** need? Measure the variance in the ~$400 micro-pilot (~10 games), then size the full v1 for lab credits.
 - [x] **Task catalog:** settled. See `plan.md` → Task catalog. Still open: how many **Tasks** per crewmate (tune in the pilot).
 - [ ] **Map and kill details:** room layout, kill cooldown length, and the exact round cap.
-- [ ] **Claim extractor:** which model extracts **Claims**, and whether to use two extractors from different labs.
+- [x] **Claim extractor:** a fixed-weight open-weight model from outside the pool; fall back to two pool models from different labs if it isn't accurate enough. Still open: which specific model (choose after testing on **Planted Claims**).
 - [ ] **Teamwork metric:** **Productivity**, **Vote Pull** and **Compliance** cover part of "teamwork". Is anything else needed, such as information sharing?
 - [ ] **Model pool checks:** confirm `gpt-6-astra` against OpenAI's own docs, and record Opus 5.5 pricing.
 - [x] **Publishing:** open engine and rules; tasks, codes, maps and names generated from a seed for each game; sample transcripts published; official seeds kept private. No leaderboard or composite score; results are published as graphs.
