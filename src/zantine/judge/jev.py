@@ -16,9 +16,10 @@ endpoint says answered, the prompt version and hash.
 
 Safety:
 - Redirects are refused, so the API key is never sent to another host.
-- A reply without valid ``usage`` is charged at the worst-case estimate for its
-  request (and flagged ``usage_estimated``) rather than as free, so the spend
-  cap still holds.
+- Every 200 reply is priced before its answers are read: a reply without valid
+  ``usage`` (including one that isn't JSON or has no ``answers``) is charged at
+  the worst-case estimate for its request (and flagged ``usage_estimated``),
+  never as free, so retries and later batches still draw on the spend cap.
 
 Live gate: like live Seats, a Jev call needs an explicit flag plus
 ``ZANTINE_LIVE=1``, and the key comes from ``TYPESAFE_API_KEY``.
@@ -51,7 +52,8 @@ from zantine.judge.questions import Batch, JudgmentError
 _FATAL_STATUSES = {400, 401, 403, 404, 413, 415, 422}
 _BYTES_PER_TOKEN = 3  # same conservative estimate as ModelSpec.worst_case_cost
 
-Post = Callable[[str, dict[str, str], dict[str, Any]], dict[str, Any]]
+# POST a JSON payload; returns the raw body of a 200 reply (parsed by the adapter).
+Post = Callable[[str, dict[str, str], dict[str, Any]], str]
 
 
 @dataclass(frozen=True)
@@ -101,13 +103,19 @@ class JevAdapter(ProviderAdapter):
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         url = self.spec.base_url.rstrip("/") + "/systemone"
-        body = self.post(url, headers, self.build_payload(request))
-        if not isinstance(body, dict) or not isinstance(body.get("answers"), dict):
-            raise ProviderError("malformed response: no answers object", fatal=False)
+        text = self.post(url, headers, self.build_payload(request))
+        # A 200 reply may have been billed whatever its shape, so it always becomes a
+        # priced response: usage first, answers validated later by the judge.
+        try:
+            body = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            body = None
+        if not isinstance(body, dict):
+            body = {}
         usage, estimated = _usage(body.get("usage"), request.text_size())
         return ProviderResponse(
             tool_calls=(),
-            text=json.dumps(body["answers"]),
+            text=json.dumps(body.get("answers")),
             stop_reason="end_turn",
             usage=usage,
             raw={"model": body.get("model"), "usage_estimated": estimated},
@@ -139,15 +147,15 @@ def http_post(
     headers: dict[str, str],
     payload: dict[str, Any],
     opener: urllib.request.OpenerDirector | None = None,
-) -> dict[str, Any]:
-    """POST JSON with the standard library, never following redirects."""
+) -> str:
+    """POST JSON with the standard library, never following redirects; returns the body."""
     opener = opener or urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
     )
     try:
         with opener.open(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            return resp.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             raise ProviderError(
@@ -157,7 +165,7 @@ def http_post(
         raise ProviderError(
             f"HTTP {exc.code}: {detail}", fatal=exc.code in _FATAL_STATUSES, status=exc.code
         ) from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (urllib.error.URLError, TimeoutError) as exc:
         raise ProviderError(f"{type(exc).__name__}: {exc}", fatal=False) from exc
 
 

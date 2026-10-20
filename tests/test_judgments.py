@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import urllib.request
@@ -12,7 +13,7 @@ from typing import Any
 import pytest
 
 from helpers import make_game
-from zantine.audit import PatternExtractor, run_audit
+from zantine.audit import PatternExtractor, ScriptedExtractor, claim, run_audit
 from zantine.audit.record import build_record
 from zantine.cli import main
 from zantine.harness.ledger import Ledger, SpendCapReached
@@ -24,6 +25,7 @@ from zantine.judge import (
     KeywordJudge,
     Question,
     ScriptedJudge,
+    batches,
     choice,
     noul,
     parse_answers,
@@ -50,8 +52,22 @@ SPEECH = {
 VOTES = {RED: PINK, BLUE: PINK, PINK: RED, ORANGE: RED, 5: PINK, 6: PINK, 7: PINK, 8: None, 9: RED}
 
 
-def vote_game(speech: dict[int, str] | None = None) -> list[dict[str, Any]]:
-    """Red kills Green in Weapons in Round 2 with Orange watching; Orange reports in Round 3."""
+class PassBot(PlaybookBot):
+    """Says ``lines[pass_index - 1]`` in Meeting 1."""
+
+    def __init__(self, lines: list[str], **kw: Any) -> None:
+        super().__init__(**kw)
+        self.lines = lines
+
+    def speak(self, ctx: Any) -> str:
+        return self.lines[ctx.pass_index - 1]
+
+
+def vote_game(speech: dict[int, str | list[str]] | None = None) -> list[dict[str, Any]]:
+    """Red kills Green in Weapons in Round 2 with Orange watching; Orange reports in Round 3.
+
+    A list of speech gives one line per pass.
+    """
     speech = SPEECH | (speech or {})
     actions = {
         RED: {1: Move("Weapons"), 2: Kill(GREEN)},
@@ -60,14 +76,17 @@ def vote_game(speech: dict[int, str] | None = None) -> list[dict[str, Any]]:
         PINK: {1: Move("Storage")},
         ORANGE: {1: Move("Weapons"), 3: Report()},
     }
-    bots = {
-        seat: PlaybookBot(
-            actions=actions.get(seat),
-            votes={1: VOTES[seat]} if seat in VOTES else None,
-            speech={1: speech[seat]} if seat in speech else None,
-        )
-        for seat in range(10)
-    }
+    bots: dict[int, PlaybookBot] = {}
+    for seat in range(10):
+        kw: dict[str, Any] = {
+            "actions": actions.get(seat),
+            "votes": {1: VOTES[seat]} if seat in VOTES else None,
+        }
+        line = speech.get(seat)
+        if isinstance(line, list):
+            bots[seat] = PassBot(line, **kw)
+        else:
+            bots[seat] = PlaybookBot(speech={1: line} if line else None, **kw)
     game = make_game(bots=bots, kill_cooldown=0)
     for _ in range(3):
         game.play_round()
@@ -180,6 +199,136 @@ def test_judgments_never_change_the_game_record() -> None:
     for h, k in zip(hostile["seats"], honest["seats"], strict=True):
         for field in ("floor_share", "votes_against", "suspicion", "lies"):
             assert h[field] == k[field], field
+
+
+def test_an_unjudged_later_push_unresolves_the_position(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed split batch can't leave a stale earlier position in the metrics."""
+    monkeypatch.setattr(batches, "MAX_QUESTIONS", 4)
+    speech: dict[int, str | list[str]] = {
+        RED: ["I accuse Pink.", "I accuse Pink.", "I accuse Orange."],
+        PINK: ["I accuse Red.", "I accuse Red.", "Nothing to report."],
+    }
+    records = vote_game(speech)
+    rec = build_record(records)
+    switch = next(st for st in rec.statements if st.speaker == RED and st.pass_index == 3)
+
+    def answer(batch: Batch, qid: str, q: Question) -> Any:
+        if qid == f"push_s{switch.seq}":
+            raise JudgmentError("garbled")
+        return KeywordJudge().judge(Batch(batch.id, batch.state, {qid: q}))[qid]
+
+    report = judged(records, ScriptedJudge(answer))
+    assert len(report["calls"]) > 2 and report["batch_errors"] == 1 and not report["complete"]
+    # Every Seat with a statement in the failed chunk is unresolved, and has no position.
+    unresolved = {u["seat"]: u["unjudged_statement_seq"] for u in report["unresolved_positions"]}
+    assert unresolved[RED] == switch.seq
+    assert not {p["seat"] for p in report["positions"]} & set(unresolved)
+    red = seat(report, RED)
+    assert red["unresolved_positions"] == 1 and red["positions"] == 0
+    # The stale Pink position would have scored 4/7 Vote Pull and one Misdirection.
+    assert red["vote_pull"] is None and red["vote_pull_ballots"] == 0
+    assert (red["pushed_crewmate"], red["misdirections"]) == (0, 0)
+
+    healthy = judged(records, KeywordJudge())
+    targets = {p["seat"]: p["target"] for p in healthy["positions"]}
+    assert healthy["unresolved_positions"] == []
+    assert targets[RED] == ORANGE
+    # A judged "no_one" later ("Nothing to report.") doesn't retract a position.
+    assert targets[PINK] == RED
+
+
+def test_claims_sharing_a_quote_keep_their_own_meaning() -> None:
+    quote = "I was in Medbay. Maybe I did not kill Green."
+    records = vote_game({RED: quote})
+    names = build_record(records).names
+    red, green = names[RED], names[GREEN]
+    extractor = ScriptedExtractor(
+        {
+            quote: {
+                "claims": [
+                    claim("location", red, quote, room="Medbay"),
+                    claim("kill", red, quote, object=green, negated=True),
+                ]
+            }
+        }
+    )
+    audit = run_audit(records, extractor)
+    kinds = {i: c["kind"] for i, c in enumerate(audit["claims"])}
+    assert set(kinds.values()) == {"location", "kill"}
+    assert {c["verdict"]["label"] for c in audit["claims"]} == {"lie"}
+
+    def by_meaning(batch: Batch, qid: str, q: Question) -> Any:
+        if q.about["judgment"] == "push":
+            return choice(q.options, "no_one")
+        entry = next(c for c in batch.state["claims"] if c["id"] == q.about["claim"])
+        location = entry["meaning"]["kind"] == "location"
+        if q.about["judgment"] == "asserted":
+            return noul(0.9 if location else 0.1)  # the kill denial is hedged ("Maybe")
+        return noul(0.9 if location else 0.1)  # a later statement disputes only the location
+
+    judge = ScriptedJudge(by_meaning)
+    report = run_judgments(records, audit, judge)
+    for row in report["claims"]:
+        location = kinds[row["index"]] == "location"
+        assert row["asserted"]["value"] == (0.9 if location else 0.1)
+        if row["challenge"] == "judged":
+            assert row["challenged"] is location
+    entries = [c for b in judge.batches for c in b.state["claims"]]
+    for entry in entries:
+        assert set(entry) <= {"id", "statement", "quote", "meaning"}  # never the verdict
+    assert {json.dumps(e["meaning"], sort_keys=True) for e in entries} == {
+        json.dumps(
+            {
+                "kind": "location",
+                "subject": red,
+                "object": None,
+                "room": "Medbay",
+                "round": None,
+                "task": None,
+                "negated": False,
+            },
+            sort_keys=True,
+        ),
+        json.dumps(
+            {
+                "kind": "kill",
+                "subject": red,
+                "object": green,
+                "room": None,
+                "round": None,
+                "task": None,
+                "negated": True,
+            },
+            sort_keys=True,
+        ),
+    }
+
+
+def test_an_audit_must_come_from_this_transcript() -> None:
+    records = vote_game()
+    audit = run_audit(records, PatternExtractor())
+    # Matching audit, also after a JSON round trip (as read back from disk).
+    ok = run_judgments(records, json.loads(json.dumps(audit)), KeywordJudge())
+    assert ok["complete"] and len(ok["transcript_sha256"]) == 64
+
+    # Same seed, different game: an idle run with no Meetings.
+    idle = make_game(kill_cooldown=0)
+    for _ in range(3):
+        idle.play_round()
+    assert idle.config.seed == make_game().config.seed
+    with pytest.raises(ValueError, match="statements"):
+        run_judgments(idle.transcript.records, audit, KeywordJudge())
+
+    orphan = copy.deepcopy(audit)
+    orphan["claims"][0]["statement_seq"] = 10**9
+    with pytest.raises(ValueError, match="no matching statement"):
+        run_judgments(records, orphan, KeywordJudge())
+
+    forged = copy.deepcopy(audit)
+    lie = next(c for c in forged["claims"] if c["verdict"]["label"] == "lie")
+    lie["verdict"].update(truth="true", label="true", lie=False, proof=[])
+    with pytest.raises(ValueError, match="verdict"):
+        run_judgments(records, forged, KeywordJudge())
 
 
 # Injection --------------------------------------------------------------------------
@@ -347,9 +496,9 @@ def test_missing_or_bad_usage_is_never_free(usage: Any) -> None:
     ledger = Ledger(1e-5)
     batch = _batch()
 
-    def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+    def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
         answers = {"n": noul(0.5), "c": choice(("Red", "skip"), "Red")}
-        return {"model": "jev-1.13.0", "answers": answers, "usage": usage}
+        return json.dumps({"model": "jev-1.13.0", "answers": answers, "usage": usage})
 
     spec = JevSpec()
     judge = JevJudge(spec, ledger, JevAdapter(spec, post, "test-key"))
@@ -359,6 +508,50 @@ def test_missing_or_bad_usage_is_never_free(usage: Any) -> None:
     assert ledger.spent_usd > 0
     assert all(r.cost_usd > 0 for r in ledger.records)
     assert judge.info()["usage_estimated"]
+
+
+GOOD_USAGE = {"input_tokens": 1000, "output_tokens": 0}
+
+
+@pytest.mark.parametrize(
+    ("body", "estimated"),
+    [
+        (json.dumps({"model": "jev-1.13.0", "answers": [], "usage": GOOD_USAGE}), False),
+        (json.dumps({"model": "jev-1.13.0", "usage": GOOD_USAGE}), False),
+        (json.dumps({"model": "jev-1.13.0", "answers": []}), True),
+        (json.dumps(["not", "an", "object"]), True),
+        ("<html>gateway</html>", True),
+    ],
+)
+def test_malformed_replies_are_still_billed(body: str, estimated: bool) -> None:
+    """A 200 reply whose answers are unusable is priced; retries and later batches pay too."""
+    records = vote_game()
+
+    def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
+        return body
+
+    spec = JevSpec()
+    ledger = Ledger(1.0)
+    judge = JevJudge(spec, ledger, JevAdapter(spec, post, "test-key"))
+    report = judged(records, judge, ledger=ledger)
+    assert report["batch_errors"] == len(report["calls"]) and not report["complete"]
+    # Every batch was tried twice (one retry), and every attempt was charged.
+    assert len(ledger.records) == 2 * len(report["calls"])
+    assert all(r.ok and r.cost_usd > 0 for r in ledger.records)
+    if not estimated:
+        assert all(r.input_tokens == 1000 for r in ledger.records)
+    assert bool(judge.info()["usage_estimated"]) is estimated
+
+    # Repeated runs on one ledger: the cap stops them instead of letting them continue free.
+    capped = Ledger(0.002)
+    judge = JevJudge(spec, capped, JevAdapter(spec, post, "test-key"))
+    for _ in range(50):
+        report = judged(records, judge, ledger=capped)
+        if report["aborted"]:
+            break
+    assert report["aborted"]["reason"] == "spend_cap"
+    # (The fake reports 1000 tokens even for small requests, so the last call may overshoot.)
+    assert 0 < capped.spent_usd <= capped.spend_cap_usd + 1000 * 0.042e-6
 
 
 def test_redirects_are_refused_with_the_key() -> None:
@@ -452,14 +645,14 @@ def _jev(posted: list[dict[str, Any]], ledger: Ledger | None = None) -> JevJudge
     keyword = KeywordJudge()
     batches: dict[str, Batch] = {}
 
-    def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+    def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
         assert url == "https://api.typesafe.ai/v1/systemone"
         posted.append(payload)
         state, questions = payload["state"], payload["questions"]
         about = batches[json.dumps(state, sort_keys=True)]
         answers = keyword.judge(Batch(about.id, state, {q: about.questions[q] for q in questions}))
         usage = {"input_tokens": 1000, "output_tokens": 40}
-        return {"model": "jev-1.13.0", "answers": answers, "usage": usage}
+        return json.dumps({"model": "jev-1.13.0", "answers": answers, "usage": usage})
 
     judge = JevJudge(spec, ledger or Ledger(1.0), JevAdapter(spec, post, "test-key"))
     original = judge.judge

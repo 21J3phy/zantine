@@ -30,7 +30,7 @@ from typing import Any
 from zantine.audit.record import GameRecord, StatementRecord
 from zantine.judge.questions import CHOICE, NOUL, Batch, Question
 
-PROMPT_VERSION = "judgments-1"
+PROMPT_VERSION = "judgments-2"
 # Split a batch above this many questions (each question adds input tokens).
 MAX_QUESTIONS = 64
 SKIP, NO_ONE = "skip", "no_one"
@@ -51,14 +51,14 @@ PUSH = (
     "argues for no vote at all." + SAFETY
 )
 ASSERTED = (
-    "Claim {cid} quotes words from statement {sid}, said by {speaker}. Does {speaker} assert "
-    "claim {cid} as a fact, rather than hedging it (for example 'I think', 'maybe', 'not sure') "
-    "or offering it as an opinion?" + SAFETY
+    "Claim {cid} quotes words from statement {sid}, said by {speaker}; its meaning field says "
+    "which proposition it is. Does {speaker} assert claim {cid} as a fact, rather than "
+    "hedging it (for example 'I think', 'maybe', 'not sure') or offering it as an opinion?" + SAFETY
 )
 CHALLENGED = (
-    "Claim {cid} was made by {speaker} in statement {sid}. Does any statement in "
-    "later_statements dispute, contradict, deny or question claim {cid}, or accuse {speaker} "
-    "of lying about it?" + SAFETY
+    "Claim {cid} was made by {speaker} in statement {sid}; its meaning field says which "
+    "proposition it is. Does any statement in later_statements dispute, contradict, deny or "
+    "question that proposition, or accuse {speaker} of lying about it?" + SAFETY
 )
 ASSERTED_CRITERIA = {
     "true": "Stated as a plain fact.",
@@ -85,6 +85,29 @@ def sid(st: StatementRecord) -> str:
 def cid(index: int) -> str:
     """A Claim's id in judgments: its index in the audit's ``claims`` list."""
     return f"c{index}"
+
+
+def claim_data(rec: GameRecord, c: dict[str, Any]) -> dict[str, Any]:
+    """What a Claim says, as the audit structured it, so Claims sharing a quote stay distinct.
+
+    Public fields only: never the verdict, its evidence or its proof.
+    """
+
+    def name(seat: int | None) -> str | None:
+        return None if seat is None else rec.names.get(seat, f"Seat {seat}")
+
+    return {
+        "quote": c["quote"],
+        "meaning": {
+            "kind": c["kind"],
+            "subject": name(c["subject"]),
+            "object": name(c["object"]),
+            "room": c["room"],
+            "round": c["claimed_round"],
+            "task": c["task"],
+            "negated": c["negated"],
+        },
+    }
 
 
 def spoken(statements: Iterable[StatementRecord]) -> list[StatementRecord]:
@@ -130,7 +153,7 @@ def meeting_batches(
             for st in statements
         ],
         "claims": [
-            {"id": cid(i), "statement": f"s{c['statement_seq']}", "quote": c["quote"]}
+            {"id": cid(i), "statement": f"s{c['statement_seq']}", **claim_data(rec, c)}
             for i, c in claims
             if c["statement_seq"] in by_seq
         ],
@@ -180,7 +203,7 @@ def challenge_batch(
         "meeting": st.meeting,
         "speaker": speaker,
         "statement": {"id": sid(st), "text": st.text},
-        "claims": [{"id": cid(i), "quote": c["quote"]} for i, c in lies],
+        "claims": [{"id": cid(i), **claim_data(rec, c)} for i, c in lies],
         "later_statements": [
             {"id": sid(s), "speaker": rec.names[s.speaker], "text": s.text} for s in later
         ],

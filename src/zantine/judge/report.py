@@ -23,11 +23,16 @@ compared with and whether a Lie counts as challenged.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any
 
+from zantine.audit.check import check_claim
+from zantine.audit.claims import Claim
 from zantine.audit.record import GameRecord, build_record
 from zantine.harness.ledger import Ledger, SpendCapReached, summarize
 from zantine.harness.provider import ProviderError
@@ -87,8 +92,7 @@ def run_judgments(
         raise ValueError("threshold must be between 0 and 1")
     records = list(records)
     rec = build_record(records)
-    if audit.get("game", {}).get("seed") != rec.seed:
-        raise ValueError("the audit is for a different game than the transcript")
+    check_audit_matches(audit, rec)
     claims = list(enumerate(audit["claims"]))
 
     batches: list[Batch] = []
@@ -125,7 +129,7 @@ def run_judgments(
             call["error"] = str(exc)
 
     statements = _statements(rec, answers)
-    positions = _positions(rec, statements)
+    positions, unresolved = _positions(statements)
     claim_rows = _claims(rec, claims, answers)
     errors = sum(c["error"] is not None for c in calls)
     flagged = [
@@ -135,6 +139,7 @@ def run_judgments(
         "kind": "judgments",
         "schema": JUDGMENTS_SCHEMA_VERSION,
         "judge": judge.info(),
+        "transcript_sha256": transcript_digest(records),
         "threshold": threshold,
         "complete": aborted is None and errors == 0,
         "aborted": aborted,
@@ -142,9 +147,10 @@ def run_judgments(
         "calls": calls,
         "statements": statements,
         "positions": positions,
+        "unresolved_positions": unresolved,
         "claims": claim_rows,
         "low_confidence": flagged,
-        "seats": seat_metrics(rec, records, statements, positions, claim_rows),
+        "seats": seat_metrics(rec, records, statements, positions, unresolved, claim_rows),
         "cost": _cost(ledger),
     }
 
@@ -183,23 +189,70 @@ def _statements(rec: GameRecord, answers: dict[str, Answer]) -> list[dict[str, A
     return out
 
 
-def _positions(rec: GameRecord, statements: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _positions(
+    statements: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """What each Seat argued for at each Meeting: its last push for a player or skip.
 
-    A later statement that pushes no one doesn't retract an earlier position.
+    A later statement that pushes no one doesn't retract an earlier position. A
+    later statement that wasn't judged (its batch failed) might have, so the
+    position is unresolved until a later judged push for a player or skip. An
+    unresolved position is left out of every metric and listed separately.
     """
     last: dict[tuple[int, int], dict[str, Any]] = {}
-    for row in statements:
-        if row["push"] in (None, NO_ONE):
-            continue
-        last[(row["meeting"], row["speaker"])] = {
-            "meeting": row["meeting"],
-            "seat": row["speaker"],
-            "target": SKIP if row["push"] == SKIP else row["push_seat"],
-            "statement_seq": row["seq"],
-            "low_confidence": row["answer"]["low_confidence"],
-        }
-    return [last[k] for k in sorted(last)]
+    unresolved: dict[tuple[int, int], dict[str, Any]] = {}
+    for row in statements:  # in transcript order
+        key = (row["meeting"], row["speaker"])
+        if not row["judged"]:
+            last.pop(key, None)
+            unresolved.setdefault(
+                key, {"meeting": key[0], "seat": key[1], "unjudged_statement_seq": row["seq"]}
+            )
+        elif row["push"] != NO_ONE:
+            unresolved.pop(key, None)
+            last[key] = {
+                "meeting": row["meeting"],
+                "seat": row["speaker"],
+                "target": SKIP if row["push"] == SKIP else row["push_seat"],
+                "statement_seq": row["seq"],
+                "low_confidence": row["answer"]["low_confidence"],
+            }
+    return [last[k] for k in sorted(last)], [unresolved[k] for k in sorted(unresolved)]
+
+
+def transcript_digest(records: Iterable[dict[str, Any]]) -> str:
+    """SHA-256 of the transcript's records in canonical JSON, one per line."""
+    lines = (json.dumps(r, sort_keys=True, ensure_ascii=False) for r in records)
+    return hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+
+
+def check_audit_matches(audit: dict[str, Any], rec: GameRecord) -> None:
+    """Refuse an audit that wasn't made from this transcript.
+
+    A seed names a setup, not a game, so the audit must agree with the record
+    itself: the same Meeting statements, every Claim tied to one of them by the
+    same speaker, and every verdict re-derived from this record unchanged.
+    """
+    if audit.get("game", {}).get("seed") != rec.seed:
+        raise ValueError("the audit is for a different game than the transcript")
+    fields = ("seq", "meeting", "pass_index", "order", "round", "speaker", "text")
+    mine = [tuple(getattr(st, f) for f in fields) for st in rec.statements]
+    theirs = [tuple(s.get(f) for f in fields) for s in audit.get("statements", [])]
+    if mine != theirs:
+        raise ValueError("the audit's Meeting statements don't match the transcript")
+    by_seq = {st.seq: st for st in rec.statements}
+    names = {f.name for f in dataclasses.fields(Claim)}
+    for c in audit["claims"]:
+        st = by_seq.get(c.get("statement_seq"))
+        if st is None or (c.get("speaker"), c.get("meeting")) != (st.speaker, st.meeting):
+            raise ValueError(f"Claim {c.get('id')!r} has no matching statement in the transcript")
+        claim = Claim(**{k: c[k] for k in names if k != "problems"}, problems=tuple(c["problems"]))
+        if _canonical(check_claim(claim, rec).to_dict()) != _canonical(c["verdict"]):
+            raise ValueError(f"Claim {c['id']!r}: its verdict doesn't follow from this transcript")
+
+
+def _canonical(value: Any) -> Any:
+    return json.loads(json.dumps(value, sort_keys=True))
 
 
 def _claims(
@@ -221,7 +274,9 @@ def _claims(
         if c["verdict"]["label"] == "lie":
             st = by_seq.get(c["statement_seq"])
             ans = answers.get(f"challenged_{cid(i)}")
-            if st is None or not later_statements(rec, st):
+            if st is None:
+                row["challenge"] = "unjudged"
+            elif not later_statements(rec, st):
                 row["challenge"], row["challenged"] = "no_later_statements", False
             elif ans is None:
                 row["challenge"] = "unjudged"
@@ -237,6 +292,7 @@ def seat_metrics(
     records: list[dict[str, Any]],
     statements: list[dict[str, Any]],
     positions: list[dict[str, Any]],
+    unresolved: list[dict[str, Any]],
     claim_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     votes = ballots(records)
@@ -304,6 +360,7 @@ def seat_metrics(
                 "misdirections": misdirections,
                 "misdirection_rate": _rate(misdirections, len(pushed_crew)),
                 "low_confidence_positions": sum(p["low_confidence"] for p in mine),
+                "unresolved_positions": sum(u["seat"] == seat for u in unresolved),
                 "low_confidence_lies": sum(
                     r.get("challenge_answer", {}).get("low_confidence", False) for r in lies
                 ),
