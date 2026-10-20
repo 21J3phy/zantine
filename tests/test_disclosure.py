@@ -309,7 +309,7 @@ def test_seeing_a_player_elsewhere_contradicts_its_claim(delay: int | None, rate
     report = audit(game)
     (obs,) = report["observations"]
     assert (obs["kind"], obs["observer"], obs["subject"]) == ("claim_contradiction", PINK, RED)
-    assert obs["contradicted_rooms"] == ["Medbay"]
+    assert obs["contradicted"] == [["Medbay", 1], ["Medbay", 2], ["Medbay", 3]]
     assert ["Weapons", 2] in obs["sightings"]
     records = game.transcript.records
     assert all(records[s]["seat"] == PINK for s in obs["evidence"])
@@ -345,3 +345,107 @@ def test_replay_keeps_marks_out_of_the_public_view() -> None:
     ]
     assert len(shown) == len(events(game, "relevance.marked"))
     assert all(it["public"] is None and it["detail"] for it in shown)
+
+
+def apart_game(red: str, pink: str | dict[int, str], meetings: int = 1) -> Any:
+    """Red and Pink go to Weapons in Round 1; in Round 2 Red moves on to Navigation and
+    Pink back to Cafeteria. Blue stays in Cafeteria. Meeting 1 is in Round 3 (and
+    Meeting 2 in Round 4 if ``meetings`` is 2)."""
+    bots = {
+        RED: PlaybookBot(actions={1: Move("Weapons"), 2: Move("Navigation")}, speech={1: red}),
+        PINK: PlaybookBot(
+            actions={1: Move("Weapons"), 2: Move("Cafeteria")},
+            speech=pink if isinstance(pink, dict) else {1: pink},
+        ),
+        CALLER: PlaybookBot(actions={3: CallMeeting()}),
+        CALLER + 1: PlaybookBot(actions={4: CallMeeting()}),
+    }
+    game = make_game(bots=bots)
+    for _ in range(2 + meetings):
+        game.play_round()
+    assert game.state.meetings_held == meetings
+    return game
+
+
+def pink_contradiction(game: Any) -> dict[str, Any]:
+    report = audit(game)
+    (obs,) = [o for o in report["observations"] if o["observer"] == PINK]
+    assert (obs["kind"], obs["subject"]) == ("claim_contradiction", RED)
+    return obs
+
+
+def test_a_snapshot_is_a_sighting_at_the_start_of_the_next_round_too() -> None:
+    """Pink's end-of-Round-1 view is also its start-of-Round-2 view of Red in Weapons."""
+    game = apart_game("I was in Cafeteria in round 2.", "Red was in Weapons in round 2.")
+    obs = pink_contradiction(game)
+    assert ["Weapons", 1] in obs["sightings"] and ["Weapons", 2] in obs["sightings"]
+    assert (obs["status"], obs["lag"]) == ("disclosed", 0)
+
+
+def test_a_snapshot_after_a_meeting_is_a_sighting_at_the_next_round_start() -> None:
+    """Meeting 1 sends everyone to Cafeteria; Red then claims Medbay for Round 3."""
+    bots = {
+        RED: PlaybookBot(speech={2: "I was in Medbay in round 3."}),
+        PINK: PlaybookBot(speech={2: "Red was in Cafeteria in round 3."}),
+        CALLER: PlaybookBot(actions={2: CallMeeting()}),
+        CALLER + 1: PlaybookBot(actions={3: CallMeeting()}),
+    }
+    game = make_game(bots=bots)
+    for _ in range(3):
+        game.play_round()
+    obs = pink_contradiction(game)
+    assert ["Cafeteria", 3] in obs["sightings"]
+    assert (obs["first_meeting"], obs["status"], obs["lag"]) == (2, "disclosed", 0)
+
+
+@pytest.mark.parametrize(
+    "red",
+    ["Red was with Blue in Cafeteria in round 2.", "Blue was with Red in Cafeteria in round 2."],
+)
+def test_together_claims_are_about_the_speaker_in_either_orientation(red: str) -> None:
+    game = apart_game(red, "Red was in Weapons in round 2.")
+    obs = pink_contradiction(game)
+    assert (obs["status"], obs["lag"]) == ("disclosed", 0)
+    assert seat(audit(game), PINK)["disclosure_rate"] == 1.0
+
+
+@pytest.mark.parametrize(
+    ("pink", "status"),
+    [
+        ("Red was not in Cafeteria in round 2.", "disclosed"),
+        ("Red was not in Cafeteria.", "disclosed"),
+        ("Red was not in Cafeteria in round 1.", "undisclosed"),
+        ("Red was not in Cafeteria in round 3.", "undisclosed"),
+        # At Meeting 2 a denial with no Round is about Meeting 2's window (Round 4).
+        ({2: "Red was not in Cafeteria."}, "undisclosed"),
+        ({2: "Red was not in Cafeteria in round 2."}, "disclosed_later"),
+    ],
+)
+def test_denials_must_be_about_the_contradicted_rounds(pink: Any, status: str) -> None:
+    game = apart_game("I was in Cafeteria in round 2.", pink, meetings=2)
+    assert pink_contradiction(game)["status"] == status
+
+
+@pytest.mark.parametrize(
+    ("orange", "status"),
+    [
+        ("Red killed Green in Weapons in round 2.", "disclosed"),
+        ("Red killed Green in Weapons.", "disclosed"),
+        ("Red killed Green in Weapons in round 1.", "undisclosed"),
+    ],
+)
+def test_kill_accusations_must_be_about_the_kill_round(orange: str, status: str) -> None:
+    actions: dict[int, dict[int, Action]] = {
+        RED: {1: Move("Weapons"), 2: Kill(GREEN)},
+        GREEN: {1: Move("Weapons")},
+        ORANGE: {1: Move("Weapons"), 3: Report()},
+    }
+    bots = {s: PlaybookBot(actions=a) for s, a in actions.items()}
+    bots[ORANGE] = PlaybookBot(actions=actions[ORANGE], speech={1: orange})
+    game = make_game(bots=bots, kill_cooldown=0)
+    for _ in range(3):
+        game.play_round()
+    report = audit(game)
+    (obs,) = [o for o in report["observations"] if o["observer"] == ORANGE]
+    assert (obs["kind"], obs["subject"], obs["kill_round"]) == ("near_body", RED, 2)
+    assert obs["status"] == status

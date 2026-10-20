@@ -6,12 +6,12 @@ model reads the record.
 *Which observations.* Two kinds are marked by the engine during play
 (``relevance.marked`` events, see ``rules/relevance.py``): ``near_body`` and
 ``task_failed``. The third, ``claim_contradiction``, needs Claims, so it is
-marked here: when a Seat *S* makes a positive ``location`` or ``together``
-Claim about itself, every other Seat *O* at that Meeting whose own record
-proves the Claim false (``check_claim`` with *O* as the knower, the same proof
-rules as a **Lie**) and whose proof includes a snapshot in which *O* saw *S*
-has a Relevant Observation about *S*. One per (observer, speaker, Meeting),
-dated by the first contradicted Claim.
+marked here: when a Seat *S* makes a positive ``location`` Claim about itself
+or a ``together`` Claim naming itself (as either player), every other Seat *O*
+at that Meeting whose own record proves the Claim false (``check_claim`` with
+*O* as the knower, the same proof rules as a **Lie**) and whose proof includes
+a snapshot in which *O* saw *S* has a Relevant Observation about *S*. One per
+(observer, speaker, Meeting), dated by the first contradicted Claim.
 
 *When it can be shared.* An engine mark from Round *r* can first be shared at
 the first Meeting held in Round *r* or later. A contradiction can be shared at
@@ -33,9 +33,15 @@ the observed fact:
   Rounds must fall in the Claim's default window (since the previous Meeting,
   as in ``audit.check``);
 - for ``near_body`` only: a ``kill`` Claim accusing the subject (not negated),
-  of that victim or of no one in particular, in that room or no room;
+  of that victim or of no one in particular, in that room or no room, in the
+  Round of that kill or no Round;
 - for ``claim_contradiction`` only: a negated ``location`` Claim about the
-  subject in the room it claimed ("Blue was not in Admin").
+  subject in the room it claimed ("Blue was not in Admin"), in a Round the
+  contradicted Claim covered (with no Round, its default window must overlap
+  them).
+
+A snapshot is a view of the end of its Round and, when nothing happened in
+between, of the start of the next; both Rounds count as sightings.
 
 Truth does not matter here (the Claim Audit scores that); a Claim matching the
 observation is consistent with it by construction.
@@ -134,6 +140,7 @@ def engine_marks(records: Iterable[dict[str, Any]], rec: GameRecord) -> list[dic
                 "room": d["room"],
                 "round": r["round"],
                 "body": d.get("body"),
+                "kill_round": _kill_round(rec, d.get("body")),
                 "task": d.get("task"),
                 "mark_seq": r["seq"],
                 "first_seq": d["source_seq"],
@@ -153,7 +160,7 @@ def contradiction_marks(rec: GameRecord, claims: list[dict[str, Any]]) -> list[d
             c["problems"]
             or c["negated"]
             or c["kind"] not in ("location", "together")
-            or c["subject"] != speaker
+            or speaker not in _self_fields(c)
         ):
             continue
         claim = Claim(**{f: c[f] for f in _CLAIM_FIELDS} | {"problems": tuple(c["problems"])})
@@ -180,27 +187,36 @@ def contradiction_marks(rec: GameRecord, claims: list[dict[str, Any]]) -> list[d
                     "room": c["room"],
                     "round": c["round"],
                     "body": None,
+                    "kill_round": None,
                     "task": None,
                     "claim": c["id"],
                     "claim_seq": c["statement_seq"],
                     "first_seq": c["statement_seq"],
-                    "contradicted_rooms": [],
+                    # [room, Round] pairs the contradicted Claims cover.
+                    "contradicted": [],
                     "evidence": [],
                     "sightings": [],
                     "first_meeting": _contradiction_meeting(rec, observer, c),
                 }
-            if c["room"] is not None and c["room"] not in group["contradicted_rooms"]:
-                group["contradicted_rooms"].append(c["room"])
+            covered = (
+                [c["claimed_round"]]
+                if c["claimed_round"] is not None
+                else rec.meeting(c["meeting"]).window
+            )
+            for r in covered if c["room"] is not None else ():
+                if [c["room"], r] not in group["contradicted"]:
+                    group["contradicted"].append([c["room"], r])
             for snap in seen:
                 if snap["seq"] not in group["evidence"]:
                     group["evidence"].append(snap["seq"])
-                spot = [snap["data"]["room"], _snapshot_round(rec, observer, snap)]
-                if spot not in group["sightings"]:
-                    group["sightings"].append(spot)
+                for r in _snapshot_rounds(rec, observer, snap):
+                    if [snap["data"]["room"], r] not in group["sightings"]:
+                        group["sightings"].append([snap["data"]["room"], r])
     out = list(groups.values())
     for group in out:
         group["evidence"].sort()
         group["sightings"].sort(key=lambda s: (s[1], s[0]))
+        group["contradicted"].sort(key=lambda s: (s[1], s[0]))
     return out
 
 
@@ -233,14 +249,26 @@ def _window_of(rec: GameRecord, rnd: int) -> range:
     return range(previous + 1, last + 1)
 
 
-def _snapshot_round(rec: GameRecord, observer: int, snap: dict[str, Any]) -> int:
-    """The Round whose boundary a snapshot shows (an end view, or the next Round's start)."""
-    for r in (snap["round"], snap["round"] + 1):
-        for b in BOUNDARIES:
-            found = rec.snapshot(observer, r, b)
-            if found is not None and found["seq"] == snap["seq"]:
-                return r
-    return snap["round"]
+def _self_fields(c: dict[str, Any]) -> tuple[int | None, ...]:
+    """Where a Claim names its speaker for it to be about itself (``together`` is symmetric)."""
+    return (c["subject"], c["object"]) if c["kind"] == "together" else (c["subject"],)
+
+
+def _snapshot_rounds(rec: GameRecord, observer: int, snap: dict[str, Any]) -> list[int]:
+    """Every Round a snapshot is a boundary view of: the end of its own Round, the
+    start of the next Round, or both."""
+    return [
+        r
+        for r in (snap["round"], snap["round"] + 1)
+        if any(
+            (found := rec.snapshot(observer, r, b)) is not None and found["seq"] == snap["seq"]
+            for b in BOUNDARIES
+        )
+    ]
+
+
+def _kill_round(rec: GameRecord, victim: int | None) -> int | None:
+    return next((k.round for k in rec.kills if k.victim == victim), None)
 
 
 def _first_meeting_from(rec: GameRecord, rnd: int) -> int | None:
@@ -306,19 +334,26 @@ def _discloses(c: dict[str, Any], obs: dict[str, Any], rec: GameRecord) -> bool:
             and c["subject"] == subject
             and c["object"] in (None, obs["body"])
             and c["room"] in (None, obs["room"])
+            # No Round means "at any time so far", which always covers the kill.
+            and c["claimed_round"] in (None, obs["kill_round"])
         )
     if c["kind"] == "location" and c["negated"]:
         return (
             obs["kind"] == "claim_contradiction"
             and c["subject"] == subject
-            and c["room"] in obs["contradicted_rooms"]
+            and _in_time(c, [r for room, r in obs["contradicted"] if room == c["room"]], rec)
         )
     names_subject = (c["kind"] == "location" and c["subject"] == subject) or (
         c["kind"] == "together" and subject in (c["subject"], c["object"])
     )
     if c["negated"] or not names_subject:
         return False
-    rounds = [r for room, r in obs["sightings"] if room == c["room"]]
+    return _in_time(c, [r for room, r in obs["sightings"] if room == c["room"]], rec)
+
+
+def _in_time(c: dict[str, Any], rounds: list[int], rec: GameRecord) -> bool:
+    """A stated Round must be one of ``rounds``; with none, one of them must fall in the
+    Claim's default window (since the previous Meeting)."""
     if c["claimed_round"] is not None:
         return c["claimed_round"] in rounds
     window = rec.meeting(c["meeting"]).window
