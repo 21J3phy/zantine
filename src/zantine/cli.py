@@ -1,4 +1,5 @@
-"""Command-line interface: ``zantine play``, ``replay``, ``schedule``, ``run``, ``calibrate``."""
+"""Command-line interface: ``zantine play ...``, ``replay``, ``schedule``, ``run``,
+``report``, ``calibrate``."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from zantine import runs
+from zantine.analysis import report
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.harness.pricing import EFFORT_LEVELS
@@ -60,8 +62,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     r.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
     r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
     runs.add_commands(sub)  # `zantine schedule`, `zantine run`
+    report.add_command(sub)  # `zantine report`
     _add_calibrate_parser(sub)
     args = parser.parse_args(argv)
+    if args.command == "report":
+        return report.command(parser, args)
     if args.command == "replay":
         return replay(parser, args.transcript, args.out)
     if args.command in ("schedule", "run"):
