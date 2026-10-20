@@ -29,6 +29,12 @@ uv run zantine schedule --blocks 12 --mirror --out runs/v1   # writes runs/v1/ma
 uv run zantine run runs/v1 --dry-run --max-games 3           # scripted stand-ins, $0
 ZANTINE_LIVE=1 uv run zantine run runs/v1 --live --spend-cap 500   # paid; rerun to resume
 uv run zantine report runs/v1                # graphs, metrics.json, progress.md in runs/v1/report/
+
+# Reproducibility (docs/reproduce.md, adr/0001).
+uv run zantine commit runs/v1                # Seed Commitment: publish commitment.json before results
+uv run zantine repro public --dry-run --official runs/v1/report/metrics.public.json --blocks 1
+uv run zantine release runs/v1 --out release/v1 --retired   # retired versions only; runs verify
+uv run zantine verify runs/v1/commitment.json release/v1    # anyone: release vs commitment
 ```
 
 ## Module map (`src/zantine/`)
@@ -79,10 +85,11 @@ uv run zantine report runs/v1                # graphs, metrics.json, progress.md
 | `harness/ledger.py` | `Ledger`: every paid call goes through `Ledger.send` (spend cap check, `_reserve` hook, call, price, record; `runs.RunLedger` journals the reservation and the record). |
 | `harness/live.py` | `play_live(...)`: the live gate, wiring live Seats into a game, clean abort, the `cost` record. |
 | `runner.py` | `new_game(config, bots)` / `play(...)`: builds the scenario and seats the bot lineup in its seat order. |
-| `schedule.py` | The lineup scheduler (pure data, no engine): Balanced Lobby blocks, Benign Matches, Mirror Matches, Impostor assignment, per-game seeds; `make_manifest(pool, master_seed, blocks=, mirror=)`, `verify(manifest)` (every invariant). The Model Pool is `harness/models.toml`. |
+| `schedule.py` | The lineup scheduler (pure data, no engine): Balanced Lobby blocks, Benign Matches, Mirror Matches, Impostor assignment, per-game seeds in a seed domain (`run` for official runs, below 2^63; `public` for the Public Seed Set, bit 63 set); `make_manifest(pool, master_seed, blocks=, mirror=, domain=)`, `verify(manifest)` (every invariant). The Model Pool is `harness/models.toml`. |
 | `runs.py` | Run directories: `create_run`, `execute` (play/resume a manifest under one run-level spend cap, dry or live), `game_setup` (manifest entry → `GameConfig` + bot spec); the `zantine schedule` / `zantine run` commands. |
+| `repro.py` | Layered reproducibility ([`reproduce.md`](reproduce.md), ADR 0001): the Public Seed Set (`public_manifest`, overlap checks), Seed Commitments (`commit`, `build_commitment`: blinded SHA-256 over canonical JSON plus scrypt membership tags), `release` and `verify` (rebuilds the commitment from a release; dry-run games are replayed for byte-identical transcripts), `compare` (public estimates vs official intervals); the `zantine repro` / `commit` / `verify` / `release` commands. |
 | `seats/dry.py` | `dry:<model>`: a scripted bot standing in for a Model in dry runs; the label is in `describe()` (header only). |
-| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`, `zantine schedule`, `zantine run` (from `runs.py`), `zantine report` (from `analysis/report.py`). |
+| `cli.py` | `zantine play` (`--live`, `--spend-cap` for live Seats), `zantine replay`, `zantine schedule`, `zantine run` (from `runs.py`), `zantine report` (from `analysis/report.py`), `zantine repro` / `commit` / `verify` / `release` (from `repro.py`). |
 | `analysis/` | Results from a run directory (reads `manifest.json`, transcripts, `run.json` and the spend log via `runs.spent_usd`; never engine state; [`metrics.md`](metrics.md)): `metrics.py` (per-game / per-Seat rows, restricted completion time, Claim Audit hook), `bootstrap.py` (game-level cluster bootstrap, stratified by game kind), `sabotage.py` (Sabotage Damage: lineup fixed-effects regression), `report.py` (`metrics.json`, `metrics.public.json`, `progress.md`, `zantine report`), `graphs.py` (matplotlib charts). |
 | `replay/model.py` | Demo replay viewer: transcript records → Round-by-Round view model (map positions, moves, bodies, log, Meetings). Reads transcripts only. |
 | `replay/render.py`, `replay/viewer.html` | Writes the view model into one self-contained HTML page (inline JS/CSS, no network). |

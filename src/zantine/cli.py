@@ -1,5 +1,5 @@
 """Command-line interface: ``zantine play ...``, ``replay``, ``schedule``, ``run``,
-``report``."""
+``report``, and ``repro`` / ``commit`` / ``verify`` / ``release``."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from zantine import runs
+from zantine import repro, runs
 from zantine.analysis import report
 from zantine.config import GameConfig
 from zantine.engine import Game
@@ -63,6 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
     runs.add_commands(sub)  # `zantine schedule`, `zantine run`
     report.add_command(sub)  # `zantine report`
+    repro.add_commands(sub)  # `zantine repro`, `commit`, `verify`, `release`
     args = parser.parse_args(argv)
     if args.command == "report":
         return report.command(parser, args)
@@ -70,6 +71,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return replay(parser, args.transcript, args.out)
     if args.command in ("schedule", "run"):
         return runs.command(parser, args)
+    if args.command in repro.COMMANDS:
+        return repro.command(parser, args)
 
     try:
         config = GameConfig(seed=args.seed, round_cap=args.round_cap, num_impostors=args.impostors)
