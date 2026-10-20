@@ -1,0 +1,32 @@
+# Candidate Claim extractors (OpenAI-compatible endpoints).
+#
+# The extractor must be a fixed-weight open-weight model from outside the Model
+# Pool (docs/plan.md, "Deception scoring"). WHICH model is an open decision
+# (issue #19); entries here are candidates, not that decision. Each one is
+# re-runnable through the Planted Claims accuracy report (#14).
+#
+# Fields:
+#   family              model family (the Label Panel must exclude it)
+#   base_url            OpenAI-compatible API root (…/v1); vLLM, Together, OpenRouter, ...
+#   model               model name sent to the endpoint
+#   revision            weights revision the endpoint serves (e.g. the Hugging Face commit
+#                       vLLM was started with). Required: an unpinned extractor is refused.
+#   api_key_env         env var holding the key ("" for a local server without auth)
+#   input, output       USD per 1M tokens (0 for a self-hosted server)
+#   max_output_tokens   per-call output cap
+#   status              "candidate" until #19 picks one
+#   price_valid_until   optional; after this date the price is refused until re-checked
+
+# A self-hosted vLLM server, e.g.:
+#   vllm serve Qwen/Qwen3-235B-A22B-Instruct-2507 --revision <commit> --port 8000
+# Fill in `revision` with the commit you started it with.
+[extractors."qwen3-235b-vllm"]
+family = "Qwen"
+base_url = "http://localhost:8000/v1"
+model = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+revision = ""
+api_key_env = ""
+input = 0.0
+output = 0.0
+max_output_tokens = 2000
+status = "candidate"
