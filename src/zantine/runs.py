@@ -50,7 +50,17 @@ from zantine.harness.pricing import ModelSpec
 from zantine.harness.provider import ProviderAdapter
 from zantine.rng import GameRng
 from zantine.scenario import build_scenario
-from zantine.schedule import engine_versions, load_pool, make_manifest, seat_lineup, summary
+from zantine.schedule import (
+    EXPERIMENTS,
+    MAIN,
+    MINORITY,
+    engine_versions,
+    load_pool,
+    make_manifest,
+    make_minority_manifest,
+    seat_lineup,
+    summary,
+)
 
 MANIFEST = "manifest.json"
 RUN = "run.json"
@@ -77,7 +87,14 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     entries, impostor_positions = seat_lineup(game)
-    config = GameConfig(seed=game["seed"], **{**manifest.get("config", {}), **game["config"]})
+    overrides = {**manifest.get("config", {}), **game["config"]}
+    if overrides.get("style_mask") and not hasattr(GameConfig, "style_mask"):
+        # Never play a mask-on game without the mask: it would silently become mask-off.
+        raise ValueError(
+            f"{game['id']} is a Style Mask game, but this engine has no Style Mask "
+            "(GameConfig.style_mask arrives with #66)"
+        )
+    config = GameConfig(seed=game["seed"], **overrides)
     if impostor_positions:
         scenario = build_scenario(config, GameRng(config.seed).fork("scenario"))
         seats = tuple(s for s, pos in enumerate(scenario.seat_order) if pos in impostor_positions)
@@ -241,9 +258,21 @@ def execute(
     """
     manifest = load_manifest(run_dir)
     _check_versions(manifest, mode)
+    masked = [g["id"] for g in manifest["games"] if g["config"].get("style_mask")]
+    if masked and not hasattr(GameConfig, "style_mask"):
+        raise ValueError(
+            f"{len(masked)} games need the Style Mask, which this engine lacks "
+            "(GameConfig.style_mask arrives with #66); nothing was played"
+        )
     if mode == "live":
         if spend_cap_usd is None:
             raise ValueError("live runs need an explicit --spend-cap (USD for the whole run)")
+        if any(g["config"].get("style_mask") for g in manifest["games"]):
+            # play_live falls back to the free dry-run mask, which is not the pinned masker.
+            raise ValueError(
+                "live Style Mask games need the pinned masker, which `zantine run` cannot "
+                "build yet; play them with the masker wired in (#66)"
+            )
         if adapter_factory is None:
             require_live(live)
         cap = spend_cap_usd
@@ -488,8 +517,15 @@ def _locked(run_dir: Path) -> Iterator[None]:
 def add_commands(sub: Any) -> None:
     """``zantine schedule`` and ``zantine run``."""
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
-    s.add_argument("--blocks", type=int, default=12, help="blocks of 28 games (default 12)")
-    s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model")
+    s.add_argument(
+        "--experiment",
+        choices=EXPERIMENTS,
+        default=MAIN,
+        help="main: the v1 plan (default); minority: v1.3 Lopsided Lobbies, 42 ordered "
+        "pairs x 2 games x Style Mask off/on (168 games)",
+    )
+    s.add_argument("--blocks", type=int, help="blocks of 28 games (main only; default 12)")
+    s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model (main)")
     s.add_argument(
         "--master-seed",
         type=int,
@@ -521,9 +557,15 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 def _schedule(args: argparse.Namespace) -> int:
     master_seed = args.master_seed if args.master_seed is not None else secrets.randbits(63)
     config = {"round_cap": args.round_cap} if args.round_cap is not None else {}
-    manifest = make_manifest(
-        load_pool(), master_seed, blocks=args.blocks, mirror=args.mirror, config=config
-    )
+    if args.experiment == MINORITY:
+        if args.blocks is not None or args.mirror:
+            raise ValueError("--blocks and --mirror only apply to --experiment main")
+        manifest = make_minority_manifest(load_pool(), master_seed, config=config)
+    else:
+        blocks = 12 if args.blocks is None else args.blocks
+        manifest = make_manifest(
+            load_pool(), master_seed, blocks=blocks, mirror=args.mirror, config=config
+        )
     if args.out is None:
         print(json.dumps(manifest, indent=1, sort_keys=True))
         return 0

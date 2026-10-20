@@ -622,6 +622,8 @@ def add_command(sub: Any) -> None:
 def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.replicates < 1:
         parser.error("--replicates must be at least 1")
+    if experiment(args.run_dir) == "minority":
+        return minority_command(parser, args)
     try:
         out, report = write_report(
             args.run_dir, out_dir=args.out, replicates=args.replicates, seed=args.seed
@@ -633,6 +635,33 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
         f"{report['run']['games_complete']}/{report['run']['games_planned']} games; "
         f"blocks complete {p['blocks_complete']} of {p['planned_blocks']}"
     )
+    print(f"report: {out}")
+    for name in report["files"]:
+        print(f"  {name}")
+    return 0
+
+
+def experiment(run_dir: Path) -> str:
+    """The manifest's ``experiment`` (absent = the v1 plan, ``main``)."""
+    path = Path(run_dir) / runs.MANIFEST
+    if not path.is_file():
+        return "main"
+    return json.loads(path.read_text("utf-8")).get("experiment", "main")
+
+
+def minority_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    """``zantine report`` on a Minority Disadvantage run (``analysis/minority.py``)."""
+    from zantine.analysis.minority import write_minority_report
+
+    try:
+        out, report = write_minority_report(
+            args.run_dir, out_dir=args.out, replicates=args.replicates, seed=args.seed
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    run = report["run"]
+    print(f"{run['games_complete']}/{run['games_planned']} games (Minority Disadvantage)")
+    print(f"reading: {report['verdict']['text']}")
     print(f"report: {out}")
     for name in report["files"]:
         print(f"  {name}")
