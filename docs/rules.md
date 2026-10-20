@@ -1,6 +1,6 @@
 # Game Rules (as implemented)
 
-The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py` and `src/zantine/meeting.py`.
+The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py` and `src/zantine/meeting.py`.
 
 Defaults are in `GameConfig` (`src/zantine/config.py`).
 
@@ -16,6 +16,7 @@ The whole setup is generated from the game seed (`src/zantine/scenario.py`), so 
 - Unit tests use a fixed classic setup instead (`classic_scenario()`: the 6-room `tiny_map()` with Cafeteria as the meeting room, and colour names Red, Blue, ...).
 - Everyone starts in the meeting room. Each **Impostor** is told who the other **Impostor** is; **Crewmates** are told nothing about roles.
 - **Impostors** start with a full kill cooldown (default 3 **Rounds**). Each **Seat** has 1 emergency **Meeting**.
+- Every **Crewmate** is privately assigned **Tasks** (see [Tasks](#tasks)). **Impostors** get none.
 
 ## Actions
 
@@ -28,6 +29,7 @@ The whole setup is generated from the game seed (`src/zantine/scenario.py`), so 
 | `call_meeting` | anyone | you have an emergency **Meeting** left |
 | `crisis.trigger` | **Impostor** | no **Crisis** is active and the **Crisis** cooldown is 0 (see [Crisis](#crisis)) |
 | `crisis.fix` | anyone | a **Crisis** is active and your room is one of its two stations |
+| `tasks.work(task, answer)` | assignee | the **Task** is assigned to you, not yet done, and in your room; `answer` is text, a number, or a list of those |
 
 **Invalid Actions:** a seat that submits an illegal action is told why and asked once more. A second illegal action forfeits the **Round** (treated as `wait`). Both attempts are logged. Invalid votes work the same way and forfeit to a skip.
 
@@ -42,8 +44,9 @@ Every living player chooses an action from the same start-of-**Round** state; no
    - **Witnesses** are the players who started the Round in the kill room and are still alive after all kills, including players who were walking out that Round (the kill happens before movement). A player who walks *into* the room does not see the kill, only the body and whoever is there at the end of the Round. A victim of a simultaneous kill in the same room does not witness the other kill.
 2. **Movement (order 200).** All surviving movers move at once. Two players swapping rooms do not meet or see each other on the way.
 3. **Meeting requests (order 300).** A report beats an emergency call. Among several reporters (or several callers) the lowest seat number is credited as the caller; every requester is still logged. Only the credited emergency caller uses up their emergency **Meeting**. A report must be about a body that was in the room when the Round started, so a body created this Round cannot be reported until the next Round.
-4. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
-5. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
+4. **Work on Tasks (order 400).** See [Tasks](#tasks). A killed player's work that Round is cancelled.
+5. **Cooldowns (order 900).** Every living **Impostor** that did not kill this Round has its cooldown reduced by 1. With cooldown *c*, after a kill in Round *r* the next kill is possible in Round *r + c + 1*.
+6. **Room snapshots (order 1000).** Every living player sees its own room as it is at the end of the Round: which living players are there and which bodies.
 
 Plug-in modules add steps between these (see `docs/architecture.md`); the **Crisis** step runs at order 500, after kills, movement and Meeting requests.
 
@@ -58,9 +61,24 @@ Implemented in `src/zantine/rules/crisis.py`. Defaults: `crisis_cooldown = 6`, `
 - **Failure.** If it is not resolved by the end of the deadline Round, the **Impostors** win (`crisis`). Living players are told `crisis.failed`.
 - **Meetings** neither pause nor end a **Crisis**. They happen between Rounds, so they don't use up deadline Rounds, but everyone then returns to the meeting room, which is never a station.
 
+## Tasks
+
+The first **Task** kind is dependent solo steps: small pieces of work one player can do alone, linked into the crew's **Task Graph**. Settings are in `GameConfig` (`tasks_per_crewmate`, `task_dependency_chance`, `task_kinds`).
+
+- **Content.** Each step is generated from the game seed, so there is no fixed answer key. Step kinds:
+  - `sort_list`: sort 6 numbers from smallest to largest (answer: the list, or the numbers as text separated by commas or spaces).
+  - `lookup_value`: find the value for one sector in a 6-row table (answer: that value).
+- **Assignment.** Each **Crewmate** gets `tasks_per_crewmate` steps (default 2), each in a room other than the meeting room. Steps get ids `T1`, `T2`, ... in a seeded order unrelated to who holds them.
+- **Task Graph.** Going through the steps in id order, each step requires, with probability `task_dependency_chance` (default 0.5), one earlier step held by a *different* **Crewmate**. Chains are at most 3 steps long.
+- **What players are told.** At setup each **Crewmate** privately receives its steps (`tasks.assigned`): id, title, room, instructions and inputs, the steps it requires and the steps it unlocks (id, title, room, assignee). Its action context also shows, for each of its own steps, whether it has been told the step is done and the shortest route to the step's room. Nobody is told anything about other players' progress.
+- **Working.** `tasks.work` takes the whole **Round** in the step's room. Grading is automatic and **private**: only the worker is told whether the answer was right (`tasks.graded`). A wrong answer can be retried in a later **Round**; there is no penalty beyond the lost **Round**.
+- **Dependencies.** A step can only be worked once every prerequisite is **truly complete** (graded correct), not merely claimed done. Prerequisites count only if they were complete at the start of the **Round**, so a step finished this **Round** unlocks its dependents from the next **Round**. Working a blocked step uses up the **Round** and tells the worker only which prerequisites it is still waiting on (`tasks.blocked`); this is a legal action, not an **Invalid Action**.
+- **Dead players' Tasks.** When a **Meeting** ends, every unfinished step held by a dead or ejected player is handed to a living **Crewmate** with the fewest unfinished steps (ties broken by the seed), who is told privately (`tasks.reassigned`, naming the previous holder). Until then those steps cannot be worked.
+- **Productivity** is reported in the game result: team Productivity is the share of all **Tasks** completed; each **Seat**'s Productivity is the share of the **Tasks** it was ever assigned that it completed (`null` for a **Seat** with none). The result also counts each **Seat**'s wrong answers and blocked attempts.
+
 ## Visibility
 
-A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
+A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, and what is said in **Meetings**, plus its own **Tasks** and their grades. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).
 
 ## Meetings
 
@@ -81,6 +99,5 @@ Win conditions are checked after the Round's resolution and again after any **Me
 1. **Both Impostors ejected** → crew wins (`impostors_ejected`).
 2. **Parity**: living **Impostors** ≥ living **Crewmates** → **Impostors** win (`parity`). A kill that reaches parity ends the game before any **Meeting** requested that Round.
 3. **Unresolved Crisis** → **Impostors** win (`crisis`).
-4. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), **Impostors** win (`round_cap`).
-
-"All **Tasks** done" (crew win) arrives with the first **Task** kind (issue #3).
+4. **All Tasks done**: every **Task** is complete → crew wins (`tasks_done`). Checked after parity and **Crisis**, so a Round that also reaches parity or fails a **Crisis** is an **Impostor** win. A game with no **Tasks** never ends this way.
+5. **Round cap** (default 30): if the game is still going after the final Round's **Meeting** (if any), **Impostors** win (`round_cap`).

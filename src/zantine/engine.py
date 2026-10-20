@@ -155,6 +155,11 @@ class Game:
         self.event("game_over", winner=state.winner.value, reason=state.win_reason)
         for p in state.players:
             self.observe(p.seat, "game_over", winner=state.winner.value, reason=state.win_reason)
+        extra: dict[str, Any] = {}
+        for module in self.rules.modules:
+            data = module.result_extra(self)
+            if data is not None:
+                extra[module.name] = data
         self.transcript.result(
             winner=state.winner.value,
             reason=state.win_reason,
@@ -163,6 +168,7 @@ class Game:
             killed=sorted(p.seat for p in state.players if not p.alive and not p.ejected),
             ejected=sorted(p.seat for p in state.players if p.ejected),
             survivors=sorted(p.seat for p in state.living()),
+            **extra,
         )
 
     # Asking seats -------------------------------------------------------------

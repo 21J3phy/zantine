@@ -26,12 +26,19 @@ class GameConfig:
     # Rounds after the Round it was triggered in.
     crisis_cooldown: int = 6
     crisis_deadline: int = 3
+    # Tasks (rules/tasks.py): solo steps per Crewmate, the chance that a step
+    # requires another Crewmate's step (the Task Graph), and the step kinds.
+    tasks_per_crewmate: int = 2
+    task_dependency_chance: float = 0.5
+    task_kinds: tuple[str, ...] = ("sort_list", "lookup_value")
     # Fixed Impostor seats (tests). None = drawn from the seed.
     impostor_seats: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if not 0 < self.num_impostors < self.num_seats:
             raise ValueError("need at least one Impostor and one Crewmate")
+        if self.tasks_per_crewmate < 0 or not 0 <= self.task_dependency_chance <= 1:
+            raise ValueError("bad task settings")
         if self.impostor_seats is not None:
             seats = self.impostor_seats
             if len(set(seats)) != self.num_impostors or not all(

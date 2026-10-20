@@ -84,6 +84,10 @@ class GameModule:
         """Extra fields for this seat's ``ActionContext.extra`` / ``MeetingContext.extra``."""
         return None
 
+    def result_extra(self, game: Game) -> dict[str, Any] | None:
+        """Extra data for the transcript's ``result`` record, stored under ``name``."""
+        return None
+
 
 @dataclass(frozen=True)
 class _Step[F]:
