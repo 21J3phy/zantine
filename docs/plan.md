@@ -111,7 +111,7 @@ Moved up on 2026-10-20 so Zantine tests a defense, not only a diagnosis. It answ
 
 **Before v1 results exist, market the games, not rankings.**
 - **Website v0:** opens with the replay viewer of pilot games. Visitors watch frontier AIs play, lie, accuse and get ejected, with roles revealed at the end. Alongside it: the methodology, the open-source engine, and the v1 plan ("full results coming").
-- **Website v1, after the full run:** results as graphs with error bars, conveyed as quickly and clearly as possible, plus methodology and how to reproduce the results.
+- **Website v1, after the full run** (decided 2026-10-20): the opening graph is a **Productivity vs Vigilance map**. Each **Model** is a dot with error bars on both axes, sized by cost per game, with **Flagship**–**Sibling** pairs joined by a line, and models with overlapping intervals drawn as one cluster so small gaps aren't over-read. Directly below: small multiples, one panel per metric, models in fixed alphabetical order. After v1.1, a third graph: each **Verification Protocol**'s damage prevented against its **Productivity** cost. Plus methodology and the Reproduce page.
 - **Indirect marketing (X, Reddit, LinkedIn):** share **Moments**, always labeled as one game. Real findings are posted only after v1 (and the follow-ups).
 - **Direct marketing (Twitch, YouTube):** pitch streamers such as ThePrimeagen and Theo (t3.gg) to use the replays and, later, the results when they review a model. Hype videos are optional.
 - **Rule:** no comparisons between models are published before v1. One "n = 8" reply would sink the rigor pitch.
