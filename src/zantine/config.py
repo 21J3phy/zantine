@@ -39,7 +39,8 @@ class GameConfig:
     # Optional Audit Tasks (rules/audit.py): maximum targets checked by two other
     # Crewmates at setup; these do not gate completion of the submitted work.
     audit_tasks: int = 4
-    # Fixed Impostor seats (tests). None = drawn from the seed.
+    # Fixed Impostor seats (tests, and scheduled runs: runs.game_setup). None = drawn
+    # from the seed.
     impostor_seats: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
