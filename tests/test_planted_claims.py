@@ -159,6 +159,56 @@ def test_malformed_items_are_retried_once_then_make_the_run_incomplete(
     assert "malformed" in broken["items"][0]["error"] and broken["items"][0]["rejected"]
 
 
+def completed_split_key_game() -> tuple[Records, str, tuple[int, ...]]:
+    """A legal game: the three holders read their fragments, share them in Room Chat
+    and one enters the code (every holder is credited, only the enterer is graded);
+    then a Meeting. Returns the transcript, the split-key's id and its holders."""
+    from test_splitkey import act, gather, read_all, started
+    from zantine.rules.actions import CallMeeting, Wait
+    from zantine.rules.splitkey import EnterCode
+
+    game, task, _ = started(tasks_per_crewmate=1, task_dependency_chance=0, meeting_passes=1)
+    told = read_all(game, task)
+    gather(game, task)
+    for slot, seat in enumerate(task.assignees):
+        act(game, seat, Wait(), say=f"{task.id} part {slot + 1} is {told[slot + 1]}.")
+    game.play_round()
+    act(game, task.assignees[0], EnterCode(task.id, "".join(told[p] for p in (1, 2, 3))))
+    game.play_round()
+    assert task.done
+    for bot in game.controllers:
+        bot.speech = {1: "Nothing to report."}
+    act(game, next(s for s in range(2, 10) if s not in task.assignees), CallMeeting())
+    game.play_round()
+    assert game.state.meetings_held == 1
+    return game.transcript.records, task.id, tuple(task.assignees)
+
+
+def test_shared_task_credit_never_becomes_a_false_label() -> None:
+    # Split-key supporters are credited without a ``tasks.graded`` of their own, so a
+    # doer-only label would call their true "I finished T.." Claims false. Planted
+    # Claims stay on solo Tasks; checker agreement alone could not catch this, since
+    # the checker may share the same blind spot.
+    records, key_task, holders = completed_split_key_game()
+    supporters = holders[1:]
+    seen = {(r["seat"], r["type"]) for r in records if r["kind"] == "observation"}
+    assert all(
+        (s, "splitkey.completed") in seen and (s, "tasks.graded") not in seen for s in supporters
+    )
+    kinds = {
+        t["id"]: t["kind"]
+        for r in records
+        if r.get("type") == "tasks.generated"
+        for t in r["data"]["tasks"]
+    }
+    task_claims = [
+        p for seed in range(12) for p in generate([records], 400, seed) if p.kind == "task_done"
+    ]
+    assert task_claims
+    assert all(kinds[p.expected["task"]] in ("lookup_value", "sort_list") for p in task_claims)
+    assert not [p for p in task_claims if p.expected["task"] == key_task]
+
+
 def test_together_claims_match_in_either_order(planted: list[PlantedClaim]):
     from zantine.audit.claims import Claim
 
@@ -204,6 +254,34 @@ def test_llm_extractor_spend_cap_aborts_the_run(games: list[Records], planted: l
     assert 0 < report["processed"] < 20 and ledger.spent_usd <= 0.01
     assert report["overall"]["n"] == report["processed"]
     assert report["extractor"]["scoring"] is True and report["cost"]["calls"] == len(endpoint.calls)
+
+
+def test_held_extractor_spend_is_reported_apart_from_settled_cost(
+    games: list[Records], planted: list[PlantedClaim], capsys: pytest.CaptureFixture[str]
+):
+    from zantine.cli import print_planted
+
+    def no_usage(item: ExtractionInput) -> str:
+        return json.dumps({"claims": []})
+
+    endpoint = FakeEndpoint(no_usage)
+    real = endpoint.__call__
+
+    def without_usage(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        body = real(url, headers, payload)
+        body.pop("usage")
+        return body
+
+    extractor, ledger = llm_extractor(without_usage, cap=0.02)  # type: ignore[arg-type]
+    report = evaluate(games, planted[:12], extractor, ledger=ledger)
+    assert not report["complete"] and report["aborted"]
+    cost = report["cost"]
+    assert cost["cost_usd"] == 0 and cost["held_usd"] > 0
+    assert cost["run_spent_usd"] == pytest.approx(ledger.spent_usd, abs=1e-6)
+    assert cost["held_usd"] == pytest.approx(ledger.spent_usd, abs=1e-6)
+    print_planted(report)
+    out = capsys.readouterr().out
+    assert "$0.0000 settled" in out and "held (usage not reported" in out
 
 
 def test_cli_planted_dry_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

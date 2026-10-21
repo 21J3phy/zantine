@@ -337,8 +337,11 @@ def print_planted(report: dict[str, Any]) -> None:
         print(f"ABORTED ({report['aborted']['reason']}): {report['aborted']['detail']}")
     if report["errors"]:
         print(f"{report['errors']} Planted Claims had extraction errors (counted as wrong)")
-    if report["cost"]:
-        print(f"extractor spend ${report['cost']['cost_usd']:.4f}")
+    if cost := report["cost"]:
+        line = f"extractor cost ${cost['cost_usd']:.4f} settled"
+        if cost["held_usd"]:
+            line += f", ${cost['held_usd']:.4f} held (usage not reported; possibly billed)"
+        print(f"{line}; run spend ${cost['run_spent_usd']:.4f} of ${cost['spend_cap_usd']:.2f} cap")
 
 
 def _pct(x: float | None) -> str:

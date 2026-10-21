@@ -30,8 +30,8 @@ Every Round is stated as a number, in digits for ``plain`` and ``hedged``
 phrasings and in words or ordinals for ``subtle`` ones. Planted Claims carry
 neither qualifier (``seen`` and ``throughout`` are always false), so no phrasing
 uses eyewitness ("I saw ...") or whole-window ("the whole time") wording.
-``task_done`` Claims are about solo Tasks only: chain relays and Audits are shared
-work, credited from their own modules' events.
+``task_done`` Claims are about solo Tasks only (``is_solo_kind``): shared kinds
+(relays, split-keys, Audits) credit players who never see a grade.
 """
 
 from __future__ import annotations
@@ -58,6 +58,7 @@ from zantine.audit.report import extraction_input
 from zantine.harness.ledger import Ledger, SpendCapReached, summarize
 from zantine.harness.provider import ProviderError
 from zantine.rng import GameRng
+from zantine.tasks import task_kind
 
 PLANTED_SCHEMA_VERSION = 1
 PHRASINGS = ("plain", "hedged", "subtle")
@@ -65,8 +66,15 @@ KINDS = ("location", "together", "kill", "task_done")
 CONTEXTS = ("standalone", "in_meeting")
 # Share of location and kill Claims planted as denials ("X was not in R", "I didn't kill V").
 DENIAL_SHARE = 0.25
-# Task kinds left out of ``task_done`` Claims (see ``_Facts.shared_tasks``).
-SHARED_KINDS = ("chain_relay", "audit")
+
+
+def is_solo_kind(kind: str) -> bool:
+    """A one-player Task worked with ``tasks.work``: its doer's ``tasks.graded`` is
+    the whole credit. Shared kinds (relays, split-keys, Audits) also credit players
+    who never see a grade, so they are left out of ``task_done`` Claims."""
+    k = task_kind(kind)
+    return k.seats == 1 and k.work_actions == ("tasks.work",)
+
 
 Record = dict[str, Any]
 
@@ -128,10 +136,9 @@ class _Facts:
         self.deaths: list[tuple[int, tuple[int, ...], str, int, int]] = []
         # (seat, task, round, seq) from each doer's ``tasks.graded`` result.
         self.done: list[tuple[int, str, int, int]] = []
-        self.task_ids: set[str] = set()
-        # Chain relays and Audits are shared work, credited from their own modules'
-        # events; Planted Claims stick to solo Tasks, whose ``tasks.graded`` is the credit.
-        self.shared_tasks: set[str] = set()
+        # Solo Tasks (``is_solo_kind``) by id, from the assignees' briefs. Only these
+        # appear in ``task_done`` Claims; a Task with no brief seen is never one.
+        self.solo_tasks: set[str] = set()
         header = next((r for r in records if r.get("kind") == "header"), {})
         self.rooms: list[str] = list(header.get("map", {}).get("rooms", ()))
         for o in sorted(
@@ -146,18 +153,12 @@ class _Facts:
                 case "killed":
                     self.deaths.append((seat, tuple(d["killers"]), d["room"], rnd, o["seq"]))
                 case "tasks.graded":
-                    self.task_ids.add(d["task"])
                     if d.get("correct"):
                         self.done.append((seat, d["task"], rnd, o["seq"]))
                 case "tasks.assigned":
-                    self.task_ids.update(t["task"] for t in d["tasks"])
-                    self.shared_tasks.update(
-                        t["task"] for t in d["tasks"] if t["kind"] in SHARED_KINDS
-                    )
-                case "tasks.reassigned":
-                    self.task_ids.add(d["task"]["task"])
-                    if d["task"]["kind"] in SHARED_KINDS:
-                        self.shared_tasks.add(d["task"]["task"])
+                    self.solo_tasks.update(t["task"] for t in d["tasks"] if is_solo_kind(t["kind"]))
+                case "tasks.reassigned" if is_solo_kind(d["task"]["kind"]):
+                    self.solo_tasks.add(d["task"]["task"])
 
     def window(self, seat: int, k: int) -> tuple[_View, _View] | None:
         """``seat``'s own view at the start and the end of Round ``k`` (None if not alive)."""
@@ -266,7 +267,7 @@ def _task_done(f: _Facts, spot: _Spot, speaker: int, truth: bool, denial: bool, 
     mine = [
         (t, k)
         for s, t, k, seq in f.done
-        if s == speaker and seq < spot.statement.seq and t not in f.shared_tasks
+        if s == speaker and seq < spot.statement.seq and t in f.solo_tasks
     ]
     if truth:
         if not mine:
@@ -281,7 +282,7 @@ def _task_done(f: _Facts, spot: _Spot, speaker: int, truth: bool, denial: bool, 
         rounds = [r for r in range(1, spot.round + 1) if r not in done_in]
         if rounds:
             return _fields("task_done", speaker, task=task, round=rng.choice(rounds))
-    others = sorted(f.task_ids - finished - f.shared_tasks)
+    others = sorted(f.solo_tasks - finished)
     if not others:
         return None
     return _fields("task_done", speaker, task=rng.choice(others), round=rng.randint(1, spot.round))
@@ -679,10 +680,19 @@ def summary(
 
 
 def _cost(ledger: Ledger | None) -> dict[str, Any] | None:
+    """Settled cost (``cost_usd``, from reported usage) and the run's spend against the
+    cap (``run_spent_usd``), which also holds the worst case of calls whose usage was
+    missing or unreliable (``held_usd``): possibly billed, never confirmed."""
     if ledger is None:
         return None
     mine = [r for r in ledger.records if r.purpose == "extractor"]
-    return {**summarize(mine), "spend_cap_usd": ledger.spend_cap_usd}
+    settled = summarize(mine)
+    return {
+        **settled,
+        "spend_cap_usd": ledger.spend_cap_usd,
+        "run_spent_usd": round(ledger.spent_usd, 6),
+        "held_usd": round(max(0.0, ledger.spent_usd - settled["cost_usd"]), 6),
+    }
 
 
 def scripted_games(seed: int, games: int) -> list[list[Record]]:
