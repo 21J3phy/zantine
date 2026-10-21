@@ -37,6 +37,9 @@ class SeatRow:
     seat: int
     model: str
     role: str  # "crewmate" / "impostor"
+    effort: str | None = None  # the Seat's effort level, when its header records one
+    controller: str = ""  # the header's controller kind: "live", "dry", "scripted", ...
+    harness: str | None = None  # the live Seat's Harness label (e.g. "neutral-v5")
     votes: int = 0  # Meeting votes cast (a forfeited vote counts as a skip, as in the engine)
     skips: int = 0
     accusations: int = 0  # non-skip votes
@@ -49,6 +52,11 @@ class SeatRow:
     tasks_assigned: int = 0
     tasks_done: int = 0
     cost_usd: float = 0.0
+    calls: int = 0  # paid calls (failed ones included), from the cost record
+    # From the game's ``harness.call`` events: only calls whose provider reported a
+    # thinking count, so missing telemetry is never read as a measured zero.
+    thinking_tokens: int = 0
+    thinking_calls: int = 0
     invalid_actions: int = 0
     forfeits: int = 0
     # Claim Audit (``<transcript>.claims.json``), when present.
@@ -86,6 +94,9 @@ class GameRow:
     # The game's Verification Protocol (header config; "optional" before #37).
     protocol: str = "optional"
     seats: list[SeatRow] = field(default_factory=list)
+    # The header's game config (holds the seed: never exported) and the run's engine versions.
+    config: dict[str, Any] = field(default_factory=dict)
+    engine: dict[str, Any] = field(default_factory=dict)
 
     @property
     def restricted_completion(self) -> float:
@@ -101,7 +112,8 @@ class GameRow:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
-        d.pop("seats")
+        for private in ("seats", "config", "engine"):
+            d.pop(private)
         d["restricted_completion"] = self.restricted_completion
         d["restricted_containment"] = self.restricted_containment
         return d
@@ -171,7 +183,9 @@ def load_run(run_dir: str | Path) -> RunData:
         if records is None or not is_complete(records):
             not_complete.append(planned["id"])
             continue
-        games.append(game_row(planned, records, claims=load_claims(tpath)))
+        row = game_row(planned, records, claims=load_claims(tpath))
+        row.engine = dict(manifest.get("engine") or {})
+        games.append(row)
     return RunData(run_dir=run_dir, manifest=manifest, games=games, not_complete=not_complete)
 
 
@@ -183,6 +197,20 @@ def seat_model(controller: Any) -> str:
         return str(controller.get("kind", "unknown"))
     text = str(controller)
     return text.split(":", 1)[1] if ":" in text else text
+
+
+def seat_effort(controller: Any) -> str | None:
+    """The Seat's effort level (``low`` / ``medium`` / ``high``) if the header records one."""
+    if isinstance(controller, dict) and controller.get("effort"):
+        return str(controller["effort"])
+    return None
+
+
+def seat_kind(controller: Any) -> str:
+    """The controller kind from the header (``live``, ``dry``, ``scripted``, ...)."""
+    if isinstance(controller, dict):
+        return str(controller.get("kind", ""))
+    return str(controller).split(":", 1)[0]
 
 
 def game_row(
@@ -204,6 +232,9 @@ def game_row(
             seat=s["seat"],
             model=seat_model(s["controller"]),
             role=s["role"],
+            effort=seat_effort(s["controller"]),
+            controller=seat_kind(s["controller"]),
+            harness=s["controller"].get("harness") if isinstance(s["controller"], dict) else None,
         )
         for s in header["seats"]
     ]
@@ -251,8 +282,18 @@ def game_row(
     for c in cost.get("seats", []):
         row = by_seat[c["seat"]]
         row.cost_usd = float(c.get("cost_usd") or 0.0)
+        row.calls = int(c.get("calls") or 0)
         row.invalid_actions = int(c.get("invalid_actions") or 0)
         row.forfeits = int(c.get("forfeits") or 0)
+
+    for e in events:
+        if e["type"] != "harness.call":
+            continue
+        d = e["data"]
+        if d.get("seat") in by_seat and d.get("ok") and d.get("thinking_tokens") is not None:
+            row = by_seat[d["seat"]]
+            row.thinking_tokens += int(d["thinking_tokens"])
+            row.thinking_calls += 1
 
     for seat, counts in (claims or {}).items():
         if seat in by_seat:
@@ -295,6 +336,7 @@ def game_row(
         cost_usd=float((cost.get("game") or {}).get("cost_usd") or 0.0),
         protocol=str(header["config"].get("verification_protocol", "optional")),
         seats=seats,
+        config=dict(header.get("config") or {}),
     )
 
 
