@@ -63,6 +63,9 @@ class CallRecord:
     # The Harness that built the request (``"neutral"``, 5); None for non-seat callers.
     harness: str | None = None
     harness_version: int | None = None
+    # The call's effort level (low / medium / high) and the lab's own value sent for it.
+    effort: str | None = None
+    effort_setting: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -158,6 +161,8 @@ class Ledger:
             cost_usd=round(cost, 8),
             total_spent_usd=round(self.spent_usd, 8),
             provider_cost_usd=response.raw.get("provider_cost_usd") if response else None,
+            effort=model.effort,
+            effort_setting=model.effort_setting,
             **meta,
         )
         self.records.append(record)

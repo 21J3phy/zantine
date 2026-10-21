@@ -26,6 +26,8 @@ from zantine.harness.provider import register_provider
 class MetaAdapter(OpenAIAdapter):
     provider = "meta"
     key_env = "META_API_KEY"
+    # ``reasoning.effort`` on Muse Wonder (``none`` is a 400).
+    effort_settings = ("minimal", "low", "medium", "high", "xhigh", "max")
     base_url = "https://api.meta.ai/v1"
 
 
