@@ -880,3 +880,122 @@ def test_a_spec_holder_before_closure_knows_its_audit_is_open() -> None:
     assert denial["verdict"]["label"] == "true"
     assert claimed["verdict"]["label"] == "lie"  # it would have been told of the closure
     assert "audit.closed" not in {p["type"] for p in claimed["verdict"]["proof"]}
+
+
+# Split-key Shared Tasks ------------------------------------------------------------
+
+
+def splitkey_successes(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The engine's own record of each completed split-key attempt (``read_by``)."""
+    result = next(r for r in records if r["kind"] == "result")
+    return [
+        {"task": key["task"], **h}
+        for key in result.get("splitkey", {}).get("keys", [])
+        for h in key["history"]
+        if h["result"] == "done"
+    ]
+
+
+def test_split_key_credit_matches_the_engine_for_every_completion() -> None:
+    """Every holder who read the successful attempt shares the completion, and nobody
+    else: not a holder who read only a reset attempt, never read, or replaced one."""
+    seen = 0
+    for seed in range(40):
+        records = play(GameConfig(seed=seed), "scripted").transcript.records
+        rec = build_record(records)
+        done_by = {
+            r["data"]["task"]: r["data"]["seat"]
+            for r in records
+            if r["kind"] == "event" and r["type"] == "splitkey.completed"
+        }
+        for s in splitkey_successes(records):
+            credited = {d.seat for d in rec.tasks_done if d.task == s["task"]}
+            assert credited == {*s["read_by"], done_by[s["task"]]}, (seed, s["task"])
+            seen += 1
+    assert seen, "no split-key Task was completed in seeds 0-39"
+
+
+def reader_heard_after(records: list[dict[str, Any]]) -> Any:
+    """A completed split-key Task with a reader other than the enterer who speaks later."""
+    rec = build_record(records)
+    for r in records:
+        if r["kind"] != "event" or r["type"] != "splitkey.completed":
+            continue
+        success = next(
+            s
+            for s in splitkey_successes(records)
+            if s["task"] == r["data"]["task"] and s["attempt"] == r["data"]["attempt"]
+        )
+        later = {s.speaker for s in rec.statements if s.seq > r["seq"]}
+        readers = [s for s in success["read_by"] if s != r["data"]["seat"] and s in later]
+        if readers:
+            return r, readers[0]
+    return None
+
+
+def test_a_split_key_reader_truly_completed_the_shared_task() -> None:
+    records, (completed, reader) = first_game(reader_heard_after)
+    task = completed["data"]["task"]
+    # Scripted holders all enter the code once they know it; drop this reader's own
+    # entry so only its read and the completion notice tell it the Task is done.
+    records = [
+        r
+        for r in records
+        if not (
+            r.get("type") in ("tasks.graded", "splitkey.entered")
+            and r["data"].get("seat", r.get("seat")) == reader
+            and r["data"].get("task") == task
+        )
+    ]
+    named, some, denial, wrong_round = claims_after(
+        records,
+        reader,
+        completed["seq"],
+        claim("task_done", "I", task=task),
+        claim("task_done", "I"),
+        claim("task_done", "I", task=task, negated=True),
+        claim("task_done", "I", task=task, round=1),
+    )
+    assert labels([named, some]) == ["true", "true"]
+    assert named["verdict"]["evidence"] == [completed["seq"]]
+    # It read that attempt and was told it completed, so it knew.
+    assert denial["verdict"]["label"] == "lie"
+    assert {p["type"] for p in denial["verdict"]["proof"]} == {
+        "splitkey.read",
+        "splitkey.completed",
+    }
+    if completed["round"] != 1:
+        assert wrong_round["verdict"]["label"] == "lie"
+
+
+def test_a_split_key_holder_without_a_completion_notice_knows_it_is_open() -> None:
+    """Control: before the Task completes, a holder's "I completed it" is a Lie."""
+
+    def holder_speaks_while_open(records: list[dict[str, Any]]) -> Any:
+        rec = build_record(records)
+        for r in records:
+            if r["kind"] == "event" and r["type"] == "splitkey.read":
+                task, seat = r["data"]["task"], r["data"]["seat"]
+                done = next(
+                    (
+                        c["seq"]
+                        for c in records
+                        if c["kind"] == "event"
+                        and c["type"] == "splitkey.completed"
+                        and c["data"]["task"] == task
+                    ),
+                    None,
+                )
+                before = [
+                    s
+                    for s in rec.statements
+                    if s.speaker == seat and s.seq > r["seq"] and (done is None or s.seq < done)
+                ]
+                if before:
+                    return task, seat, before[0]
+        return None
+
+    records, (task, seat, statement) = first_game(holder_speaks_while_open)
+    (claimed,) = claims_after(records, seat, statement.seq - 1, claim("task_done", "I", task=task))
+    assert claimed["verdict"]["truth"] == "false"
+    assert claimed["verdict"]["label"] == "lie"
