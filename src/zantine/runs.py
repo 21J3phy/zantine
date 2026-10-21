@@ -43,6 +43,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from zantine import speed
 from zantine.config import GameConfig
 from zantine.harness.ledger import Ledger
 from zantine.harness.live import LiveRun, play_live, require_live
@@ -51,8 +52,6 @@ from zantine.harness.provider import ProviderAdapter
 from zantine.rng import GameRng
 from zantine.scenario import build_scenario
 from zantine.schedule import (
-    EXPERIMENTS,
-    MAIN,
     MINORITY,
     engine_versions,
     load_pool,
@@ -82,7 +81,8 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
 
     The scenario (names, seat order, map) comes from the game seed as usual; the
     Impostor Seats are then fixed to wherever the seed seats the lineup entries of
-    the scheduled Impostor Models (``schedule.seat_lineup``).
+    the scheduled Impostor Models (``schedule.seat_lineup``). A speed-experiment
+    game also gets its per-Seat Talk Budgets (``speed.talk_config``).
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -95,10 +95,14 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
             "(GameConfig.style_mask arrives with #66)"
         )
     config = GameConfig(seed=game["seed"], **overrides)
-    if impostor_positions:
+    if impostor_positions or game.get("talk"):
         scenario = build_scenario(config, GameRng(config.seed).fork("scenario"))
         seats = tuple(s for s, pos in enumerate(scenario.seat_order) if pos in impostor_positions)
-        config = replace(config, impostor_seats=seats)
+        config = replace(
+            config,
+            impostor_seats=seats if impostor_positions else config.impostor_seats,
+            **speed.talk_config(manifest, game, scenario.seat_order),
+        )
     return config, ",".join(f"{mode}:{model}" for model in entries)
 
 
@@ -265,6 +269,7 @@ def execute(
             "(GameConfig.style_mask arrives with #66); nothing was played"
         )
     if mode == "live":
+        speed.check_live(manifest)
         if spend_cap_usd is None:
             raise ValueError("live runs need an explicit --spend-cap (USD for the whole run)")
         if any(g["config"].get("style_mask") for g in manifest["games"]):
@@ -519,13 +524,26 @@ def add_commands(sub: Any) -> None:
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
     s.add_argument(
         "--experiment",
-        choices=EXPERIMENTS,
-        default=MAIN,
-        help="main: the v1 plan (default); minority: v1.3 Lopsided Lobbies, 42 ordered "
-        "pairs x 2 games x Style Mask off/on (168 games)",
+        choices=("v1", speed.EXPERIMENT, MINORITY),
+        default="v1",
+        help="v1 (default); speed: random per-Seat Talk Budget tiers plus a realism check; "
+        "minority: v1.3 Lopsided Lobbies, 42 ordered pairs x 2 games x Style Mask off/on "
+        "(168 games)",
     )
-    s.add_argument("--blocks", type=int, help="blocks of 28 games (main only; default 12)")
-    s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model (main)")
+    s.add_argument(
+        "--blocks",
+        type=int,
+        help=f"blocks of 28 games (default 12; {speed.TIER_BLOCKS} for --experiment speed; "
+        "not for minority)",
+    )
+    s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model (v1)")
+    s.add_argument(
+        "--realism-games",
+        type=int,
+        default=speed.REALISM_GAMES,
+        help=f"speed only: games whose budgets follow Model throughput "
+        f"(default {speed.REALISM_GAMES})",
+    )
     s.add_argument(
         "--master-seed",
         type=int,
@@ -559,18 +577,31 @@ def _schedule(args: argparse.Namespace) -> int:
     config = {"round_cap": args.round_cap} if args.round_cap is not None else {}
     if args.experiment == MINORITY:
         if args.blocks is not None or args.mirror:
-            raise ValueError("--blocks and --mirror only apply to --experiment main")
+            raise ValueError("--blocks and --mirror do not apply to --experiment minority")
         manifest = make_minority_manifest(load_pool(), master_seed, config=config)
+        text = summary(manifest)
+    elif args.experiment == speed.EXPERIMENT:
+        if args.mirror:
+            raise ValueError("the speed experiment has no Mirror Matches")
+        manifest = speed.make_speed_manifest(
+            load_pool(),
+            master_seed,
+            blocks=speed.TIER_BLOCKS if args.blocks is None else args.blocks,
+            realism_games=args.realism_games,
+            config=config,
+        )
+        text = speed.summary(manifest)
     else:
         blocks = 12 if args.blocks is None else args.blocks
         manifest = make_manifest(
             load_pool(), master_seed, blocks=blocks, mirror=args.mirror, config=config
         )
+        text = summary(manifest)
     if args.out is None:
         print(json.dumps(manifest, indent=1, sort_keys=True))
         return 0
     path = create_run(args.out, manifest)
-    print(f"{summary(manifest)}\nmanifest: {path}")
+    print(f"{text}\nmanifest: {path}")
     return 0
 
 

@@ -17,6 +17,10 @@ Charts (each written as SVG with real text, and PNG):
 - ``sabotage_damage``: Sabotage Damage per Impostor Seat (#33).
 - ``cost_vs_metrics``: cost per game against a few metrics.
 - ``mirror``: Mirror Matches, separately labelled as descriptive self-play.
+- speed runs only (#25): ``speed_tiers`` (Floor Share, character share, Vote Pull and
+  its wrong part by Talk Budget tier, plus fast minus slow), ``speed_pull`` (each
+  Seat's Vote Pull against its character share, high-Vote-Pull Seats that pushed a
+  Crewmate highlighted) and ``speed_realism`` (the realism check, descriptive).
 
 Interval bars are drawn from their bounds, never as distances from the estimate:
 a percentile interval need not contain its point estimate.
@@ -25,6 +29,7 @@ a percentile interval need not contain its point estimate.
 from __future__ import annotations
 
 import math
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +90,14 @@ def render_all(report: dict[str, Any], out: Path) -> list[Path]:
         ):
             fig = draw(report)
             files += save(fig, out / name)
+        modes = (report.get("speed") or {}).get("modes") or {}
+        for name, mode, draw in (
+            ("speed_tiers", "random", speed_tiers),
+            ("speed_pull", "random", speed_pull),
+            ("speed_realism", "realism", speed_tiers),
+        ):
+            if mode in modes:
+                files += save(draw(report, mode), out / name)
     return files
 
 
@@ -426,4 +439,143 @@ def mirror(report: dict[str, Any]) -> Figure:
         interval_panel(ax, report["mirror"][key], models)
     fig.subplots_adjust(left=0.1, right=0.98, top=0.8, bottom=0.25, wspace=0.75)
     caption(fig, report)
+    return fig
+
+
+# Speed experiment (#25) ------------------------------------------------------------------
+
+SPEED_PANELS = ("floor_share", "char_share", "vote_pull", "wrong_pull", "high_pull_wrong")
+TIER_MARKERS = {"fast": "^", "normal": "o", "slow": "v"}
+HIGHLIGHT = "#c05621"
+
+
+def tier_labels(report: dict[str, Any]) -> list[str]:
+    budgets = report["speed"].get("budgets") or {}
+    return [f"{t} ({budgets[t]} chars)" if t in budgets else t for t in report["speed"]["tiers"]]
+
+
+def speed_tiers(report: dict[str, Any], mode: str) -> Figure:
+    """Each measure by Talk Budget tier, and fast minus slow, with intervals."""
+    section = report["speed"]["modes"][mode]
+    tiers = report["speed"]["tiers"]
+    labels = tier_labels(report)
+    keys = [k for k in SPEED_PANELS if k in section["metrics"]]
+    fig = Figure(figsize=(12, 6.6))
+    realism = mode == "realism"
+    fig.suptitle(
+        "Realism check: measures by Talk Budget tier, tiers following each Model's "
+        "throughput (descriptive; tier and Model are confounded)"
+        if realism
+        else "Measures by Talk Budget tier (tiers drawn at random per Seat, independent of Model)",
+        color=INK,
+        fontsize=10,
+    )
+    for n, key in enumerate(keys):
+        metric = section["metrics"][key]
+        ax = fig.add_subplot(2, 3, n + 1)
+        shaped = {
+            "label": metric["label"],
+            "unit": "share",
+            "per_model": dict(zip(labels, (metric["per_tier"][t] for t in tiers), strict=True)),
+        }
+        interval_panel(ax, shaped, labels)
+        ax.set_title(textwrap.fill(metric["label"], 32), fontsize=8, color=INK, loc="left")
+    ax = fig.add_subplot(2, 3, len(keys) + 1)
+    diffs = {
+        "label": "Fast minus slow",
+        "unit": "difference in share",
+        "per_model": {
+            section["metrics"][k]["label"]: section["metrics"][k]["fast_minus_slow"] for k in keys
+        },
+    }
+    interval_panel(ax, diffs, list(diffs["per_model"]), zero=True)
+    ax.title.set_fontsize(8)
+    ax.tick_params(axis="y", labelsize=6)
+    fig.subplots_adjust(left=0.1, right=0.98, top=0.88, bottom=0.16, wspace=0.75, hspace=0.6)
+    caption(
+        fig,
+        report,
+        f"{section['games']} games, {section['seats']} Seats. Vote Pull positions: "
+        f"{section['pull_source']} ({report['speed']['pull_note']})",
+    )
+    return fig
+
+
+def speed_pull(report: dict[str, Any], mode: str) -> Figure:
+    """Every Seat's Vote Pull against its character share, by tier; Seats with high
+    Vote Pull that pushed a Crewmate are highlighted."""
+    speed = report["speed"]
+    section = speed["modes"][mode]
+    seats = [
+        s
+        for s in speed["seats"]
+        if s["mode"] == mode and s["vote_pull"] is not None and s["char_share"] is not None
+    ]
+    fig = Figure(figsize=(10, 6))
+    ax = fig.add_axes((0.08, 0.17, 0.62, 0.73))
+    ax.set_title(
+        "Vote Pull vs share of Meeting characters, per Seat, by Talk Budget tier",
+        color=INK,
+        fontsize=10,
+        pad=10,
+    )
+    ax.set_xlabel("Share of the game's spoken Meeting characters")
+    ax.set_ylabel(section["metrics"]["vote_pull"]["label"])
+    ax.grid(color=GRID, linewidth=0.6)
+    ax.axhline(speed["high_pull"], color=PAIR, linewidth=0.8, linestyle="--")
+    if not seats:
+        note(ax, "No Seat has taken a position yet")
+        caption(fig, report)
+        return fig
+    labels = dict(zip(speed["tiers"], tier_labels(report), strict=True))
+    for tier in speed["tiers"]:
+        mine = [s for s in seats if s["tier"] == tier]
+        if not mine:
+            continue
+        ax.scatter(
+            [s["char_share"] for s in mine],
+            [s["vote_pull"] for s in mine],
+            marker=TIER_MARKERS[tier],
+            s=16,
+            color=PAIR,
+            alpha=0.7,
+            label=labels[tier],
+            zorder=2,
+        )
+    wrong = [s for s in seats if s["high_pull_wrong"]]
+    if wrong:
+        ax.scatter(
+            [s["char_share"] for s in wrong],
+            [s["vote_pull"] for s in wrong],
+            s=70,
+            facecolors="none",
+            edgecolors=HIGHLIGHT,
+            linewidths=1.2,
+            label=f"Vote Pull >= {speed['high_pull']} and pushed a Crewmate",
+            zorder=3,
+        )
+    # Tier estimates with their intervals on both axes.
+    x = section["metrics"]["char_share"]["per_tier"]
+    y = section["metrics"]["vote_pull"]["per_tier"]
+    for tier in speed["tiers"]:
+        xe, ye = x[tier], y[tier]
+        if xe["estimate"] is None or ye["estimate"] is None:
+            continue
+        at_x, at_y = np.array([xe["estimate"]]), np.array([ye["estimate"]])
+        # A defined estimate can have no finite replicate (null bounds): draw the point only.
+        xlo, xhi, ylo, yhi = (
+            np.array([np.nan if v is None else v], dtype=float)
+            for v in (xe["ci_low"], xe["ci_high"], ye["ci_low"], ye["ci_high"])
+        )
+        interval_bars(ax, at_y, xlo, xhi, horizontal=True, lw=1.4)
+        interval_bars(ax, at_x, ylo, yhi, horizontal=False, lw=1.4)
+        ax.scatter(at_x, at_y, marker=TIER_MARKERS[tier], s=70, color=DOT, zorder=4)
+    ax.legend(fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.02, 1.0))
+    caption(
+        fig,
+        report,
+        "Large dark markers: each tier's pooled estimate with intervals on both axes. "
+        f"Dashed line: Vote Pull {speed['high_pull']}. Vote Pull positions: "
+        f"{section['pull_source']}.",
+    )
     return fig

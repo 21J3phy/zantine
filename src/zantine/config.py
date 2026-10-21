@@ -24,6 +24,13 @@ class GameConfig:
     meeting_passes: int = 3
     # Talk Budget per Meeting pass, in characters; longer speech is truncated.
     talk_budget_chars: int = 500
+    # Per-Seat Talk Budgets (the speed experiment, v1.5): one entry per Seat,
+    # overriding ``talk_budget_chars``. None = every Seat has ``talk_budget_chars``.
+    # A player is only ever told its own budget (``talk_budget``).
+    talk_budgets: tuple[int, ...] | None = None
+    # The tier label behind each Seat's budget (e.g. "fast"), recorded in the
+    # transcript header for analysis only; never shown to any player.
+    talk_tiers: tuple[str, ...] | None = None
     # Crisis: Rounds the Impostors must wait before the first Crisis and after
     # each resolved one; the crew must resolve it within ``crisis_deadline``
     # Rounds after the Round it was triggered in.
@@ -63,6 +70,24 @@ class GameConfig:
                 0 <= s < self.num_seats for s in seats
             ):
                 raise ValueError(f"bad impostor_seats {seats!r}")
+        if self.talk_budget_chars < 1:
+            raise ValueError("talk_budget_chars must be at least 1")
+        if self.talk_budgets is not None and (
+            len(self.talk_budgets) != self.num_seats
+            or not all(type(b) is int and b >= 1 for b in self.talk_budgets)
+        ):
+            raise ValueError(f"talk_budgets needs one budget >= 1 per Seat: {self.talk_budgets!r}")
+        if self.talk_tiers is not None and (
+            self.talk_budgets is None or len(self.talk_tiers) != self.num_seats
+        ):
+            raise ValueError("talk_tiers needs talk_budgets and one tier per Seat")
+
+    def talk_budget(self, seat: int) -> int:
+        """Seat ``seat``'s Talk Budget in characters per Meeting pass. Any later
+        per-Seat speech limit (e.g. Room Chat) should read it from here too."""
+        if self.talk_budgets is None:
+            return self.talk_budget_chars
+        return self.talk_budgets[seat]
 
     @property
     def impostor_count_text(self) -> str:

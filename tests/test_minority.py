@@ -172,7 +172,6 @@ def broken(plan: dict[str, Any], edit: Any) -> list[str]:
         (lambda m: m["games"][2].update(lineup=m["games"][2]["lineup"][:9]), "lineup"),
         (lambda m: m["config"].update(style_mask=True), "run-wide config"),
         (lambda m: m["games"].reverse(), "index"),
-        (lambda m: m.update(experiment="other"), "unknown experiment"),
     ],
 )
 def test_verify_catches_a_broken_plan(plan: dict[str, Any], edit: Any, problem: str) -> None:
@@ -207,7 +206,7 @@ def test_cli_schedules_the_minority_experiment(
     assert load_manifest(run_dir) == make_minority_manifest(POOL, 5)
     with pytest.raises(SystemExit):
         main(["schedule", "--experiment", "minority", "--blocks", "2"])
-    assert "only apply to --experiment main" in capsys.readouterr().err
+    assert "do not apply to --experiment minority" in capsys.readouterr().err
 
 
 @pytest.mark.skipif(HAS_MASK, reason="the engine has the Style Mask (#66)")

@@ -43,9 +43,10 @@ listed explicitly in the manifest (for Seed Commitments, ADR 0001). Names, seat
 order and the map are drawn from that seed, so they are re-shuffled every game.
 
 **Experiments.** A manifest without an ``experiment`` field is the v1 plan
-above. ``make_minority_manifest`` plans the v1.3 Minority Disadvantage
-experiment (``"experiment": "minority"``, see its docstring), and ``verify`` and
-``summary`` dispatch on the field.
+above (the speed experiment, ``speed.py``, is v1 blocks plus Talk Budgets).
+``make_minority_manifest`` plans the v1.3 Minority Disadvantage experiment
+(``"experiment": "minority"``, see its docstring); ``verify`` and ``summary``
+dispatch to it on that field.
 """
 
 from __future__ import annotations
@@ -73,10 +74,8 @@ SEED_DERIVATION = "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >
 
 Pairing = tuple[str, str]
 
-# Experiments a manifest can plan (its ``experiment`` field; absent = MAIN).
-MAIN = "main"
+# The v1.3 Minority Disadvantage plan's ``experiment`` field (absent = the v1 plan).
 MINORITY = "minority"
-EXPERIMENTS = (MAIN, MINORITY)
 
 
 def load_pool() -> list[str]:
@@ -318,11 +317,9 @@ def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
 
 def verify(manifest: dict[str, Any]) -> list[str]:
     """Every scheduling invariant; returns the problems found (empty = valid)."""
-    experiment = manifest.get("experiment", MAIN)
-    if experiment == MINORITY:
+    # Other experiments (e.g. speed) are v1 blocks plus their own checks on top.
+    if manifest.get("experiment") == MINORITY:
         return verify_minority(manifest)
-    if experiment != MAIN:
-        return [f"unknown experiment {experiment!r}"]
     pool = manifest["pool"]
     design = CyclicDesign(pool)
     games = manifest["games"]
