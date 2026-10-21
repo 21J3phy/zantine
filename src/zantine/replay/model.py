@@ -422,6 +422,10 @@ class _Builder:
                 item.update(category="game")
                 item["text"] = "Containment: every Impostor has been ejected; play continues"
                 item["public"] = None
+            case "relevance.marked":
+                # Scoring bookkeeping; a mark from a witnessed kill names the killer.
+                item = _generic_item(r, self.names)
+                item.update(detail=True, public=None)
             case "game_over":
                 item.update(category="game")
                 _text(item, f"Game over: {_outcome(data.get('winner'))} ({data.get('reason')})")
