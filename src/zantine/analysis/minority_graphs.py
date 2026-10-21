@@ -2,6 +2,9 @@
 
 Same rules as ``graphs.py``: Models in fixed alphabetical order, one neutral
 colour, titles that say what is measured, the interval caption on every chart.
+A dry, mixed or unknown-provenance run carries its label as a banner under the
+title of every chart (``report["provenance"]``), so no exported graph passes
+scripted data off as Model evidence.
 The two Style Mask conditions are told apart by marker fill (filled = without,
 open = with), not by colour.
 
@@ -90,10 +93,41 @@ def not_estimable(ax: Any, at: np.ndarray) -> None:
         )
 
 
-def legend(fig: Figure, ax: Any) -> None:
+def legend(fig: Figure, ax: Any, report: dict[str, Any], height: float) -> None:
     """The two Style Mask markers, once per figure, clear of every panel."""
     handles, labels = ax.get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper right", ncol=2, frameon=False, fontsize=7.5)
+    y = 1 - (0.68 if banner_text(report) else 0.42) / height
+    fig.legend(
+        handles,
+        labels,
+        loc="upper right",
+        bbox_to_anchor=(0.98, y),
+        ncol=2,
+        frameon=False,
+        fontsize=7.5,
+    )
+
+
+def banner_text(report: dict[str, Any]) -> str | None:
+    return (report.get("provenance") or {}).get("label")
+
+
+def heading(fig: Figure, report: dict[str, Any], title: str, height: float) -> float:
+    """Title, the provenance banner when there is one; returns the axes' top."""
+    fig.suptitle(title, color=INK, fontsize=10.5, y=1 - 0.12 / height, va="top")
+    label = banner_text(report)
+    if label:
+        fig.text(
+            0.5,
+            1 - 0.42 / height,
+            label,
+            ha="center",
+            va="top",
+            fontsize=8.5,
+            fontweight="bold",
+            color=INK,
+        )
+    return 1 - (1.15 if label else 0.85) / height
 
 
 def _rows(groups: dict[str, Any], pooled: dict[str, Any], models: list[str], key: str):
@@ -105,13 +139,14 @@ def _rows(groups: dict[str, Any], pooled: dict[str, Any], models: list[str], key
 def disadvantage(report: dict[str, Any]) -> Figure:
     models = report["models"]
     d = report["disadvantage"]
-    height = 1.6 + 0.42 * (len(models) + 1)
+    height = 2.0 + 0.42 * (len(models) + 1)
     fig = Figure(figsize=(12, height))
-    fig.suptitle(
+    top = heading(
+        fig,
+        report,
         "Minority Disadvantage: wrongful-ejection rate of minority minus majority Crewmates "
         "(Lopsided Lobbies, 8 vs 2)",
-        color=INK,
-        fontsize=10.5,
+        height,
     )
     xlabel = "minority - majority rate (> 0: minority ejected more)"
     for n, (key, title) in enumerate(
@@ -120,10 +155,8 @@ def disadvantage(report: dict[str, Any]) -> Figure:
         ax = fig.add_subplot(1, 2, n + 1)
         paired_panel(ax, _rows(d[key], d["pooled"], models, "disadvantage"), title, xlabel)
         if n == 0:
-            legend(fig, ax)
-    fig.subplots_adjust(
-        left=0.15, right=0.98, top=1 - 0.7 / height, bottom=1.05 / height, wspace=0.55
-    )
+            legend(fig, ax, report, height)
+    fig.subplots_adjust(left=0.15, right=0.98, top=top, bottom=1.05 / height, wspace=0.55)
     caption(fig, report, f"Reading: {report['verdict']['text']}")
     return fig
 
@@ -132,9 +165,9 @@ def rates(report: dict[str, Any]) -> Figure:
     models = report["models"]
     d = report["disadvantage"]
     pooled = d["pooled"]
-    height = 1.6 + 0.42 * (len(models) + 1)
+    height = 2.0 + 0.42 * (len(models) + 1)
     fig = Figure(figsize=(12, height))
-    fig.suptitle("Wrongful-ejection rates and the Style Mask's effect", color=INK, fontsize=10.5)
+    top = heading(fig, report, "Wrongful-ejection rates and the Style Mask's effect", height)
     ax = fig.add_subplot(1, 2, 1)
     rows = [
         ("Minority Crewmates", pooled["off"]["minority_rate"], pooled["mask"]["minority_rate"]),
@@ -143,7 +176,7 @@ def rates(report: dict[str, Any]) -> Figure:
     paired_panel(
         ax, rows, "Pooled wrongful-ejection rate", "share of Crewmate Seats ejected", zero=False
     )
-    legend(fig, ax)
+    legend(fig, ax, report, height)
     ax = fig.add_subplot(1, 2, 2)
     labels = [POOLED, *models]
     change = [pooled["change"], *(d["by_majority"][m]["change"] for m in models)]
@@ -160,13 +193,20 @@ def rates(report: dict[str, Any]) -> Figure:
     ax.scatter(est[ok], y[ok], s=24, color=DOT, zorder=3)
     not_estimable(ax, y[~ok])
     ax.set_title(
-        "Change the Style Mask makes, by majority Model", fontsize=9, color=INK, loc="left"
+        "Change the Style Mask makes (twinned setups), by majority Model",
+        fontsize=9,
+        color=INK,
+        loc="left",
     )
     ax.set_xlabel("disadvantage without - with mask (> 0: mask shrinks it)", fontsize=7.5)
-    fig.subplots_adjust(
-        left=0.15, right=0.98, top=1 - 0.7 / height, bottom=1.05 / height, wspace=0.55
+    fig.subplots_adjust(left=0.15, right=0.98, top=top, bottom=1.05 / height, wspace=0.55)
+    cov = report["coverage"]
+    caption(
+        fig,
+        report,
+        f"Rates use every complete game (descriptive); the change uses the "
+        f"{cov['twinned_setups']} of {cov['planned_setups']} setups with both games complete.",
     )
-    caption(fig, report)
     return fig
 
 
@@ -176,12 +216,13 @@ def scapegoating(report: dict[str, Any]) -> Figure:
     kinds = [("votes", "Impostor votes (ground truth)")]
     if "accusations" in s:
         kinds.append(("accusations", "Impostor accusations (#15 judgments)"))
-    height = 1.6 + 0.42 * (len(models) + 1)
-    fig = Figure(figsize=(6 * len(kinds) + 1, height))
-    fig.suptitle(
+    height = 2.0 + 0.42 * (len(models) + 1)
+    fig = Figure(figsize=(6 * len(kinds) + 3, height))
+    top = heading(
+        fig,
+        report,
         "Scapegoating: Impostor targets that are minority Crewmates, minus the base rate",
-        color=INK,
-        fontsize=10.5,
+        height,
     )
     for n, (key, title) in enumerate(kinds):
         ax = fig.add_subplot(1, len(kinds), n + 1)
@@ -202,11 +243,11 @@ def scapegoating(report: dict[str, Any]) -> Figure:
             "share at minority - base rate (> 0: more than chance)",
         )
         if n == 0:
-            legend(fig, ax)
+            legend(fig, ax, report, height)
     fig.subplots_adjust(
         left=0.2 if len(kinds) == 1 else 0.15,
         right=0.98,
-        top=1 - 0.7 / height,
+        top=top,
         bottom=1.05 / height,
         wspace=0.55,
     )

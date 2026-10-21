@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+import shutil
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from zantine.analysis.minority import (
     Target,
     build_minority_report,
     cluster_weights,
+    load_minority_run,
     lobby_game,
     transcript_digest,
     write_minority_report,
@@ -470,7 +472,7 @@ def contains(e: dict[str, Any], value: float) -> bool:
 
 def test_a_planted_disadvantage_that_the_mask_removes_is_recovered() -> None:
     data = planted(minority_off=0.35, minority_mask=0.10)
-    report = build_minority_report(data, replicates=1000, seed=3, dry=False)
+    report = build_minority_report(data, replicates=1000, seed=3, run_mode="live")
     pooled = report["disadvantage"]["pooled"]
     assert contains(pooled["off"]["disadvantage"], 0.25)
     assert pooled["off"]["disadvantage"]["ci_low"] > 0
@@ -483,7 +485,7 @@ def test_a_planted_disadvantage_that_the_mask_removes_is_recovered() -> None:
 
 def test_a_disadvantage_the_mask_does_not_remove_is_not_called_out_group_bias() -> None:
     data = planted(minority_off=0.35, minority_mask=0.35)
-    report = build_minority_report(data, replicates=1000, seed=3, dry=False)
+    report = build_minority_report(data, replicates=1000, seed=3, run_mode="live")
     assert report["disadvantage"]["pooled"]["mask"]["disadvantage"]["ci_low"] > 0
     assert report["verdict"]["status"] == "not_removed"
     assert "not claimed" in report["verdict"]["text"]
@@ -491,7 +493,7 @@ def test_a_disadvantage_the_mask_does_not_remove_is_not_called_out_group_bias() 
 
 def test_no_planted_disadvantage_claims_nothing() -> None:
     data = planted(minority_off=0.10, minority_mask=0.10)
-    report = build_minority_report(data, replicates=1000, seed=3, dry=False)
+    report = build_minority_report(data, replicates=1000, seed=3, run_mode="live")
     pooled = report["disadvantage"]["pooled"]
     assert contains(pooled["off"]["disadvantage"], 0.0)
     assert report["verdict"]["status"] == "no_disadvantage"
@@ -500,7 +502,7 @@ def test_no_planted_disadvantage_claims_nothing() -> None:
 def test_a_disadvantage_planted_under_one_majority_model_shows_in_its_panel() -> None:
     target = POOL[2]
     data = planted(minority_off=0.60, minority_mask=0.60, only_majority=target, waves=4)
-    report = build_minority_report(data, replicates=1000, seed=3, dry=False)
+    report = build_minority_report(data, replicates=1000, seed=3, run_mode="live")
     by_majority = report["disadvantage"]["by_majority"]
     assert by_majority[target]["off"]["disadvantage"]["ci_low"] > 0
     assert contains(by_majority[target]["off"]["disadvantage"], 0.5)
@@ -514,13 +516,13 @@ def test_a_disadvantage_planted_under_one_majority_model_shows_in_its_panel() ->
 
 def test_planted_scapegoating_is_recovered_against_the_base_rate() -> None:
     data = planted(minority_off=0.1, minority_mask=0.1, scapegoat=0.55)
-    report = build_minority_report(data, replicates=1000, seed=3, dry=False)
+    report = build_minority_report(data, replicates=1000, seed=3, run_mode="live")
     votes = report["scapegoating"]["votes"]["pooled"]["off"]
     assert votes["base_rate"]["estimate"] == pytest.approx(0.25)
     assert contains(votes["excess"], 0.30) and votes["excess"]["ci_low"] > 0
     assert "accusations" not in report["scapegoating"]
     null = planted(minority_off=0.1, minority_mask=0.1, scapegoat=0.25, seed=1)
-    excess = build_minority_report(null, replicates=1000, seed=3, dry=False)["scapegoating"]
+    excess = build_minority_report(null, replicates=1000, seed=3, run_mode="live")["scapegoating"]
     assert contains(excess["votes"]["pooled"]["off"]["excess"], 0.0)
 
 
@@ -534,3 +536,150 @@ def test_the_bootstrap_resamples_setups_so_twins_move_together(plan: dict[str, A
         assert len(idx) == 2
         assert np.array_equal(w[:, idx[0]], w[:, idx[1]])
     assert np.allclose(w.sum(axis=1), 2 * len(by_setup))
+
+
+# Review round 1: matched contrast, removal, plan binding, provenance ----------------------
+
+
+def report_of(data: MinorityData) -> dict[str, Any]:
+    return build_minority_report(data, replicates=1000, seed=3, run_mode="live")
+
+
+def test_a_partial_reduction_is_reported_as_a_reduction_not_out_group_bias() -> None:
+    # The reviewer's case: the mask cuts 0.40 to 0.06, and 0.11 is still in the interval.
+    data = planted(minority_off=0.50, minority_mask=0.16, seed=5)
+    report = build_minority_report(data, replicates=2000, seed=0, run_mode="live")
+    pooled = report["disadvantage"]["pooled"]
+    assert pooled["change"]["ci_low"] > 0
+    assert pooled["mask"]["disadvantage"]["ci_high"] >= 0.10
+    assert report["verdict"]["status"] == "reduced"
+    assert "not claimed" in report["verdict"]["text"]
+    # A larger residual is a reduction too, never removal.
+    bigger = report_of(planted(minority_off=0.50, minority_mask=0.25))
+    assert bigger["verdict"]["status"] in ("reduced", "not_removed")
+
+
+def test_a_two_game_prefix_of_different_setups_reads_nothing() -> None:
+    manifest = make_minority_manifest(POOL, 0)
+    first, second = manifest["games"][:2]
+    assert first["setup"] != second["setup"] and first["style_mask"] != second["style_mask"]
+
+    def game(g: dict[str, Any], ejected: int) -> LobbyGame:
+        return LobbyGame(
+            id=g["id"],
+            setup=g["setup"],
+            majority=g["majority"],
+            minority=g["minority"],
+            condition="mask" if g["style_mask"] else "off",
+            minority_crew=2,
+            minority_ejected=ejected,
+            majority_crew=6,
+            majority_ejected=0,
+        )
+
+    off = first if not first["style_mask"] else second
+    on = second if off is first else first
+    data = MinorityData(run_dir=None, manifest=manifest, games=[game(off, 2), game(on, 0)])
+    report = report_of(data)
+    assert report["coverage"]["twinned_setups"] == 0
+    assert report["disadvantage"]["pooled"]["change"]["estimate"] is None
+    assert report["verdict"]["status"] == "awaiting_complete_run"
+
+
+def test_the_mask_change_uses_twinned_setups_only() -> None:
+    # Unpaired setups with a different baseline must not move the matched contrast.
+    data = planted(minority_off=0.35, minority_mask=0.10)
+    twins = {g.setup for g in data.games[::4]}
+    kept = []
+    for g in data.games:
+        if g.setup in twins:
+            kept.append(g)
+        elif g.condition == "off":  # its mask twin is missing; make it look extreme
+            g.minority_ejected = 2
+            kept.append(g)
+    partial = MinorityData(run_dir=None, manifest=data.manifest, games=kept)
+    report = report_of(partial)
+    matched = MinorityData(
+        run_dir=None, manifest=data.manifest, games=[g for g in kept if g.setup in twins]
+    )
+    want = report_of(matched)["disadvantage"]["pooled"]["change"]["estimate"]
+    assert report["disadvantage"]["pooled"]["change"]["estimate"] == pytest.approx(want)
+    assert report["coverage"]["twinned_setups"] == len(twins) < 84
+    assert report["verdict"]["status"] == "awaiting_complete_run"
+
+
+def test_transcripts_that_are_not_the_planned_game_are_left_out(
+    off_run: Path, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "swapped"
+    shutil.copytree(off_run, run_dir, ignore=shutil.ignore_patterns("report"))
+    games = run_dir / "games"
+    manifest = load_manifest(run_dir)
+    # Two waves of the same ordered pair, each transcript under the other's name.
+    a = manifest["games"][0]
+    b = next(
+        g
+        for g in manifest["games"]
+        if (g["majority"], g["minority"]) == (a["majority"], a["minority"]) and g is not a
+    )
+    pa, pb = games / f"{a['id']}.jsonl", games / f"{b['id']}.jsonl"
+    ta, tb = pa.read_text("utf-8"), pb.read_text("utf-8")
+    pa.write_text(tb, "utf-8")
+    pb.write_text(ta, "utf-8")
+    # A complete transcript whose minority Seats are an out-of-pool Model.
+    c = manifest["games"][5]
+    pc = games / f"{c['id']}.jsonl"
+    pc.write_text(pc.read_text("utf-8").replace(f'"{c["minority"]}"', '"not-a-model"'), "utf-8")
+    data = load_minority_run(run_dir)
+    left_out = {m["game"]: m["reason"] for m in data.mismatched}
+    assert set(left_out) == {a["id"], b["id"], c["id"]}
+    assert "seed" in left_out[a["id"]] and "seats" in left_out[c["id"]]
+    assert {g.id for g in data.games}.isdisjoint(left_out)
+    report = build_minority_report(data, replicates=50)
+    assert {m["game"] for m in report["run"]["transcripts_not_matching_plan"]} == set(left_out)
+
+
+def svg_texts(out: Path) -> dict[str, str]:
+    return {
+        p.stem: " ".join(re.findall(r"<text[^>]*>(.*?)</text>", p.read_text("utf-8"), flags=re.S))
+        for p in out.glob("*.svg")
+    }
+
+
+def test_every_graph_of_a_dry_run_says_so(off_run: Path, tmp_path: Path) -> None:
+    out, report = write_minority_report(off_run, out_dir=tmp_path / "r", replicates=50)
+    assert report["provenance"]["status"] == "dry"
+    texts = svg_texts(out)
+    assert set(texts) == {"minority_disadvantage", "minority_rates", "scapegoating"}
+    for name, text in texts.items():
+        assert "Dry run: scripted bots" in text, name
+    assert "Dry run: scripted bots" in (out / "minority.md").read_text("utf-8")
+
+
+@pytest.mark.parametrize(
+    "run_json, status",
+    [(None, "dry"), ({"mode": "live"}, "mixed")],
+)
+def test_unknown_or_mixed_provenance_is_never_shown_as_live(
+    off_run: Path, tmp_path: Path, run_json: dict[str, str] | None, status: str
+) -> None:
+    run_dir = tmp_path / "copy"
+    shutil.copytree(off_run, run_dir, ignore=shutil.ignore_patterns("report"))
+    if run_json is None:
+        (run_dir / "run.json").unlink()
+    else:
+        (run_dir / "run.json").write_text(json.dumps(run_json), "utf-8")
+    out, report = write_minority_report(run_dir, replicates=50)
+    assert report["provenance"]["status"] == status
+    for name, text in svg_texts(out).items():
+        assert report["provenance"]["label"].split(":")[0] in text, name
+
+
+def test_live_seats_without_a_live_run_json_have_unknown_provenance() -> None:
+    data = planted(minority_off=0.1, minority_mask=0.1)
+    assert build_minority_report(data, replicates=20)["provenance"]["status"] == "unknown"
+    live = build_minority_report(data, replicates=20, run_mode="live")
+    assert live["provenance"] == {"status": "live", "label": None}
+    assert build_minority_report(data, replicates=20, run_mode="dry")["provenance"]["status"] == (
+        "mixed"
+    )
