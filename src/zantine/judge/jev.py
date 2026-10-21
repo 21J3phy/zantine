@@ -20,6 +20,10 @@ Safety:
   ``usage`` (including one that isn't JSON or has no ``answers``) is charged at
   the worst-case estimate for its request (and flagged ``usage_estimated``),
   never as free, so retries and later batches still draw on the spend cap.
+- A call that fails with no HTTP status (a network error or a reply lost to a
+  read timeout) may still have been billed, so its worst-case cost stays held
+  against the cap (``Ledger.hold``). An HTTP error status is a rejection and
+  costs nothing.
 
 Live gate: like live Seats, a Jev call needs an explicit flag plus
 ``ZANTINE_LIVE=1``, and the key comes from ``TYPESAFE_API_KEY``.
@@ -178,6 +182,8 @@ class JevJudge(Judge):
         self.served: list[str | None] = []
         # Batches whose reply had no valid usage (charged at the worst-case estimate).
         self.usage_estimated: list[str] = []
+        # Calls whose outcome is unknown (no reply, no HTTP status): worst case held.
+        self.held: list[dict[str, Any]] = []
 
     @classmethod
     def from_env(cls, ledger: Ledger, *, live: bool, spec: JevSpec | None = None) -> JevJudge:
@@ -202,6 +208,7 @@ class JevJudge(Judge):
             "prompt_sha256": prompt_hash(),
             "served": list(self.served),
             "usage_estimated": list(self.usage_estimated),
+            "held": list(self.held),
             "scoring": True,
         }
 
@@ -210,9 +217,24 @@ class JevJudge(Judge):
         return HarnessRequest(system="", tools=(), memory=(), tail=body)
 
     def judge(self, batch: Batch) -> Any:
-        response = self.ledger.send(
-            self.adapter, self.request(batch), purpose="jev", phase=batch.id, round=batch.round
-        )
+        reserved: list[float] = []
+        try:
+            response = self.ledger.send(
+                self.adapter,
+                self.request(batch),
+                purpose="jev",
+                phase=batch.id,
+                round=batch.round,
+                on_start=reserved.append,
+            )
+        except ProviderError as exc:
+            # An HTTP error status is a rejection, never billed. Without one the request
+            # may have been processed and billed (e.g. the reply was lost to a read
+            # timeout): hold its worst case against the cap, as the extractor does.
+            if exc.status is None and reserved:
+                self.ledger.hold(reserved[0])
+                self.held.append({"batch": batch.id, "usd": round(reserved[0], 10)})
+            raise
         served = response.raw.get("model")
         if served not in self.served:
             self.served.append(served)

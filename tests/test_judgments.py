@@ -570,6 +570,75 @@ def test_malformed_replies_are_still_billed(body: str, estimated: bool) -> None:
     assert 0 < capped.spent_usd <= capped.spend_cap_usd + 1000 * 0.042e-6
 
 
+class _LostReply(io.BytesIO):
+    def read(self, *args: Any) -> bytes:
+        raise TimeoutError("the read operation timed out")
+
+
+def _opener(code: int) -> urllib.request.OpenerDirector:
+    """An in-process HTTPS transport: a 200 whose body read times out, or an error status."""
+
+    class Fake(urllib.request.HTTPSHandler):
+        def https_open(self, req: urllib.request.Request) -> Any:
+            body = _LostReply() if code == 200 else io.BytesIO(b'{"detail": "slow down"}')
+            resp = urllib.request.addinfourl(body, Message(), req.full_url, code)
+            resp.msg = "OK" if code == 200 else "Too Many Requests"
+            return resp
+
+    return urllib.request.build_opener(_NoRedirect, Fake)
+
+
+def _http_jev(ledger: Ledger, code: int) -> JevJudge:
+    spec = JevSpec()
+
+    def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
+        return http_post(url, headers, payload, opener=_opener(code))
+
+    return JevJudge(spec, ledger, JevAdapter(spec, post, "test-key"))
+
+
+def test_a_lost_reply_keeps_its_reservation() -> None:
+    """A request whose reply is lost may have been billed: its worst case stays held."""
+    records = vote_game()
+    ledger = Ledger(1.0)
+    judge = _http_jev(ledger, 200)
+    report = judged(records, judge, ledger=ledger)
+    assert report["batch_errors"] == len(report["calls"])
+    # Every batch was tried twice; each attempt's worst case is held, with no usage to price.
+    assert len(ledger.records) == len(judge.info()["held"]) == 2 * len(report["calls"])
+    assert all(not r.ok and r.cost_usd == 0 for r in ledger.records)
+    assert ledger.spent_usd == pytest.approx(sum(h["usd"] for h in judge.info()["held"]))
+    assert ledger.spent_usd > 0
+
+    # Repeated runs on one ledger stop at the cap instead of continuing for free.
+    capped = Ledger(0.002)
+    judge = _http_jev(capped, 200)
+    for _ in range(100):
+        report = judged(records, judge, ledger=capped)
+        if report["aborted"]:
+            break
+    assert report["aborted"]["reason"] == "spend_cap"
+    assert 0 < capped.spent_usd <= capped.spend_cap_usd
+
+
+def test_an_http_rejection_is_not_held() -> None:
+    ledger = Ledger(1.0)
+    judge = _http_jev(ledger, 429)
+    report = judged(vote_game(), judge, ledger=ledger)
+    assert report["batch_errors"] == len(report["calls"])
+    assert ledger.spent_usd == 0 and judge.info()["held"] == []
+
+
+def test_judgments_respect_spend_already_on_the_ledger() -> None:
+    """The extractor and Jev share one cap: earlier spend leaves less for Jev."""
+    ledger = Ledger(0.002)
+    ledger.hold(0.002 - 1e-6)  # e.g. extractor calls already made in this run
+    judge = _http_jev(ledger, 200)
+    report = judged(vote_game(), judge, ledger=ledger)
+    assert report["aborted"]["reason"] == "spend_cap"
+    assert ledger.records == [] and judge.info()["held"] == []
+
+
 def test_redirects_are_refused_with_the_key() -> None:
     sent: list[urllib.request.Request] = []
 

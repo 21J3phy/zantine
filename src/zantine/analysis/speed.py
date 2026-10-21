@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -69,6 +69,11 @@ class SpeedSeat:
     floor_share: float | None = None
     char_share: float | None = None
     pull_source: str = "proxy"  # judged (#15) / proxy (own votes)
+    # The judge behind judged positions, e.g. "jev jev-1.13.0"; None for the proxy.
+    pull_judge: str | None = None
+    # Why an audit's judgments bound to this transcript were not used, if they weren't:
+    # "not_scoring" (a dry-run judge) or "incomplete" (failed batches, unresolved positions).
+    judgments_ignored: str | None = None
     positions: int = 0
     pull_matches: int = 0
     pull_ballots: int = 0
@@ -95,27 +100,50 @@ def audit_path(transcript: Path) -> Path | None:
     return None
 
 
-def judged_positions(
-    transcript: Path, records: list[dict[str, Any]]
-) -> list[dict[str, Any]] | None:
-    """#15's positions for this transcript, or None (no audit, unreadable, made from
-    another transcript, or no judgments). Each: ``{meeting, seat, target}``, where
-    the target is a Seat or ``"skip"``."""
+@dataclass(frozen=True)
+class Judged:
+    """#15's positions for one transcript, or why there are none to use."""
+
+    positions: list[dict[str, Any]] | None
+    judge: str | None = None
+    ignored: str | None = None  # "not_scoring" / "incomplete"
+
+
+def judged_positions(transcript: Path, records: list[dict[str, Any]]) -> Judged:
+    """#15's positions for this transcript, if a scoring judge produced all of them.
+
+    ``positions`` is None (use the proxy) with no audit, an unreadable one, one made
+    from another transcript, or no judgments; and, with ``ignored`` saying why, for
+    judgments from a non-scoring judge (the keyword dry run) or an incomplete run
+    (failed batches or unresolved positions), so neither enters a result labelled as
+    judged. Each position: ``{meeting, seat, target}``, the target a Seat or ``"skip"``.
+    """
     path = audit_path(transcript)
     if path is None:
-        return None
+        return Judged(None)
     try:
         data = json.loads(path.read_text("utf-8"))
     except (OSError, ValueError):
-        return None
+        return Judged(None)
     judgments = data.get("judgments") if isinstance(data, dict) else None
     if not isinstance(judgments, dict) or not isinstance(judgments.get("positions"), list):
-        return None
+        return Judged(None)
     # Only an audit bound to exactly this transcript counts; an unbound one (no,
     # null or empty digest) could be from any game.
     bound = judgments.get("transcript_sha256")
     if not isinstance(bound, str) or bound != digest(records):
-        return None
+        return Judged(None)
+    judge = judgments.get("judge")
+    if not isinstance(judge, dict) or judge.get("scoring") is not True:
+        return Judged(None, ignored="not_scoring")
+    complete = (
+        judgments.get("complete") is True
+        and judgments.get("batch_errors") == 0
+        and judgments.get("unresolved_positions") == []
+    )
+    if not complete:
+        return Judged(None, ignored="incomplete")
+    name = " ".join(str(judge[k]) for k in ("name", "version") if judge.get(k))
     out = []
     for p in judgments["positions"]:
         if not isinstance(p, dict):
@@ -123,7 +151,7 @@ def judged_positions(
         meeting, seat, target = p.get("meeting"), p.get("seat"), p.get("target")
         if type(meeting) is int and type(seat) is int and (type(target) is int or target == SKIP):
             out.append({"meeting": meeting, "seat": seat, "target": target})
-    return out
+    return Judged(out, judge=name or None)
 
 
 def ballots(records: list[dict[str, Any]]) -> dict[int, dict[int, tuple[int | None, bool]]]:
@@ -185,7 +213,8 @@ def speed_seats(
         row.char_share = row.chars / chars if chars else None
 
     votes = ballots(records)
-    positions = judged_positions(transcript, records)
+    judged = judged_positions(transcript, records)
+    positions = judged.positions
     source = "judged" if positions is not None else "proxy"
     if positions is None:
         positions = proxy_positions(votes)
@@ -207,6 +236,8 @@ def speed_seats(
             row.wrong_matches += hit and wrong
     for row in rows.values():
         row.pull_source = source
+        row.pull_judge = judged.judge
+        row.judgments_ignored = judged.ignored
         if row.pull_ballots:
             row.vote_pull = row.pull_matches / row.pull_ballots
         row.high_pull_wrong = (
@@ -314,6 +345,13 @@ def _matrix(
     return num, den
 
 
+def _first_per_game(seats: list[SpeedSeat]) -> list[SpeedSeat]:
+    seen: dict[str, SpeedSeat] = {}
+    for s in seats:
+        seen.setdefault(s.game, s)
+    return list(seen.values())
+
+
 def tier_section(
     seats: list[SpeedSeat], mode: str, replicates: int, seed: int
 ) -> dict[str, Any] | None:
@@ -363,6 +401,16 @@ def tier_section(
         "strata": sorted(set(kinds.values())),
         "pull_source": source,
         "judged_games": len(judged),
+        # Who judged the judged games, and how many games' judgments were left out
+        # (non-scoring or incomplete) in favour of the labelled proxy.
+        "judges": sorted({s.pull_judge for s in seats if s.pull_judge}),
+        "judgments_ignored": dict(
+            sorted(
+                Counter(
+                    g.judgments_ignored for g in _first_per_game(seats) if g.judgments_ignored
+                ).items()
+            )
+        ),
         "metrics": metrics,
         "high_pull_wrong": sorted(highlights, key=lambda h: (h["game"], h["seat"])),
     }
@@ -391,8 +439,9 @@ def speed_report(
         },
         "pull_note": (
             "Vote Pull positions are #15's judgments (who a Seat pushed to eject) when "
-            "<transcript>.audit.json exists for the transcript; otherwise a proxy: the "
-            "player the Seat itself voted for."
+            "<transcript>.audit.json exists for the transcript and holds complete "
+            "judgments from a scoring judge; otherwise a proxy: the player the Seat "
+            "itself voted for."
         ),
         "modes": sections,
         "seats": [asdict(s) for s in seats],
