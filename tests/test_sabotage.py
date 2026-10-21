@@ -703,6 +703,12 @@ def test_roles_hidden_replay_redacts_fake_tasks_and_sabotage() -> None:
         ("Maybe T45 part 1 is 796.", []),
         ("T45 part 1 is 7961.", []),
         ("T45 part 3 from Amber fails my checksum.", []),
+        ("T47 part 2 is 315. T47 part 3 from Amber fails my checksum.", [("T47", 2, "315")]),
+        ("The string 'T45 part 1 is 796' contains six digits.", []),
+        ("'T45 part 1 is 796'.", []),
+        ("I doubt T45 part 1 is 796.", []),
+        ("I deny that T45 part 1 is 796.", []),
+        ("Amber thinks T45 part 1 is 796.", []),
     ],
 )
 def test_only_affirmative_fragment_statements_are_scored(text: str, claims: list[Any]) -> None:
@@ -720,6 +726,9 @@ def test_a_true_negation_or_question_is_never_a_false_fragment(channel: str) -> 
         f"{task.id} part {part_no} is not {other}; do not enter {other}.",
         f"Is {task.id} part {part_no} is {other}?",
         f'Someone said "{task.id} part {part_no} is {other}".',
+        f"The string '{task.id} part {part_no} is {other}' contains six digits.",
+        f"I doubt {task.id} part {part_no} is {other}.",
+        f"Amber thinks {task.id} part {part_no} is {other}.",
     ]
     if channel == "chat":
         put(game, task.content.inputs["rooms"]["entry"], *task.assignees)
