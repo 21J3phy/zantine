@@ -37,6 +37,13 @@ block's Benign Matches.
 **Mirror Matches** (descriptive only): 6 per Model, all 10 Seats one Model, 2
 Impostors. They come after every block in the run order.
 
+**Effort sweep** (v1.6, #26; ``make_effort_manifest``): a separate run of
+Mirror Matches only, 10 per Model at each of ``low`` and ``high`` effort (140
+games with a pool of 7); ``medium`` comes from the v1 run's Mirror Matches. Each
+game names its ``effort``, which every Seat plays at (``live:<model>?effort=``).
+Games are ordered in rounds of one game per (Model, level), shuffled within the
+round, so a run stopped early still has every cell about equally filled.
+
 **Seeds**: every game's seed is derived from the run's master seed and the
 game's id (``game_seed``), so it differs per game, is reproducible, and is
 listed explicitly in the manifest (for Seed Commitments, ADR 0001). Names, seat
@@ -44,9 +51,10 @@ order and the map are drawn from that seed, so they are re-shuffled every game.
 
 **Experiments.** A manifest without an ``experiment`` field is the v1 plan
 above (the speed experiment, ``speed.py``, is v1 blocks plus Talk Budgets).
-``make_minority_manifest`` plans the v1.3 Minority Disadvantage experiment
+``make_effort_manifest`` plans the v1.6 effort sweep, and
+``make_minority_manifest`` the v1.3 Minority Disadvantage experiment
 (``"experiment": "minority"``, see its docstring); ``verify`` and ``summary``
-dispatch to it on that field.
+dispatch on that field.
 """
 
 from __future__ import annotations
@@ -59,7 +67,7 @@ from itertools import combinations
 from typing import Any
 
 from zantine.harness import neutral
-from zantine.harness.pricing import load_models
+from zantine.harness.pricing import EFFORT_LEVELS, load_models
 from zantine.rng import GameRng
 from zantine.scenario import SCENARIO_VERSION
 from zantine.transcript import SCHEMA_VERSION
@@ -70,6 +78,10 @@ LOBBY_MODELS = 5
 SEATS_PER_MODEL = 2
 IMPOSTORS = 2
 MIRROR_PER_MODEL = 6
+EFFORT = "effort"  # manifest["experiment"] of an effort sweep
+# Effort sweep: Mirror Matches per Model at each swept level (medium comes from v1).
+EFFORT_PER_LEVEL = 10
+EFFORT_SWEEP_LEVELS = ("low", "high")
 SEED_DERIVATION = "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >> 1"
 
 Pairing = tuple[str, str]
@@ -285,6 +297,72 @@ def make_manifest(
     return manifest
 
 
+def make_effort_manifest(
+    pool: Sequence[str],
+    master_seed: int,
+    *,
+    levels: Sequence[str] = EFFORT_SWEEP_LEVELS,
+    per_level: int = EFFORT_PER_LEVEL,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The effort sweep (v1.6): ``per_level`` Mirror Matches per Model per effort level."""
+    if per_level < 1:
+        raise ValueError("per_level must be >= 1")
+    if not levels or len(set(levels)) != len(levels):
+        raise ValueError("effort levels must be distinct and non-empty")
+    bad = [lvl for lvl in levels if lvl not in EFFORT_LEVELS]
+    if bad:
+        raise ValueError(f"unknown effort level(s) {bad}; use {', '.join(EFFORT_LEVELS)}")
+    if len(set(pool)) != len(pool):
+        raise ValueError("Model Pool has duplicates")
+    specs = load_models()
+    for model in pool:  # refuse a level a Model's lab lacks before anything is played
+        if model in specs:
+            for level in levels:
+                specs[model].at_effort(level)
+    root = GameRng(master_seed)
+    games: list[dict[str, Any]] = []
+    for k in range(per_level):
+        planned = [
+            {
+                "id": f"effort-{level}-m{i}-{k + 1:02d}",
+                "block": None,
+                "kind": "mirror",
+                "lineup_id": None,
+                "lineup": [model],
+                "impostors": [model] * IMPOSTORS,
+                "effort": level,
+                "config": {},
+            }
+            for level in levels
+            for i, model in enumerate(pool)
+        ]
+        games += root.fork(f"order/round-{k + 1}").shuffled(planned)
+    for index, game in enumerate(games):
+        game["index"] = index
+        game["seed"] = game_seed(master_seed, game["id"])
+    if len({g["seed"] for g in games}) != len(games):  # astronomically unlikely
+        raise ValueError("seed collision; choose another master seed")
+    manifest = {
+        "manifest_version": MANIFEST_VERSION,
+        "experiment": EFFORT,
+        "master_seed": master_seed,
+        "seed_derivation": SEED_DERIVATION,
+        "pool": list(pool),
+        "blocks": 0,
+        "effort_levels": list(levels),
+        "effort_per_level": per_level,
+        "mirror_per_model": per_level * len(levels),
+        "engine": engine_versions(),
+        "config": dict(config or {}),
+        "games": games,
+    }
+    problems = verify(manifest)
+    if problems:
+        raise AssertionError(f"scheduler produced an invalid plan: {problems[:5]}")
+    return manifest
+
+
 def engine_versions() -> dict[str, Any]:
     """Versions that must not change in the middle of a run."""
     return {
@@ -317,9 +395,11 @@ def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
 
 def verify(manifest: dict[str, Any]) -> list[str]:
     """Every scheduling invariant; returns the problems found (empty = valid)."""
-    # Other experiments (e.g. speed) are v1 blocks plus their own checks on top.
+    # Speed manifests are v1 blocks plus their own checks on top, so they fall through.
     if manifest.get("experiment") == MINORITY:
         return verify_minority(manifest)
+    if manifest.get("experiment") == EFFORT:
+        return verify_effort(manifest)
     pool = manifest["pool"]
     design = CyclicDesign(pool)
     games = manifest["games"]
@@ -362,6 +442,31 @@ def verify(manifest: dict[str, Any]) -> list[str]:
     return out
 
 
+def verify_effort(manifest: dict[str, Any]) -> list[str]:
+    """The effort sweep's invariants: only Mirror Matches, each (Model, level) equally often."""
+    pool, levels = manifest["pool"], manifest["effort_levels"]
+    games = manifest["games"]
+    out: list[str] = []
+    if len({g["id"] for g in games}) != len(games):
+        out.append("duplicate game ids")
+    if len({g["seed"] for g in games}) != len(games):
+        out.append("duplicate seeds")
+    for g in games:
+        if g["seed"] != game_seed(manifest["master_seed"], g["id"]):
+            out.append(f"{g['id']}: seed is not derived from the master seed")
+        if g["kind"] != "mirror" or len(g["lineup"]) != 1:
+            out.append(f"{g['id']}: the effort sweep plays only Mirror Matches")
+        elif g["impostors"] != [g["lineup"][0]] * IMPOSTORS:
+            out.append(f"{g['id']}: wrong Impostors for a Mirror Match")
+        if g.get("effort") not in levels:
+            out.append(f"{g['id']}: effort {g.get('effort')!r} is not a swept level")
+    cells = Counter((g["lineup"][0], g.get("effort")) for g in games)
+    want = {(m, lvl): manifest["effort_per_level"] for m in pool for lvl in levels}
+    if cells != want:
+        out.append(f"effort cells unbalanced: {dict(cells)}")
+    return out
+
+
 def block_problems(block: Sequence[dict[str, Any]], pool: Sequence[str]) -> list[str]:
     n = len(pool)
     lobbies = [g for g in block if g["kind"] == "lobby"]
@@ -399,6 +504,12 @@ def all_pairings(pool: Sequence[str]) -> list[Pairing]:
 def summary(manifest: dict[str, Any]) -> str:
     if manifest.get("experiment") == MINORITY:
         return minority_summary(manifest)
+    if manifest.get("experiment") == EFFORT:
+        return (
+            f"{len(manifest['games'])} games: effort sweep, {manifest['effort_per_level']} Mirror "
+            f"Matches per Model at each of {', '.join(manifest['effort_levels'])} effort; "
+            f"pool of {len(manifest['pool'])}"
+        )
     kinds = Counter(g["kind"] for g in manifest["games"])
     return (
         f"{len(manifest['games'])} games: {manifest['blocks']} blocks x "
