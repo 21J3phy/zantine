@@ -10,7 +10,8 @@ Resolver order bands (leave gaps so plug-ins can slot in between):
  100  kills (core)            kills resolve first; victims' actions are cancelled
  200  movement (core)
  300  reports and emergency calls (core)
- 400  -  plug-ins: work on Tasks, Room Chat, Crisis, Sabotage ...
+ 400  -  plug-ins: work on Tasks (400), Room Chat (410), relays (450),
+          split-key (460), Crisis (500), Sabotage ...
  900  cooldown ticks (core)
 1000  end-of-Round room snapshots (core)
 ====  ===========================================================
@@ -51,6 +52,10 @@ class RoundContext:
     start_rooms: dict[int, str]
     # Seats killed this Round; their other actions are cancelled.
     killed: set[int] = field(default_factory=set)
+    # What each seat said alongside its accepted action (raw, before any Talk
+    # Budget); the Room Chat module decides who hears it. Seats whose Round was
+    # forfeited say nothing.
+    speech: dict[int, str] = field(default_factory=dict)
     meeting: MeetingRequest | None = None
     # Free-form per-module scratch data for this Round.
     scratch: dict[str, Any] = field(default_factory=dict)

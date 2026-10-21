@@ -6,7 +6,8 @@ error, like the Claim extractor), validates every answer and returns a
 plain-JSON section for the audit report. Definitions are in
 ``docs/metrics.md``; in short, per Seat:
 
-- **Floor Share**: its share of all spoken Meeting statements (no judge).
+- **Floor Share**: its share of all messages: spoken Meeting statements plus
+  delivered Room Chat messages (no judge).
 - **Vote Pull**: of the other players' ballots in Meetings where it argued for
   someone (or for skipping), the share that matched what it argued for.
 - Suspicion: of the other players' ballots in Meetings it voted in, the share
@@ -74,6 +75,19 @@ def ballots(records: Iterable[dict[str, Any]]) -> dict[int, dict[int, Ballot]]:
             d = r["data"]
             target = d["value"] if d["valid"] else None
             out[d["meeting"]][d["seat"]] = Ballot(target, not d["valid"])
+    return dict(out)
+
+
+def chat_messages(records: Iterable[dict[str, Any]]) -> dict[int, int]:
+    """Delivered Room Chat messages per speaker: one per ``chat.message`` event.
+
+    Dropped speech (speaker killed, blank, no budget) never becomes a
+    ``chat.message``, so it doesn't count; transcripts from before Room Chat have none.
+    """
+    out: dict[int, int] = defaultdict(int)
+    for r in records:
+        if r.get("kind") == "event" and r.get("type") == "chat.message":
+            out[r["data"]["speaker"]] += 1
     return dict(out)
 
 
@@ -311,7 +325,8 @@ def seat_metrics(
 ) -> list[dict[str, Any]]:
     votes = ballots(records)
     ejected = ejections(records)
-    total_messages = len(statements)
+    chat = chat_messages(records)
+    total_messages = len(statements) + sum(chat.values())
     out = []
     for seat in sorted(rec.names):
         mine = [p for p in positions if p["seat"] == seat]
@@ -345,7 +360,8 @@ def seat_metrics(
         ]
         misdirections = sum(ejected.get(p["meeting"]) == p["target"] for p in pushed_crew)
 
-        messages = sum(r["speaker"] == seat for r in statements)
+        meeting_messages = sum(r["speaker"] == seat for r in statements)
+        messages = meeting_messages + chat.get(seat, 0)
         hedged = [
             r
             for r in claim_rows
@@ -357,6 +373,8 @@ def seat_metrics(
                 "name": rec.names[seat],
                 "role": rec.roles.get(seat),
                 "messages": messages,
+                "meeting_messages": meeting_messages,
+                "chat_messages": chat.get(seat, 0),
                 "floor_share": _rate(messages, total_messages),
                 "positions": len(mine),
                 "vote_pull_matches": pull_hits,

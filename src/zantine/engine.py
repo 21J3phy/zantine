@@ -149,9 +149,15 @@ class Game:
         state.round += 1
         living = state.living()
         # Every player decides on the same start-of-Round state: simultaneous.
-        actions = {p.seat: self._request_action(p) for p in living}
+        actions: dict[int, Action] = {}
+        speech: dict[int, str] = {}
+        for p in living:
+            actions[p.seat], speech[p.seat] = self._request_action(p)
         rc = RoundContext(
-            round=state.round, actions=actions, start_rooms={p.seat: p.room for p in living}
+            round=state.round,
+            actions=actions,
+            start_rooms={p.seat: p.room for p in living},
+            speech=speech,
         )
         for step in self.rules.resolvers():
             step.fn(self, rc)
@@ -243,16 +249,29 @@ class Game:
             retry_reason = reason
         return fallback
 
-    def _request_action(self, player: PlayerState) -> Action:
+    def _request_action(self, player: PlayerState) -> tuple[Action, str]:
+        """The seat's action for this Round and what it says with it (Room Chat)."""
         controller = self.controllers[player.seat]
-        return self.ask(
+        asked: list[ActionContext] = []
+
+        def prompt(retry: str | None) -> Action:
+            asked.append(self.action_context(player, retry))
+            return controller.choose_action(asked[-1])
+
+        forfeit = Wait()
+        action = self.ask(
             player.seat,
             "action",
-            prompt=lambda retry: controller.choose_action(self.action_context(player, retry)),
+            prompt=prompt,
             validate=lambda a: self.rules.validate(a, self.state, player),
             encode=_encode_action,
-            fallback=Wait(),
+            fallback=forfeit,
         )
+        if action is forfeit:
+            # A forfeited Round says nothing either.
+            return action, ""
+        said = controller.say(asked[-1])
+        return action, said if isinstance(said, str) else ""
 
     # Contexts -----------------------------------------------------------------
 

@@ -19,7 +19,15 @@ from zantine.tasks.graph import TASK_ID_RANGE, task_ids
 
 
 def started(**config: Any) -> tuple[Game, Task, Part]:
-    game = make_game(**{"relay_tasks": 1, "tasks_per_crewmate": 0, "audit_tasks": 0, **config})
+    game = make_game(
+        **{
+            "relay_tasks": 1,
+            "tasks_per_crewmate": 0,
+            "audit_tasks": 0,
+            "splitkey_tasks": 0,
+            **config,
+        }
+    )
     game.start()
     task = next(t for t in board(game.state).graph if t.kind == "chain_relay")
     return game, task, part(game.state, task.id)
