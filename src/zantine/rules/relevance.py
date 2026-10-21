@@ -10,10 +10,12 @@ Marking rules (engine side):
 - ``near_body``: the Seat saw a living player with a body. Either its
   end-of-Round ``room_snapshot`` lists a body and that player, or it saw the
   player make the kill (``kill_witnessed``; the killer stands at the body).
-- ``task_failed``: a ``tasks.graded`` attempt failed this Round, and one of the
-  Seat's two snapshots of this Round (``start``: its last snapshot before the
-  Round; ``end``: its end-of-Round snapshot) shows it in that Task's room with
-  the player. The worker counts, both as a subject and as an observer.
+- ``task_failed``: an attempt at a Task failed this Round (a wrong
+  ``tasks.graded`` answer or relay delivery, or a wrong ``audit.checked``
+  verdict), and one of the Seat's two snapshots of this Round (``start``: its
+  last snapshot before the Round; ``end``: its end-of-Round snapshot) shows it,
+  with the player, in the room where the worker made the attempt. The worker
+  counts, both as a subject and as an observer.
 
 The third kind, seeing a player somewhere that contradicts that player's
 **Claim**, depends on what was said, so it is computed after the game from the
@@ -38,6 +40,9 @@ if TYPE_CHECKING:
 NAME = "relevance"
 # After the core room snapshots (1000), which this step reads.
 ORDER = 1100
+# Graded attempts at a Task: ``tasks.graded`` (solo steps, relay deliveries) and an
+# Audit's verdict (``audit.checked``); ``correct`` false is a failed Task.
+FAILURE_EVENTS = ("tasks.graded", "audit.checked")
 
 
 class RelevanceModule(GameModule):
@@ -67,10 +72,10 @@ def mark_round(game: Game, rc: RoundContext) -> None:
             for victim in snap["data"]["bodies"]:
                 for subject in snap["data"]["players"]:
                     _mark(game, seat, "near_body", subject, snap, body=victim)
-    rooms = _task_rooms(game)
     for failure in seen.failures:
         task = failure["data"]["task"]
-        room = rooms.get(task)
+        # Work, delivery and checking all take the worker's whole Round in place.
+        room = game.state.player(_worker(failure)).room
         for seat in living:
             for snap in (seen.start.get(seat), seen.end.get(seat)):
                 if snap is None or snap["data"]["room"] != room:
@@ -106,16 +111,14 @@ def _this_round(game: Game, rnd: int) -> _Seen:
             continue
         elif kind == "observation" and type == "kill_witnessed":
             seen.witnessed.setdefault(r["seat"], []).insert(0, r)
-        elif kind == "event" and type == "tasks.graded" and not r["data"]["correct"]:
+        elif kind == "event" and type in FAILURE_EVENTS and not r["data"]["correct"]:
             seen.failures.insert(0, r)
     return seen
 
 
-def _task_rooms(game: Game) -> dict[str, str]:
-    board = game.state.ext.get("tasks")
-    if board is None:
-        return {}
-    return {t.id: t.room for t in board.graph}
+def _worker(attempt: dict[str, Any]) -> int:
+    data = attempt["data"]
+    return data["auditor"] if attempt["type"] == "audit.checked" else data["seat"]
 
 
 def _mark(
@@ -150,7 +153,7 @@ def _mark(
     else:
         assert attempt is not None
         data["task"] = task
-        data["worker"] = attempt["data"]["seat"]
+        data["worker"] = _worker(attempt)
         data["attempt_seq"] = attempt["seq"]
     # Ground truth only: telling the Seat would change what it chooses to share.
     game.event("relevance.marked", **data)

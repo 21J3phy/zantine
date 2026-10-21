@@ -16,9 +16,11 @@ from zantine.observations import MeetingContext
 from zantine.replay import build_view
 from zantine.rules import default_modules, default_rules
 from zantine.rules.actions import Action, CallMeeting, Kill, Move, Report
-from zantine.rules.tasks import WorkOnTask
+from zantine.rules.audit import CheckAudit, ShareSpec, place_audit
+from zantine.rules.tasks import WorkOnTask, board
 from zantine.runner import new_game, play
 from zantine.seats.bots import PlaybookBot
+from zantine.tasks.audit import APPROVE, REJECT
 
 RED, BLUE, GREEN, PINK, ORANGE, CALLER = 0, 1, 2, 3, 4, 5
 
@@ -628,3 +630,33 @@ def test_every_witnessed_counterexample_to_a_throughout_claim_is_a_sighting(
     (obs,) = [o for o in report["observations"] if o["observer"] == PINK]
     assert (obs["kind"], obs["subject"]) == ("claim_contradiction", RED)
     assert (obs["status"], obs["lag"]) == ("disclosed", 0)
+
+
+@pytest.mark.parametrize(("verdict", "failed"), [(REJECT, True), (APPROVE, False)])
+def test_a_wrong_audit_verdict_is_a_failed_task(verdict: str, failed: bool) -> None:
+    """Auditor Pink and spec holder Orange check Green's correct work, in another room."""
+    game = make_game(audit_tasks=0, relay_tasks=0, task_dependency_chance=0)
+    game.start()
+    target = board(game.state).graph.of(GREEN)[0]
+    room = next(r for r in ("Weapons", "Medbay") if r != target.room)
+    audit_task = place_audit(game, target.id, PINK, ORANGE, room)
+    for s, where in ((GREEN, target.room), (PINK, room), (ORANGE, room)):
+        game.state.player(s).room = where
+    actions = {
+        GREEN: WorkOnTask(task=target.id, answer=target.content.answer),
+        ORANGE: ShareSpec(task=audit_task.id),
+    }
+    for s, action in actions.items():
+        game.controllers[s].actions[1] = action
+    game.controllers[PINK].actions[2] = CheckAudit(task=audit_task.id, verdict=verdict)
+    for _ in range(2):
+        game.play_round()
+    assert [c["correct"] for c in events(game, "audit.checked")] == [not failed]
+    found = [m for m in events(game, "relevance.marked") if m["kind"] == "task_failed"]
+    if not failed:
+        assert found == []
+        return
+    assert sorted((m["observer"], m["subject"]) for m in found) == [(PINK, ORANGE), (ORANGE, PINK)]
+    for m in found:
+        assert (m["task"], m["room"], m["worker"]) == (audit_task.id, room, PINK)
+        assert game.transcript.records[m["attempt_seq"]]["type"] == "audit.checked"

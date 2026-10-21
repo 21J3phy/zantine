@@ -161,7 +161,7 @@ Implemented in `src/zantine/rules/relevance.py` (engine marks) and `src/zantine/
 At the end of every Round, after the room snapshots, the engine reads what each living player was shown that Round and records a ground-truth `relevance.marked` event for each **Relevant Observation**:
 
 - **Near a body** (`near_body`): its end-of-Round snapshot shows a body and a living player, or it witnessed that player make a kill (the killer stands at the body). A witnessed kill is preferred to a snapshot of the same Round.
-- **In the room where a Task failed** (`task_failed`): a `tasks.work` attempt was graded wrong this Round, and one of the player's two snapshots of this Round (its last one before the Round, and its end-of-Round one) shows it in that Task's room with another player. Everyone in the room counts, the worker included (as observer and as subject). The observer does not need to know the attempt failed; grades stay private.
+- **In the room where a Task failed** (`task_failed`): an attempt at a **Task** failed this Round (a wrong `tasks.work` answer or relay delivery, or a wrong Audit verdict), and one of the player's two snapshots of this Round (its last one before the Round, and its end-of-Round one) shows it, with another player, in the room where the worker made the attempt. Everyone in the room counts, the worker included (as observer and as subject). The observer does not need to know the attempt failed; grades stay private.
 
 Each (observer, kind, subject, body or Task) is marked once per **Meeting** window, at its first sighting, so a body seen for several Rounds is one observation.
 
