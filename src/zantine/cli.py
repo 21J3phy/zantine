@@ -74,8 +74,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     a.add_argument("--extractors", type=Path, help="alternative extractors.toml")
     a.add_argument("--out", type=Path, help="JSON to write (default: <transcript>.audit.json)")
-    a.add_argument("--live", action="store_true", help="allow paid extractor calls")
-    a.add_argument("--spend-cap", type=float, default=2.0, help="USD cap on extractor spend")
+    a.add_argument(
+        "--judge",
+        default="keyword",
+        choices=("keyword", "jev", "none"),
+        help="judgments for Floor Share, Vote Pull, Suspicion, Lie Survival and Misdirection: "
+        "'keyword' (free dry run, not for scoring), 'jev' (paid; needs --live and "
+        "ZANTINE_LIVE=1) or 'none'",
+    )
+    a.add_argument(
+        "--threshold",
+        type=float,
+        default=0.5,
+        help="flag judgments whose confidence is below this (default 0.5)",
+    )
+    a.add_argument("--live", action="store_true", help="allow paid extractor and Jev calls")
+    a.add_argument(
+        "--spend-cap", type=float, default=2.0, help="USD cap on extractor plus Jev spend"
+    )
     args = parser.parse_args(argv)
     if args.command == "report":
         return report.command(parser, args)
@@ -190,30 +206,52 @@ def audit(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     from zantine.audit.extractors import ClaimExtractor
     from zantine.audit.llm import LLMExtractor, load_extractor_specs
     from zantine.harness.ledger import Ledger
+    from zantine.judge import KeywordJudge, run_judgments
+    from zantine.judge.jev import JevJudge
+    from zantine.judge.judges import Judge
 
     if not args.transcript.is_file():
         parser.error(f"no such transcript: {args.transcript}")
-    ledger: Ledger | None = None
+    paid = args.extractor != "pattern" or args.judge == "jev"
+    # One ledger, so one spend cap covers the extractor and Jev together.
+    ledger = Ledger(args.spend_cap) if paid else None
     extractor: ClaimExtractor
-    if args.extractor == "pattern":
-        extractor = PatternExtractor()
-    else:
-        specs = load_extractor_specs(args.extractors)
-        if args.extractor not in specs:
-            parser.error(
-                f"unknown extractor {args.extractor!r}; known: pattern, {', '.join(specs)}"
-            )
-        try:
-            ledger = Ledger(args.spend_cap)
+    judge: Judge | None = None
+    try:
+        if args.extractor == "pattern":
+            extractor = PatternExtractor()
+        else:
+            specs = load_extractor_specs(args.extractors)
+            if args.extractor not in specs:
+                parser.error(
+                    f"unknown extractor {args.extractor!r}; known: pattern, {', '.join(specs)}"
+                )
+            assert ledger is not None
             extractor = LLMExtractor.from_env(specs[args.extractor], ledger, live=args.live)
+        if args.judge == "keyword":
+            judge = KeywordJudge()
+        elif args.judge == "jev":
+            assert ledger is not None
+            judge = JevJudge.from_env(ledger, live=args.live)
+    except ValueError as exc:
+        parser.error(str(exc))
+    records = load_transcript(args.transcript)
+    report = run_audit(records, extractor, ledger=ledger)
+    if judge is not None:
+        try:
+            report["judgments"] = run_judgments(
+                records, report, judge, ledger=ledger, threshold=args.threshold
+            )
         except ValueError as exc:
             parser.error(str(exc))
-    report = run_audit(load_transcript(args.transcript), extractor, ledger=ledger)
     out = args.out or args.transcript.with_suffix(".audit.json")
     write_audit(report, out)
     print_audit(report)
+    if judge is not None:
+        print_judgments(report["judgments"])
     print(f"audit: {out}")
-    return 0 if report["complete"] else 1
+    complete = report["complete"] and (judge is None or report["judgments"]["complete"])
+    return 0 if complete else 1
 
 
 def print_audit(report: dict[str, Any]) -> None:
@@ -253,6 +291,24 @@ def print_audit(report: dict[str, Any]) -> None:
         )
     if report["cost"]:
         print(f"extractor spend ${report['cost']['cost_usd']:.4f}")
+
+
+def print_judgments(j: dict[str, Any]) -> None:
+    judge = j["judge"]
+    scoring = "" if judge.get("scoring") else " (dry run, not for scoring)"
+    print(f"judge: {judge['name']} {judge.get('model') or ''} {judge.get('version')}{scoring}")
+    print("  seat name        role      floor   pull   susp   lie-surv  misdir")
+    for s in j["seats"]:
+        print(
+            f"  {s['seat']:>4} {s['name']:<11} {s['role'] or '?':<9} "
+            f"{_pct(s['floor_share'])} {_pct(s['vote_pull'])} {_pct(s['suspicion'])} "
+            f"{_pct(s['lie_survival'])}    {s['misdirections']:>3}"
+        )
+    print(f"{len(j['low_confidence'])} low-confidence judgments (threshold {j['threshold']})")
+    if j["aborted"]:
+        print(f"JUDGMENTS ABORTED ({j['aborted']['reason']}): {j['aborted']['detail']}")
+    if j["cost"]:
+        print(f"Jev spend ${j['cost']['cost_usd']:.6f} ({j['cost']['calls']} calls)")
 
 
 def _pct(x: float | None) -> str:
