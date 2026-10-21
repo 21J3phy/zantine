@@ -27,6 +27,7 @@ from typing import Any, Literal
 # Task kinds whose completion is reconstructed from their own module's events.
 RELAY_KIND = "chain_relay"
 AUDIT_KIND = "audit"
+SPLITKEY_KIND = "split_key"
 
 Boundary = Literal["start", "end"]
 BOUNDARIES: tuple[Boundary, Boundary] = ("start", "end")
@@ -51,6 +52,10 @@ class TaskDone:
       Round); ``seq`` is the delivery's for all of them.
     - Audits: a correct ``audit.checked``, credited to the auditor (the Audit's room)
       and to the spec holder who shared the spec (room unknown: None).
+    - Split-key Shared Tasks: the correct entry, credited to the enterer (the Task's
+      room) and, at ``splitkey.completed``, to every other holder who read a fragment
+      of the successful attempt (as in the Task stats; where they stood: None). A
+      read of an earlier, reset attempt earns nothing.
     """
 
     seq: int
@@ -179,6 +184,11 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
     relay_rooms: dict[str, dict[str, str]] = {}
     # Relay legs handed off so far: (seat, round, room) per Task.
     handoffs: dict[str, list[tuple[int, int, str]]] = {}
+    # (split-key Task, attempt) -> Seats that read a fragment of that attempt's code.
+    key_reads: dict[tuple[str, int], list[int]] = {}
+    # split-key Task -> passing grades this Round, (seq, seat): only the completing
+    # enterer (named by splitkey.completed) earns the credit, as in the Task stats.
+    key_grades: dict[str, list[tuple[int, int]]] = {}
 
     def add_task(task: dict[str, Any]) -> None:
         rec.task_rooms[task["id"]] = task["room"]
@@ -222,6 +232,23 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
                 add_task(data["task"])
             case "relay.handed_off":
                 handoffs.setdefault(data["task"], []).append((data["seat"], rnd, data["room"]))
+            case "splitkey.read":
+                readers = key_reads.setdefault((data["task"], data["attempt"]), [])
+                if data["seat"] not in readers:
+                    readers.append(data["seat"])
+            case "splitkey.completed":
+                task, enterer = data["task"], data["seat"]
+                graded = [seq for seq, seat in key_grades.pop(task, []) if seat == enterer]
+                rec.tasks_done.append(
+                    TaskDone(graded[0], rnd, enterer, task, rec.task_rooms.get(task))
+                )
+                for seat in key_reads.get((task, data["attempt"]), []):
+                    if seat != enterer:
+                        rec.tasks_done.append(TaskDone(r["seq"], rnd, seat, task, None))
+            case "tasks.graded" if (
+                data.get("correct") and rec.task_kinds.get(data["task"]) == SPLITKEY_KIND
+            ):
+                key_grades.setdefault(data["task"], []).append((r["seq"], data["seat"]))
             case "tasks.graded" if data.get("correct"):
                 task = data["task"]
                 if task in relay_rooms:
