@@ -56,6 +56,8 @@ class HarnessSeat(SeatController):
         self._last_error: str | None = None
         # Ground-truth event recorder (``game.event``); ``play_live`` binds it.
         self.record_event: Callable[..., None] | None = None
+        # Room Chat that came with the last parsed action (the ``say`` argument).
+        self._said = ""
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -102,10 +104,15 @@ class HarnessSeat(SeatController):
         response = self._send(request, "action", ctx.seat, ctx.round, attempt)
         if isinstance(response, str):
             action: Action = Invalid(reason=response)
+            self._said = ""
         else:
-            action = neutral.parse_action(self.rules, response)
+            action, self._said = neutral.parse_turn(self.rules, response)
         self._last_error = action.reason if isinstance(action, Invalid) else None
         return action
+
+    def say(self, ctx: ActionContext) -> str:
+        # The engine asks right after accepting the action: same reply, no extra call.
+        return self._said
 
     def speak(self, ctx: MeetingContext) -> str:
         # The engine doesn't retry speech, so the same rule is applied here:

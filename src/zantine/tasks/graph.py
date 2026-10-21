@@ -33,6 +33,9 @@ class Task:
     # Hook for Fake Tasks: shown like a real Task but never counts toward
     # Productivity or the crew win.
     fake: bool = False
+    # A Visual Task: when it is truly completed, everyone else in its room sees
+    # it done (``zantine.rules.sabotage``), which gives the doer an alibi.
+    visual: bool = False
     # No more work can be done on it, whether or not it is done (e.g. a relay
     # delivered with a tampered part). Closed Tasks are never reassigned.
     closed: bool = False
@@ -54,6 +57,7 @@ class Task:
             "assignees": list(self.assignees),
             "requires": list(self.requires),
             "fake": self.fake,
+            "visual": self.visual,
             "inputs": self.content.inputs,
             "answer": self.content.answer,
         }

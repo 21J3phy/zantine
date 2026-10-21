@@ -44,6 +44,9 @@ class Recorder(SeatController):
         self.contexts.append(ctx)
         return self.inner.choose_action(ctx)
 
+    def say(self, ctx: ActionContext) -> str:
+        return self.inner.say(ctx)
+
     def speak(self, ctx: MeetingContext) -> str:
         self.contexts.append(ctx)
         return self.inner.speak(ctx)
@@ -159,6 +162,7 @@ def test_a_crewmates_view_is_identical_with_0_1_or_2_impostors() -> None:
             num_impostors=len(impostors),
             tasks_per_crewmate=0,
             relay_tasks=0,
+            splitkey_tasks=0,
             round_cap=4,
         )
         game.run()
@@ -173,6 +177,20 @@ def test_a_crewmates_view_is_identical_with_0_1_or_2_impostors() -> None:
     baseline = views(())
     assert views((0,)) == baseline
     assert views((0, 1)) == baseline
+
+
+@pytest.mark.parametrize("impostors", [0, 2])
+def test_room_chat_and_split_key_views_do_not_leak_the_count(impostors: int) -> None:
+    # No solo steps, so the split-key holders start gathering at once.
+    game, recorders = recorded(GameConfig(seed=1, num_impostors=impostors, tasks_per_crewmate=0))
+    crew = [p.seat for p in game.state.players if not p.is_impostor]
+    contexts = [c for s in crew for c in recorders[s].contexts if isinstance(c, ActionContext)]
+    # The scan below really covers the new context fields and observation types.
+    assert all(c.extra["chat"] == {"budget_chars": 200} for c in contexts)
+    assert any("splitkey" in c.extra for c in contexts)
+    seen = [o for s in crew for o in observed(game, s)]
+    assert {"chat.message", "splitkey.read"} <= {o["type"] for o in seen}
+    assert leaks(as_dicts(contexts)) == [] and leaks(seen) == []
 
 
 def test_crisis_notices_do_not_say_how_many_impostors_there_are() -> None:
@@ -216,7 +234,7 @@ def test_a_zero_impostor_game_runs_end_to_end_with_scripted_bots(seed: int) -> N
     assert (result["winner"], result["reason"]) in (("crew", "tasks_done"), ("none", "round_cap"))
     assert result["reason"] == "tasks_done" or state.round == game.config.round_cap
     assert result["containment"] == {"contained": False, "round": None, "meeting": None}
-    assert result["tasks"]["total"] == 20 + game.config.relay_tasks
+    assert result["tasks"]["total"] == 20 + game.config.relay_tasks + game.config.splitkey_tasks
     assert not list(game.transcript.events("kill"))
     assert not list(game.transcript.events("crisis.started"))
     assert not list(game.transcript.events("containment"))

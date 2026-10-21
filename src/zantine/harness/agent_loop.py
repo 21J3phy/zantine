@@ -42,7 +42,7 @@ from zantine.observations import ActionContext, MeetingContext
 from zantine.rules.registry import Rules
 
 HARNESS_NAME = "agent-loop"
-HARNESS_VERSION = 1
+HARNESS_VERSION = 3
 # Model calls per decision (the SDK's ``max_turns``; its default is 10).
 MAX_TURNS = 4
 NOTES_LIMIT = 1500

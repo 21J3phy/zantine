@@ -41,6 +41,7 @@ def setup(**config: Any) -> tuple[Game, Task, Task]:
     game = make_game(
         audit_tasks=0,
         relay_tasks=0,
+        splitkey_tasks=0,
         task_dependency_chance=0,
         task_kinds=("sort_list",),
         **config,
@@ -316,7 +317,6 @@ def test_seeded_placement_is_independent_private_and_uses_unused_random_ids() ->
             target = tb.graph.get(audit.content.inputs["target"])
             assert not set(audit.assignees) & set(target.assignees)
             assert len(set(audit.assignees)) == 2
-            assert all(not game.state.player(s).is_impostor for s in audit.assignees)
             assert audit not in tb.graph.counted()
             assert audit.id.startswith("T") and len(audit.id) == 3
             recipients = [
@@ -417,7 +417,9 @@ def test_audit_item_normalization_agrees_with_the_target_grader(kind: str) -> No
 
 
 def test_audit_placement_respects_task_id_capacity() -> None:
-    game = make_game(impostors=(), num_impostors=0, tasks_per_crewmate=9, relay_tasks=0)
+    game = make_game(
+        impostors=(), num_impostors=0, tasks_per_crewmate=9, relay_tasks=0, splitkey_tasks=0
+    )
     game.start()
     assert len(board(game.state).graph) == 90
     assert audits(board(game.state)) == []

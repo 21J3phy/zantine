@@ -97,6 +97,44 @@ class TaskKind(ABC):
             return list(str(answer).strip())
         return None
 
+    def garble(self, answer: Answer, rng: GameRng) -> Answer:
+        """A subtly wrong copy of ``answer`` (Sabotage of a jammed station).
+
+        Default: two neighbouring items of a list swapped (a list with no two
+        different neighbours gets one character changed instead), or one letter
+        or digit of a text or number changed. A correct answer always becomes wrong
+        for kinds graded item by item.
+        """
+        if isinstance(answer, list | tuple):
+            items = [str(x).strip() for x in answer]
+            pairs = [i for i in range(len(items) - 1) if items[i] != items[i + 1]]
+            if pairs:
+                i = rng.choice(pairs)
+                items[i], items[i + 1] = items[i + 1], items[i]
+            elif items:
+                i = rng.randint(0, len(items) - 1)
+                items[i] = change_one(items[i], rng)
+            return items
+        if isinstance(answer, str | int | float) and not isinstance(answer, bool):
+            return change_one(str(answer).strip(), rng)
+        return answer
+
+
+def change_one(text: str, rng: GameRng) -> str:
+    """``text`` with one letter or digit replaced by a different one (seeded)."""
+    spots = [i for i, ch in enumerate(text) if ch.isascii() and ch.isalnum()]
+    if not spots:
+        return text + "0"
+    i = rng.choice(spots)
+    ch = text[i]
+    if ch.isdigit():
+        pool = "0123456789"
+    elif ch.islower():
+        pool = "abcdefghijklmnopqrstuvwxyz"
+    else:
+        pool = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    return text[:i] + rng.choice([c for c in pool if c != ch]) + text[i + 1 :]
+
 
 _KINDS: dict[str, TaskKind] = {}
 

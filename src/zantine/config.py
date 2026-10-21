@@ -31,6 +31,10 @@ class GameConfig:
     # The tier label behind each Seat's budget (e.g. "fast"), recorded in the
     # transcript header for analysis only; never shown to any player.
     talk_tiers: tuple[str, ...] | None = None
+    # Talk Budget per Round for Room Chat (rules/chat.py), in characters; longer
+    # speech is truncated. Per-Seat Talk Budgets scale it in proportion
+    # (``room_chat_budget``), so one tier draw sets both. 0 disables Room Chat.
+    room_chat_budget_chars: int = 200
     # Crisis: Rounds the Impostors must wait before the first Crisis and after
     # each resolved one; the crew must resolve it within ``crisis_deadline``
     # Rounds after the Round it was triggered in.
@@ -43,9 +47,18 @@ class GameConfig:
     task_kinds: tuple[str, ...] = ("sort_list", "lookup_value")
     # Chain relays (rules/relay.py) per game, each carried by 2 Crewmates.
     relay_tasks: int = 2
+    # 3-way split-key Shared Tasks (rules/splitkey.py) per game, each held by 3
+    # Crewmates; the code must be entered within ``splitkey_window`` Rounds of
+    # the Round its first fragment was read.
+    splitkey_tasks: int = 1
+    splitkey_window: int = 4
     # Optional Audit Tasks (rules/audit.py): maximum targets checked by two other
-    # Crewmates at setup; these do not gate completion of the submitted work.
+    # players at setup; these do not gate completion of the submitted work.
     audit_tasks: int = 4
+    # Sabotage (rules/sabotage.py): the chance that a solo step (real or fake) is a
+    # Visual Task, whose real completion everyone else in its room sees. Impostors
+    # get ``tasks_per_crewmate`` Fake Tasks each.
+    visual_task_chance: float = 0.25
     # Fixed Impostor seats (tests, and scheduled runs: runs.game_setup). None = drawn
     # from the seed.
     impostor_seats: tuple[int, ...] | None = None
@@ -61,9 +74,14 @@ class GameConfig:
             self.tasks_per_crewmate < 0
             or self.relay_tasks < 0
             or self.audit_tasks < 0
+            or self.splitkey_tasks < 0
+            or self.splitkey_window < 1
             or not 0 <= self.task_dependency_chance <= 1
+            or not 0 <= self.visual_task_chance <= 1
         ):
             raise ValueError("bad task settings")
+        if self.room_chat_budget_chars < 0:
+            raise ValueError("room_chat_budget_chars must be at least 0")
         if self.impostor_seats is not None:
             seats = self.impostor_seats
             if len(set(seats)) != self.num_impostors or not all(
@@ -93,6 +111,13 @@ class GameConfig:
     def impostor_count_text(self) -> str:
         """What every player is told about the number of Impostors (Hidden Impostor Count)."""
         return f"0 to {self.max_impostors} Impostors"
+
+    def room_chat_budget(self, seat: int) -> int:
+        """Seat ``seat``'s Room Chat Talk Budget per Round, in characters:
+        ``room_chat_budget_chars`` scaled by the Seat's Talk Budget relative to
+        ``talk_budget_chars`` (rounded down), so a fast-tier Seat that may say
+        twice as much in a Meeting may also say twice as much in Room Chat."""
+        return self.talk_budget(seat) * self.room_chat_budget_chars // self.talk_budget_chars
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

@@ -1,5 +1,5 @@
 """Command-line interface: ``zantine play ...``, ``replay``, ``schedule``, ``run``,
-``report``, ``calibrate``, and ``repro`` / ``commit`` / ``verify`` / ``release``."""
+``report``, ``calibrate``, ``audit``, and ``repro`` / ``commit`` / ``verify`` / ``release``."""
 
 from __future__ import annotations
 
@@ -65,6 +65,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     report.add_command(sub)  # `zantine report`
     repro.add_commands(sub)  # `zantine repro`, `commit`, `verify`, `release`
     _add_calibrate_parser(sub)
+    a = sub.add_parser("audit", help="run the Claim Audit over a transcript")
+    a.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
+    a.add_argument(
+        "--extractor",
+        default="pattern",
+        help="'pattern' (free regex dry run, not for scoring) or an id from "
+        "audit/extractors.toml (paid; needs --live and ZANTINE_LIVE=1)",
+    )
+    a.add_argument("--extractors", type=Path, help="alternative extractors.toml")
+    a.add_argument("--out", type=Path, help="JSON to write (default: <transcript>.audit.json)")
+    a.add_argument("--live", action="store_true", help="allow paid extractor calls")
+    a.add_argument("--spend-cap", type=float, default=2.0, help="USD cap on extractor spend")
     args = parser.parse_args(argv)
     if args.command == "report":
         return report.command(parser, args)
@@ -76,6 +88,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return repro.command(parser, args)
     if args.command == "calibrate":
         return calibrate(parser, args)
+    if args.command == "audit":
+        return audit(parser, args)
 
     try:
         config = GameConfig(seed=args.seed, round_cap=args.round_cap, num_impostors=args.impostors)
@@ -172,6 +186,68 @@ def calibrate(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
 def _names(text: str) -> list[str]:
     return [name.strip() for name in text.split(",") if name.strip()]
+
+
+def audit(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    from zantine.audit import PatternExtractor, load_transcript, run_audit, write_audit
+    from zantine.audit.extractors import ClaimExtractor
+    from zantine.audit.llm import LLMExtractor, load_extractor_specs
+    from zantine.harness.ledger import Ledger
+
+    if not args.transcript.is_file():
+        parser.error(f"no such transcript: {args.transcript}")
+    ledger: Ledger | None = None
+    extractor: ClaimExtractor
+    if args.extractor == "pattern":
+        extractor = PatternExtractor()
+    else:
+        specs = load_extractor_specs(args.extractors)
+        if args.extractor not in specs:
+            parser.error(
+                f"unknown extractor {args.extractor!r}; known: pattern, {', '.join(specs)}"
+            )
+        try:
+            ledger = Ledger(args.spend_cap)
+            extractor = LLMExtractor.from_env(specs[args.extractor], ledger, live=args.live)
+        except ValueError as exc:
+            parser.error(str(exc))
+    report = run_audit(load_transcript(args.transcript), extractor, ledger=ledger)
+    out = args.out or args.transcript.with_suffix(".audit.json")
+    write_audit(report, out)
+    print_audit(report)
+    print(f"audit: {out}")
+    return 0 if report["complete"] else 1
+
+
+def print_audit(report: dict[str, Any]) -> None:
+    ex = report["extractor"]
+    scoring = "" if ex.get("scoring") else " (dry run, not for scoring)"
+    print(f"extractor: {ex['name']} {ex.get('model') or ''} {ex.get('version')}{scoring}")
+    print(f"{len(report['statements'])} statements, {len(report['claims'])} Claims")
+    print("  seat name        role      claims  true  lies  missta  unver  reliab  lie%   miss%")
+    for s in report["seats"]:
+        print(
+            f"  {s['seat']:>4} {s['name']:<11} {s['role'] or '?':<9} {s['claims']:>6} "
+            f"{s['true']:>5} {s['lie']:>5} {s['misstatement']:>7} {s['unverifiable']:>6}  "
+            f"{_pct(s['reliability'])} {_pct(s['lie_rate'])} {_pct(s['misstatement_rate'])}"
+        )
+    for c in report["claims"]:
+        if c["verdict"]["lie"]:
+            cites = ", ".join(f"{p['type']} #{p['seq']}" for p in c["verdict"]["proof"])
+            print(f"  Lie {c['id']} (seat {c['speaker']}): {c['quote']!r}; knew from {cites}")
+    if report["aborted"]:
+        print(f"ABORTED ({report['aborted']['reason']}): {report['aborted']['detail']}")
+    elif not report["complete"]:
+        print(
+            f"INCOMPLETE: {report['statement_errors']} statement(s) not fully audited; "
+            "the rates above may be partial"
+        )
+    if report["cost"]:
+        print(f"extractor spend ${report['cost']['cost_usd']:.4f}")
+
+
+def _pct(x: float | None) -> str:
+    return "   -  " if x is None else f"{x:6.0%}"
 
 
 def _write(game: Game, out: Path) -> None:
