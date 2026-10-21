@@ -5,8 +5,9 @@ calls, every one through the run's ``Ledger`` like the Neutral Harness's single
 call. ``update_notes`` calls and unusable tool calls are steps inside the loop;
 the first usable decision-tool call ends it. Anything else (no tool call, a
 refusal, a transient API error, running out of turns) ends the decision as an
-Invalid Action, after which the engine's one retry and forfeit apply. Speech
-gets the same one-retry rule as ``HarnessSeat``. Notes are recorded as
+Invalid Action, after which the engine's one retry and forfeit apply. Room
+Chat rides on the deciding action call's ``say`` argument, as in the Neutral
+Harness. Speech gets the same one-retry rule as ``HarnessSeat``. Notes are recorded as
 ``harness.notes`` events; they never reach another player.
 
 Select it with ``--bots 'live:<model>@agent-loop,...'``.
@@ -95,12 +96,19 @@ class AgentLoopSeat(HarnessSeat):
         build = partial(agent_loop.action_request, self.rules, ctx, retry=retry)
 
         def parse(response: ProviderResponse) -> tuple[Any, str | None]:
-            action = neutral.parse_action(self.rules, response)
-            return (None, action.reason) if isinstance(action, Invalid) else (action, None)
+            action, said = neutral.parse_turn(self.rules, response)
+            if isinstance(action, Invalid):
+                return None, action.reason
+            return (action, said), None
 
-        action, error = self._run(build, parse, "action", ctx, attempt)
+        turn, error = self._run(build, parse, "action", ctx, attempt)
         self._last_error = error
-        return Invalid(reason=error) if error is not None else action
+        if error is not None:
+            self._said = ""
+            return Invalid(reason=error)
+        # The Room Chat ``say`` that came with the deciding call (HarnessSeat.say).
+        action, self._said = turn
+        return action
 
     def speak(self, ctx: MeetingContext) -> str:
         retry: str | None = None

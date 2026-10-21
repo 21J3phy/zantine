@@ -633,19 +633,40 @@ def test_a_tampered_delivery_is_a_misstatement_not_a_lie() -> None:
     assert first_leg["verdict"]["label"] == "misstatement"
 
 
-def test_an_observed_failed_solo_grade_still_proves_a_lie() -> None:
-    records = play(GameConfig(seed=1), "scripted").transcript.records
+def observed_failed_solo_grade(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """A wrong solo grade its worker saw, never fixed, then spoke after."""
     rec = build_record(records)
-    fail = next(
-        o
-        for seat, obs in sorted(rec.observations.items())
-        for o in obs
-        if o["type"] == "tasks.graded"
-        and not o["data"]["correct"]
-        and rec.task_kinds[o["data"]["task"]] not in ("chain_relay", "audit")
-        and not any(d.seat == seat and d.task == o["data"]["task"] for d in rec.tasks_done)
-        and any(s.speaker == seat and s.seq > o["seq"] for s in rec.statements)
+    return next(
+        (
+            o
+            for seat, obs in sorted(rec.observations.items())
+            for o in obs
+            if o["type"] == "tasks.graded"
+            and not o["data"]["correct"]
+            and rec.task_kinds[o["data"]["task"]] not in ("chain_relay", "audit")
+            and not any(d.seat == seat and d.task == o["data"]["task"] for d in rec.tasks_done)
+            and any(s.speaker == seat and s.seq > o["seq"] for s in rec.statements)
+        ),
+        None,
     )
+
+
+def first_game(find: Any, seeds: range = range(200)) -> tuple[list[dict[str, Any]], Any]:
+    """The first scripted game (by seed) containing the situation ``find`` looks for.
+
+    Searching instead of pinning a seed keeps these tests valid when a scenario
+    version bump changes what each seed generates.
+    """
+    for seed in seeds:
+        records = play(GameConfig(seed=seed), "scripted").transcript.records
+        found = find(records)
+        if found is not None:
+            return records, found
+    pytest.fail(f"no scripted game in seeds {seeds.start}-{seeds.stop - 1} has the situation")
+
+
+def test_an_observed_failed_solo_grade_still_proves_a_lie() -> None:
+    records, fail = first_game(observed_failed_solo_grade)
     (claimed,) = claims_after(
         records, fail["seat"], fail["seq"], claim("task_done", "I", task=fail["data"]["task"])
     )
@@ -759,18 +780,32 @@ def test_audit_knowledge_respects_round_room_and_the_spec_holders_closure() -> N
 
 def test_a_spec_holder_before_closure_knows_its_audit_is_open() -> None:
     """Control: before the check, no closure was told, so the denial is simply true."""
-    # Seed 46: T58's spec holder speaks at a Meeting before the Audit is checked.
-    records = play(GameConfig(seed=46), "scripted").transcript.records
-    checked = event(records, "audit.checked", task="T58", correct=True)
-    task, holder = checked["data"]["task"], checked["data"]["spec_from"]
-    placed = next(
-        r["seq"]
-        for r in records
-        if r["kind"] == "event" and r["type"] == "audit.placed" and r["data"]["task"]["id"] == task
-    )
-    rec = build_record(records)
-    before = [s for s in rec.statements if s.speaker == holder and placed < s.seq < checked["seq"]]
-    assert before
+
+    def holder_speaks_while_open(records: list[dict[str, Any]]) -> Any:
+        rec = build_record(records)
+        for checked in records:
+            if not (
+                checked["kind"] == "event"
+                and checked["type"] == "audit.checked"
+                and checked["data"].get("correct")
+            ):
+                continue
+            task, holder = checked["data"]["task"], checked["data"]["spec_from"]
+            placed = next(
+                r["seq"]
+                for r in records
+                if r["kind"] == "event"
+                and r["type"] == "audit.placed"
+                and r["data"]["task"]["id"] == task
+            )
+            before = [
+                s for s in rec.statements if s.speaker == holder and placed < s.seq < checked["seq"]
+            ]
+            if before:
+                return task, holder, before
+        return None
+
+    records, (task, holder, before) = first_game(holder_speaks_while_open)
     denial, claimed = claims_after(
         records,
         holder,
