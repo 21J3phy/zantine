@@ -12,7 +12,24 @@ Seven **Models**: one **Flagship** per lab (the strongest model a developer can 
 | xAI | Grok 4.7 | `grok-4.7` | $2 / $6 (prompts under 200K tokens) | $0.50 | `medium` (low–xhigh; default is `high`) | [model](https://docs.x.ai/developers/models/grok-4.7), [pricing](https://docs.x.ai/developers/pricing), [release notes](https://docs.x.ai/developers/release-notes) |
 | Meta | Muse Wonder | `muse-wonder-1.0` | $4 / $20 | $0.20 | `medium` (minimal–max) | [models](https://dev.meta.ai/docs/models), [pricing](https://dev.meta.ai/docs/pricing-rate-limits), [announcement](https://about.fb.com/news/2026/10/introducing-muse-wonder-models/) |
 
-Every model accepts a `medium` effort setting, so "each lab's own medium" works for the whole pool. Every model also accepts `low` and `high`, so those are the three neutral effort levels (`zantine play --effort`, `play_live(effort=...)`); `models.toml` maps each level to the lab's own value, for the effort sweep (#26).
+Every model accepts a `medium` effort setting, so "each lab's own medium" works for the whole pool. Every model also accepts `low` and `high`, so those are the three neutral effort levels (`zantine play --effort`, `play_live(effort=...)`, or per Seat `live:<model>?effort=<level>`); `models.toml` maps each level to the lab's own value, for the effort sweep (#26).
+
+### Effort mapping (v1.6 effort sweep, #26)
+
+| Model | Parameter | `low` | `medium` | `high` | Lab's documented values (`effort_settings`) | Lab default |
+|---|---|---|---|---|---|---|
+| `claude-fable-5-1` | `output_config.effort` | `low` | `medium` | `high` | low, medium, high | `high` |
+| `claude-opus-5-5` | `output_config.effort` | `low` | `medium` | `high` | low, medium, high | `medium` |
+| `gpt-6-astra` | `reasoning.effort` | `low` | `medium` | `high` | low … max (low, medium, high, max checked) | not documented |
+| `gpt-6.1-sol` | `reasoning.effort` | `low` | `medium` | `high` | low … max (low, medium, high, max checked) | `medium` |
+| `gemini-4-argon` | `thinking_config.thinking_level` | `low` | `medium` | `high` | low, medium, high | — |
+| `grok-4.7` | `reasoning.effort` | `low` | `medium` | `high` | low, medium, high, xhigh | `high` |
+| `muse-wonder-1.0` | `reasoning.effort` | `low` | `medium` | `high` | minimal, low, medium, high, xhigh, max | not documented |
+
+- **Every Model supports all three levels**, each under the lab's own name for it, so the sweep is complete for the whole pool. Levels beyond `high` (xhigh, max) are not used: they exist only at some labs, so they would not compare across the pool.
+- **A level a Model lacks is refused, never mapped to the nearest one.** If a future Model has no `low`, its `efforts` omits it and `at_effort("low")`, `zantine schedule --experiment effort` and any `?effort=low` Seat fail with a clear error, so a graph never shows one setting labelled as another.
+- **Validation is two-sided.** The neutral level must be in the Model's `efforts` (`ModelSpec`), and the lab's value it maps to must be one the adapter lists in `effort_settings` (the lab's documented values; `ProviderAdapter.__init__` refuses anything else before any call). `tests/test_effort.py` checks every Model at every level against the request body each adapter builds.
+- **Pricing is unchanged by effort**: thinking is billed as output at every lab, so a higher level costs more only through more thinking tokens, which every `harness.call` event already logs. The level and the lab's value are recorded in the transcript header (each Seat's `controller.effort` / `effort_setting`) and on every `harness.call` event and `spend.jsonl` call line.
 
 The machine-readable copy of this table (IDs, provider, effort, prices incl. cache-write prices, and output caps) is `src/zantine/harness/models.toml`; the spend cap and cost reports use it. Keep the two in sync.
 
