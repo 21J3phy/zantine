@@ -285,7 +285,7 @@ class AuditModule(GameModule):
                         options
                     )
                 else:
-                    load = {s: tb.open_load(s) for s in options}
+                    load = {s: tb.reassignment_load(s) for s in options}
                     new = rng.choice([s for s in options if load[s] == min(load.values())])
                 task.assignees[slot] = new
                 ab.received.pop((task.id, new), None)

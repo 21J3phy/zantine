@@ -56,6 +56,9 @@ class TaskBoard:
     views: dict[int, dict[str, dict[str, Any]]]
     # Tasks each seat has been told it completed.
     known_done: dict[int, set[str]]
+    # Set by a rule whose outcomes are private (the mandatory Verification Protocol):
+    # reassignment then weighs candidates by ``open_load``, never by hidden results.
+    outcome_blind_load: bool = False
 
     def view(self, task: Task, seat: int) -> dict[str, Any]:
         """A seat's private brief for one of its Tasks (never the answer key)."""
@@ -90,12 +93,19 @@ class TaskBoard:
         self.views[seat][task.id] = view
         return view
 
+    def reassignment_load(self, seat: int) -> int:
+        """How much unfinished work ``seat`` holds, as reassignment weighs candidates.
+
+        By default (the v1 rule, unchanged): every Task it holds that is not done.
+        With ``outcome_blind_load``: ``open_load``."""
+        if self.outcome_blind_load:
+            return self.open_load(seat)
+        return sum(not t.done for t in self.graph.of(seat))
+
     def open_load(self, seat: int) -> int:
-        """``seat``'s unfinished work, as reassignment weighs it: required Tasks not yet
-        done or closed. Optional work (audits) is left out and closed work counts as
-        finished, because whether it was graded correct or passed its checks is private
-        (a tampered relay, a mandatory check), so who is handed a Task never depends
-        on it."""
+        """Required Tasks ``seat`` holds that are neither done nor closed. Optional work
+        (audits) is left out and closed work counts as finished, because whether it
+        passed its checks is private, so who is handed a Task never depends on it."""
         return sum(
             not (t.done or t.closed)
             for t in self.graph.of(seat)
@@ -208,7 +218,7 @@ class TasksModule(GameModule):
                 options = [s for s in living_crew if s not in task.assignees]
                 if state.player(seat).alive or not options:
                     continue
-                load = {s: b.open_load(s) for s in options}
+                load = {s: b.reassignment_load(s) for s in options}
                 least = min(load.values())
                 new = rng.choice([s for s in options if load[s] == least])
                 task.assignees[slot] = new

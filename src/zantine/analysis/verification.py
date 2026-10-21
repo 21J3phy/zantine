@@ -47,6 +47,7 @@ from zantine.analysis.bootstrap import (
 )
 from zantine.analysis.metrics import GameRow, RunData, load_run
 from zantine.analysis.sabotage import design, fit
+from zantine.config import VERIFICATION_RULES_VERSION
 
 SCHEMA = 1
 BASELINE = "optional"
@@ -100,6 +101,8 @@ def build(
     ``baseline`` (the v1 run) contributes only its optional-protocol Balanced
     Lobbies and Benign Matches."""
     runs = [run] if baseline is None else [run, baseline]
+    for data in runs:
+        check_rules(data)
     if baseline is not None:
         check_baseline(run, baseline)
     games = [g for g in run.games if g.kind in ("lobby", "benign")]
@@ -223,30 +226,78 @@ def run_mode(data: RunData) -> str | None:
 DESIGN_KEYS = frozenset({"seed", "impostor_seats", "num_impostors", "verification_protocol"})
 
 
+# GameConfig fields added after the first run directories, with what a header
+# without them meant: the behaviour before they existed. Any other field missing
+# from a header is refused rather than guessed.
+HISTORICAL_DEFAULTS: dict[str, Any] = {
+    "talk_budgets": None,  # #25: None = every Seat has talk_budget_chars
+    "talk_tiers": None,
+    "verification_protocol": BASELINE,  # #37: the v1 rule
+}
+
+
+def effective_conditions(config: dict[str, Any]) -> dict[str, Any]:
+    """How a game was played, apart from its design and protocol: its header config
+    with historical defaults filled in and derived settings made explicit (each
+    Seat's actual Talk Budget, whether it came from talk_budget_chars or a per-Seat
+    override)."""
+    c = {**HISTORICAL_DEFAULTS, **config}
+    budgets = c.pop("talk_budgets")
+    chars = c.pop("talk_budget_chars", None)
+    seats = c.get("num_seats")
+    if budgets is None and (chars is None or seats is None):
+        raise ValueError("a transcript header has no Talk Budget settings")
+    c["seat_talk_budgets"] = list(budgets) if budgets is not None else [chars] * seats
+    return {k: v for k, v in c.items() if k not in DESIGN_KEYS}
+
+
 def conditions(data: RunData, game_id: str) -> dict[str, Any]:
-    """Everything else about how a game was played: its transcript header's config
-    (the effective ``GameConfig``, including per-game Talk Budgets and workload)."""
+    """``effective_conditions`` of one game, from its transcript header."""
     path = data.run_dir / "games" / f"{game_id}.jsonl"
     with path.open(encoding="utf-8") as f:
         header = json.loads(f.readline())
-    return {k: v for k, v in header["config"].items() if k not in DESIGN_KEYS}
+    return effective_conditions(header["config"])
 
 
 def check_conditions(games: Sequence[tuple[RunData, GameRow]]) -> None:
-    """Every game compared must have been played under the same conditions apart from
-    the design and the protocol, or the differences are not protocol effects."""
-    seen: dict[str, tuple[Any, str]] = {}
+    """Every game compared must have been played under the same effective conditions
+    apart from the design and the protocol, or the differences are not protocol
+    effects. A field one header has and another lacks (with no known historical
+    default) is refused, never treated as matching."""
+    first: tuple[dict[str, Any], str] | None = None
     for data, g in games:
-        for key, value in conditions(data, g.id).items():
-            if key not in seen:
-                seen[key] = (value, g.id)
-            elif seen[key][0] != value:
-                first, where = seen[key]
+        mine = conditions(data, g.id)
+        if first is None:
+            first = (mine, g.id)
+            continue
+        ref, where = first
+        for key in sorted(ref.keys() | mine.keys()):
+            if key not in ref or key not in mine:
+                missing = where if key not in ref else g.id
                 raise ValueError(
-                    f"games were played under different conditions: {key} is {first!r} in "
-                    f"{where} but {value!r} in {g.id} ({data.run_dir}); only the "
+                    f"games are not comparable: {missing}'s header has no {key!r} and it "
+                    "has no known historical default"
+                )
+            if ref[key] != mine[key]:
+                raise ValueError(
+                    f"games were played under different conditions: {key} is {ref[key]!r} "
+                    f"in {where} but {mine[key]!r} in {g.id} ({data.run_dir}); only the "
                     "Verification Protocol may differ"
                 )
+
+
+def check_rules(data: RunData) -> None:
+    """A verification experiment run must have been scheduled under the current
+    mandatory rules (``config.VERIFICATION_RULES_VERSION``). A v1 run is all optional
+    games, whose rules are the v1 rules unchanged."""
+    if data.manifest.get("experiment") != "verification":
+        return
+    planned = data.manifest["engine"].get("verification_rules")
+    if planned != VERIFICATION_RULES_VERSION:
+        raise ValueError(
+            f"{data.run_dir} was scheduled under mandatory-protocol rules {planned!r}, not "
+            f"the current {VERIFICATION_RULES_VERSION}; schedule a new run"
+        )
 
 
 def check_baseline(run: RunData, baseline: RunData) -> None:
@@ -272,6 +323,8 @@ def check_baseline(run: RunData, baseline: RunData) -> None:
     engine = {
         k: v for k, v in run.manifest["engine"].items() if modes[0] == "live" or k != "harness"
     }
+    # Each run's own mandatory rules are checked against the current ones (check_rules).
+    engine.pop("verification_rules", None)
     other = {k: baseline.manifest["engine"].get(k) for k in engine}
     if engine != other:
         raise ValueError(f"the runs were scheduled on different engines: {engine} vs {other}")

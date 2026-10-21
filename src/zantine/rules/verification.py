@@ -101,6 +101,8 @@ class VerificationModule(GameModule):
         tb: TaskBoard | None = state.ext.get(TASKS)
         if tb is None or vb.protocol != "mandatory":
             return
+        # Whether a check passed is private, so no reassignment may weigh it.
+        tb.outcome_blind_load = True
         targets = [t for t in tb.graph if t.checks_required]
         free = len(TASK_ID_RANGE) - len(tb.graph)
         if CHECKS * len(targets) > free:

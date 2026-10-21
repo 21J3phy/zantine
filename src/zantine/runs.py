@@ -446,14 +446,18 @@ def _recover(run_dir: Path, game: dict[str, Any], attempt: int, path: Path, mode
 
 
 def _check_versions(manifest: dict[str, Any], mode: str) -> None:
-    planned, current = manifest["engine"], engine_versions()
-    keys = planned.keys() if mode == "live" else planned.keys() - {"harness"}
-    changed = [k for k in sorted(keys) if planned[k] != current.get(k)]
+    planned, current = manifest["engine"], engine_versions(manifest.get("experiment"))
+    # A version the current engine pins but the manifest lacks counts as changed:
+    # the run was scheduled before those rules were versioned.
+    keys = planned.keys() | current.keys()
+    keys = keys if mode == "live" else keys - {"harness"}
+    changed = [k for k in sorted(keys) if planned.get(k) != current.get(k)]
     if changed:
+        was = {k: planned.get(k) for k in changed}
+        now = {k: current.get(k) for k in changed}
         raise ValueError(
             f"engine changed since this run was scheduled ({', '.join(changed)}): "
-            f"{ {k: planned[k] for k in changed} } -> { {k: current.get(k) for k in changed} }; "
-            "schedule a new run"
+            f"{was} -> {now}; schedule a new run"
         )
 
 

@@ -8,6 +8,10 @@ from typing import Any
 # Verification Protocols (rules/verification.py): no audits, the seeded optional
 # audits of v1, or two independent checks before work counts.
 VERIFICATION_PROTOCOLS = ("none", "optional", "mandatory")
+# Version of the mandatory protocol's rules (rules/verification.py and its audit and
+# reassignment hooks). Recorded in a verification experiment's manifest; bump it
+# whenever those rules change, so a run is never resumed or reported across rules.
+VERIFICATION_RULES_VERSION = 1
 
 
 @dataclass(frozen=True)

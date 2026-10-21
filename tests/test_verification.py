@@ -717,3 +717,89 @@ def test_a_baseline_played_under_other_conditions_is_refused(
         build(load_run(experiment), load_run(base), replicates=20)
     with pytest.raises(SystemExit):
         main(["report", str(experiment), "--baseline", str(base), "--out", str(tmp_path / "out")])
+
+
+# Compatibility with v1 and with older rules -------------------------------------------
+
+
+def test_default_optional_reassignment_is_the_v1_rule() -> None:
+    """Under the default protocol a death and Meeting hand out work exactly as on the
+    base branch before #37 (same seed: T20 -> 6, T77 -> 3, T56 -> 9), so a v1 run's
+    optional games stay comparable; only the mandatory protocol weighs open work."""
+    game = make_game(seed=1)
+    game.start()
+    assert not board(game.state).outcome_blind_load
+    game.state.player(2).alive = False
+    run_meeting(game, MeetingRequest("emergency", 9))
+    moved = [(e["task"], e["to_seat"]) for e in events(game, "tasks.reassigned")]
+    assert moved == [("T20", 6), ("T77", 3), ("T56", 9)]
+    assert board(mandatory().state).outcome_blind_load
+
+
+def test_runs_scheduled_under_other_mandatory_rules_are_neither_resumed_nor_reported(
+    experiment: Path, tmp_path: Path
+) -> None:
+    for planned in (None, 0):
+        run = tmp_path / f"old-{planned}"
+        manifest = make_verification_manifest(POOL, 9, blocks=1, config={"round_cap": 100})
+        if planned is None:  # scheduled before the rules were versioned
+            del manifest["engine"]["verification_rules"]
+        else:
+            manifest["engine"]["verification_rules"] = planned
+        create_run(run, manifest)
+        with pytest.raises(ValueError, match="verification_rules"):
+            execute(run, mode="dry", max_games=1)
+    data = load_run(experiment)
+    data.manifest["engine"]["verification_rules"] = 0
+    with pytest.raises(ValueError, match="mandatory-protocol rules"):
+        build(data, replicates=20)
+    with pytest.raises(ValueError, match="mandatory-protocol rules"):
+        build(load_run(make_dry_exp(tmp_path)), data, replicates=20)
+
+
+def make_dry_exp(tmp_path: Path) -> Path:
+    run = tmp_path / "exp"
+    create_run(run, make_verification_manifest(POOL, 10, blocks=1, config={"round_cap": 100}))
+    execute(run, mode="dry", max_games=4)
+    return run
+
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def header_run(tmp_path: Path, headers: dict[str, dict[str, Any]]) -> Any:
+    """A minimal run directory holding only transcript headers, for the conditions check."""
+    from types import SimpleNamespace
+
+    (tmp_path / "games").mkdir(parents=True, exist_ok=True)
+    for game_id, header in headers.items():
+        (tmp_path / "games" / f"{game_id}.jsonl").write_text(json.dumps(header) + "\n")
+    return SimpleNamespace(run_dir=tmp_path), {g: SimpleNamespace(id=g) for g in headers}
+
+
+def test_historical_headers_are_compared_by_their_effective_settings(tmp_path: Path) -> None:
+    """A genuine header from before per-Seat Talk Budgets (#25), written by the engine
+    at issue-12 (tests/fixtures), means 500 characters for every Seat: it matches a
+    current default game, but not one whose Seats are all overridden to 1000, and a
+    field missing with no known historical default is refused, never a wildcard."""
+    from zantine.analysis.verification import check_conditions, effective_conditions
+
+    old = json.loads((FIXTURES / "pre_talk_budgets_header.json").read_text())
+    assert "talk_budgets" not in old["config"] and old["config"]["talk_budget_chars"] == 500
+    # Through JSON, as analysis reads every header.
+    current, louder = (
+        json.loads(json.dumps(play(config, "scripted").transcript.records[0]))
+        for config in (GameConfig(seed=5), GameConfig(seed=6, talk_budgets=(1000,) * 10))
+    )
+    assert effective_conditions(old["config"]) == effective_conditions(current["config"])
+    assert effective_conditions(louder["config"])["seat_talk_budgets"] == [1000] * 10
+    gappy = json.loads(json.dumps(old))
+    del gappy["config"]["relay_tasks"]
+    data, g = header_run(
+        tmp_path, {"old": old, "current": current, "louder": louder, "gappy": gappy}
+    )
+    check_conditions([(data, g["old"]), (data, g["current"])])
+    with pytest.raises(ValueError, match="seat_talk_budgets"):
+        check_conditions([(data, g["old"]), (data, g["louder"])])
+    with pytest.raises(ValueError, match="no 'relay_tasks'"):
+        check_conditions([(data, g["current"]), (data, g["gappy"])])

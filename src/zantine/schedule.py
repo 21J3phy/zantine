@@ -309,7 +309,7 @@ def make_verification_manifest(
         "pairing_window": design.window,
         "benign_period": design.benign_period,
         "mirror_per_model": 0,
-        "engine": engine_versions(),
+        "engine": engine_versions(VERIFICATION),
         "config": dict(config or {}),
         "games": games,
     }
@@ -367,13 +367,22 @@ def _number(games: list[dict[str, Any]], master_seed: int) -> None:
         raise ValueError("seed collision; choose another master seed")
 
 
-def engine_versions() -> dict[str, Any]:
-    """Versions that must not change in the middle of a run."""
-    return {
+def engine_versions(experiment: str | None = None) -> dict[str, Any]:
+    """Versions that must not change in the middle of a run (of ``experiment``).
+
+    A Verification Protocol experiment also pins the mandatory protocol's rules
+    (``config.VERIFICATION_RULES_VERSION``); the optional and none protocols play
+    the v1 rules unchanged."""
+    from zantine.config import VERIFICATION_RULES_VERSION
+
+    versions = {
         "scenario_version": SCENARIO_VERSION,
         "transcript_schema": SCHEMA_VERSION,
         "harness": f"{neutral.HARNESS_NAME}-v{neutral.HARNESS_VERSION}",
     }
+    if experiment == VERIFICATION:
+        versions["verification_rules"] = VERIFICATION_RULES_VERSION
+    return versions
 
 
 def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
