@@ -170,6 +170,8 @@ def test_ground_truth_keeps_original_masked_and_every_check() -> None:
             "round": None,
             "task": None,
             "negated": False,
+            "seen": False,
+            "throughout": False,
         }
     ]
     assert game.transcript.records[-1]["style_mask"]["outcomes"] == {"empty": 9, "rewritten": 1}
@@ -245,6 +247,37 @@ def test_negation_and_added_claims_count_as_meaning_changes() -> None:
     added = check.meaning(item("x"), "I was in Storage. Blue was in Electrical.")
     assert MeaningCheck.differences(original, negated) != []
     assert any(p.startswith("added Claim") for p in MeaningCheck.differences(original, added))
+
+
+@pytest.mark.parametrize(
+    ("original", "rewrite", "lost"),
+    [
+        ("I saw Red kill Blue in Storage.", "Red killed Blue in Storage.", "seen"),
+        ("I was in Storage the whole time.", "I was in Storage.", "throughout"),
+    ],
+)
+def test_dropping_a_seen_or_throughout_qualifier_is_a_meaning_change(
+    original: str, rewrite: str, lost: str
+) -> None:
+    check = MeaningCheck(PatternExtractor(), KeywordJudge())
+    before, after = check.meaning(item(original), original), check.meaning(item(rewrite), rewrite)
+    problems = MeaningCheck.differences(before, after)
+    assert any(p.startswith("lost Claim") and lost in p for p in problems), problems
+
+
+def test_claims_whose_quote_is_not_in_the_text_are_ignored() -> None:
+    def invents(inp: Any) -> dict[str, Any]:
+        return {
+            "claims": [
+                claim("location", "I", "I was in Storage", room="Storage"),
+                claim("location", "Blue", "Blue was in Electrical", room="Electrical"),
+                claim("location", "Green", "", room="Cafeteria"),
+            ]
+        }
+
+    check = MeaningCheck(ScriptedExtractor(invents), None)
+    meaning = check.meaning(item("I was in Storage."), "I was in Storage.")
+    assert [c[1] for c in meaning.claims] == ["red"]
 
 
 def test_if_even_the_fallback_fails_the_original_is_sent() -> None:
