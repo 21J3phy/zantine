@@ -69,16 +69,16 @@ def test_an_agent_loop_seat_plays_a_full_game() -> None:
         "provider": "anthropic",
         "effort": "medium",
         "effort_setting": "medium",
-        "harness": "agent-loop-v1",
+        "harness": "agent-loop-v2",
     }
     calls = [r["data"] for r in game.transcript.events("harness.call")]
     assert len(calls) == len(client.messages.calls) > 0
-    assert all(c["harness"] == "agent-loop" and c["harness_version"] == 1 for c in calls)
+    assert all(c["harness"] == "agent-loop" and c["harness_version"] == 2 for c in calls)
     assert {c["phase"] for c in calls} >= {"action", "speak", "vote"}
     # The game ran on the agent-loop prompt and tools.
     assert all(c["system"][0]["text"] == agent_loop.SYSTEM_PROMPT for c in client.messages.calls)
     assert result.cost["harnesses"] == {
-        "agent-loop-v1": {"seats": [me], **{k: result.cost["game"][k] for k in result.cost["game"]}}
+        "agent-loop-v2": {"seats": [me], **{k: result.cost["game"][k] for k in result.cost["game"]}}
     }
 
 
@@ -99,9 +99,9 @@ def test_both_harnesses_log_the_same_fields_through_one_ledger() -> None:
     # One ledger prices both, and the cost record splits them by Harness.
     assert result.ledger.spent_usd == pytest.approx(sum(c["cost_usd"] for c in calls))
     harnesses = result.cost["harnesses"]
-    assert harnesses["neutral-v5"]["seats"] == [neutral_seat]
-    assert harnesses["agent-loop-v1"]["seats"] == [loop_seat]
-    for label, seat in (("neutral-v5", neutral_seat), ("agent-loop-v1", loop_seat)):
+    assert harnesses["neutral-v6"]["seats"] == [neutral_seat]
+    assert harnesses["agent-loop-v2"]["seats"] == [loop_seat]
+    for label, seat in (("neutral-v6", neutral_seat), ("agent-loop-v2", loop_seat)):
         assert harnesses[label]["calls"] == len(by_seat[seat])
         assert harnesses[label]["cost_usd"] == result.cost["seats"][seat]["cost_usd"]
     total = sum(h["cost_usd"] for h in harnesses.values())
@@ -312,5 +312,24 @@ def test_cli_records_the_harness_in_the_transcript_header(
     assert main([*argv, "--spend-cap", "20", "--out", str(out), "--quiet"]) == 0
     records = Transcript.read(out)
     live = [s["controller"] for s in records[0]["seats"] if s["controller"]["kind"] == "live"]
-    assert sorted(c["harness"] for c in live) == ["agent-loop-v1", "neutral-v5"]
-    assert set(records[-1]["harnesses"]) == {"agent-loop-v1", "neutral-v5"}
+    assert sorted(c["harness"] for c in live) == ["agent-loop-v2", "neutral-v6"]
+    assert set(records[-1]["harnesses"]) == {"agent-loop-v2", "neutral-v6"}
+
+
+def test_an_agent_loop_seat_talks_through_the_deciding_calls_say() -> None:
+    def chatty(params: dict) -> Any:
+        if phase_of(params) == "action" and is_loop(params):
+            if "Your steps so far" not in tail_of(params):
+                return message(tool_use("update_notes", text="plan"))
+            return message(tool_use("wait", say="anyone in here?"))
+        return polite_player(params)
+
+    client = FakeClient(chatty)
+    result = run(client, round_cap=2, tasks_per_crewmate=0, relay_tasks=0, splitkey_tasks=0)
+    me = seat_of(result, AgentLoopSeat)
+    said = [r["data"] for r in result.game.transcript.events("chat.message")]
+    said = [d for d in said if d["speaker"] == me]
+    assert len(said) == 2 and all(d["text"] == "anyone in here?" for d in said)
+    # Every action tool the loop offers carries the required say argument.
+    loop_tools = [t for t in client.messages.calls[0]["tools"] if t["name"] == "wait"]
+    assert loop_tools and "say" in loop_tools[0]["input_schema"]["required"]
