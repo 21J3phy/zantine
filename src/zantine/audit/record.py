@@ -4,7 +4,8 @@ Reads ``header``, ``event`` and ``observation`` records only (never engine
 internals). Two views of the same game:
 
 - **Ground truth** (from ``event`` records): where every living player was at
-  the two boundaries of each Round, every kill, every Task completion, and the
+  the two boundaries of each Round, every kill, every Task completion (solo
+  Tasks, chain relays and Audits, each from its own module's events), and the
   Meetings with their statements.
 - **A Seat's own record**: the observations it was given plus the actions it
   submitted itself (a Seat always knows what it did). A **Lie** must be proved
@@ -23,6 +24,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+# Task kinds whose completion is reconstructed from their own module's events.
+RELAY_KIND = "chain_relay"
+AUDIT_KIND = "audit"
+
 Boundary = Literal["start", "end"]
 BOUNDARIES: tuple[Boundary, Boundary] = ("start", "end")
 
@@ -38,6 +43,16 @@ class Kill:
 
 @dataclass(frozen=True)
 class TaskDone:
+    """One Seat's credit for a completed Task.
+
+    - Solo Tasks: a correct ``tasks.graded``, in the Task's room.
+    - Chain relays: the correct delivery, credited to the deliverer (delivery room,
+      delivery Round) and to each carrier who handed the part off (handoff room and
+      Round); ``seq`` is the delivery's for all of them.
+    - Audits: a correct ``audit.checked``, credited to the auditor (the Audit's room)
+      and to the spec holder who shared the spec (room unknown: None).
+    """
+
     seq: int
     round: int
     seat: int
@@ -78,6 +93,8 @@ class GameRecord:
     rooms: tuple[str, ...]
     meeting_room: str | None
     task_rooms: dict[str, str]
+    # Every Task's kind (``tasks.generated`` and Audits placed later), by id.
+    task_kinds: dict[str, str]
     # positions[(round, boundary)][seat] = room; only living players are listed.
     positions: dict[tuple[int, Boundary], dict[int, str]]
     kills: list[Kill]
@@ -148,6 +165,7 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
         rooms=tuple(game_map.get("rooms", ())),
         meeting_room=meeting_room,
         task_rooms={},
+        task_kinds={},
         positions={},
         kills=[],
         tasks_done=[],
@@ -158,6 +176,16 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
         header=header,
     )
     pos: dict[int, str] = {s: meeting_room for s in names} if meeting_room else {}
+    relay_rooms: dict[str, dict[str, str]] = {}
+    # Relay legs handed off so far: (seat, round, room) per Task.
+    handoffs: dict[str, list[tuple[int, int, str]]] = {}
+
+    def add_task(task: dict[str, Any]) -> None:
+        rec.task_rooms[task["id"]] = task["room"]
+        rec.task_kinds[task["id"]] = task["kind"]
+        if task["kind"] == RELAY_KIND:
+            relay_rooms[task["id"]] = dict(task["inputs"]["rooms"])
+
     current = 0
     ended: set[int] = set()
 
@@ -188,13 +216,37 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
             case "move" if data["seat"] in pos:
                 pos[data["seat"]] = data["to_room"]
             case "tasks.generated":
-                rec.task_rooms = {t["id"]: t["room"] for t in data["tasks"]}
+                for task in data["tasks"]:
+                    add_task(task)
+            case "audit.placed":
+                add_task(data["task"])
+            case "relay.handed_off":
+                handoffs.setdefault(data["task"], []).append((data["seat"], rnd, data["room"]))
             case "tasks.graded" if data.get("correct"):
-                rec.tasks_done.append(
-                    TaskDone(
-                        r["seq"], rnd, data["seat"], data["task"], rec.task_rooms.get(data["task"])
+                task = data["task"]
+                if task in relay_rooms:
+                    # Delivered in the delivery room; every carrier who finished a
+                    # leg shares the completion (as in the Task stats).
+                    rec.tasks_done.append(
+                        TaskDone(r["seq"], rnd, data["seat"], task, relay_rooms[task]["delivery"])
                     )
+                    for seat, leg_round, room in handoffs.get(task, []):
+                        if seat != data["seat"]:
+                            rec.tasks_done.append(TaskDone(r["seq"], leg_round, seat, task, room))
+                else:
+                    rec.tasks_done.append(
+                        TaskDone(r["seq"], rnd, data["seat"], task, rec.task_rooms.get(task))
+                    )
+            case "audit.checked" if data.get("correct"):
+                # A correct check completes the Audit (in its room) for the auditor
+                # and the spec holder who shared the spec, wherever it stood then.
+                task = data["task"]
+                auditor = data["auditor"]
+                rec.tasks_done.append(
+                    TaskDone(r["seq"], rnd, auditor, task, rec.task_rooms.get(task))
                 )
+                if data.get("spec_from") is not None and data["spec_from"] != auditor:
+                    rec.tasks_done.append(TaskDone(r["seq"], rnd, data["spec_from"], task, None))
             case "meeting_started":
                 close_round(rnd)
                 previous = rec.meetings[-1].round if rec.meetings else 0

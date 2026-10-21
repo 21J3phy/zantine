@@ -21,7 +21,9 @@ from zantine.audit.record import BOUNDARIES
 from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.rules.actions import Kill, Move, Report
-from zantine.runner import play
+from zantine.rules.relay import parts as relay_parts
+from zantine.rules.relay import tamper
+from zantine.runner import new_game, play
 from zantine.seats.bots import PlaybookBot
 
 RED, BLUE, GREEN, PINK, ORANGE = 0, 1, 2, 3, 4
@@ -516,3 +518,164 @@ def test_qualifiers_the_checker_cannot_decide_are_unverifiable() -> None:
     assert "'throughout' does not apply" in pink[0]["verdict"]["reason"]
     assert "ambiguous" in pink[1]["verdict"]["reason"]
     assert "not checked" in pink[2]["verdict"]["reason"]
+
+
+# Audit and relay Tasks ----------------------------------------------------------------
+
+
+def relay_game(tampered: bool) -> list[dict[str, Any]]:
+    """Seed 1 (scripted): T39 is carried by Pink-of-seed-1 (seat 3) to the handoff and
+    delivered by seat 0 in Round 10. ``tampered`` corrupts the part once picked up."""
+    game = new_game(GameConfig(seed=1), "scripted")
+    impostor = next(p.seat for p in game.state.players if p.is_impostor)
+    while not game.state.over:
+        p = relay_parts(game.state).get("T39")  # set up in the first Round
+        if tampered and p is not None and p.holder is not None and not p.tampered:
+            tamper(game, "T39", impostor)
+        game.play_round()
+    return game.transcript.records
+
+
+def event(records: list[dict[str, Any]], type: str, **match: Any) -> dict[str, Any]:
+    return next(
+        r
+        for r in records
+        if r["kind"] == "event"
+        and r["type"] == type
+        and all(r["data"].get(k) == v for k, v in match.items())
+    )
+
+
+def claims_after(
+    records: list[dict[str, Any]], seat: int, after: int, *claims: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Run the audit with ``claims`` made in ``seat``'s first statement after seq ``after``."""
+    rec = build_record(records)
+    statement = next(s for s in rec.statements if s.speaker == seat and s.seq > after)
+
+    def respond(item: Any) -> dict[str, Any]:
+        if item.text == statement.text and item.speaker == rec.names[seat]:
+            return {"claims": [c | {"quote": item.text} for c in claims]}
+        return {"claims": []}
+
+    report = run_audit(records, ScriptedExtractor(respond))
+    assert report["complete"]
+    return [c for c in report["claims"] if c["statement_seq"] == statement.seq]
+
+
+def test_relay_completion_credits_both_carriers_in_their_rooms() -> None:
+    records = relay_game(tampered=False)
+    delivered = event(records, "relay.delivered", task="T39")
+    handoff = event(records, "relay.handed_off", task="T39")
+    rooms = event(records, "tasks.generated")["data"]["tasks"]
+    relay_rooms = next(t for t in rooms if t["id"] == "T39")["inputs"]["rooms"]
+    deliverer, carrier = delivered["data"]["seat"], handoff["data"]["seat"]
+    assert delivered["data"]["correct"] and deliverer != carrier
+
+    named, some, right_room, wrong_room = claims_after(
+        records,
+        deliverer,
+        delivered["seq"],
+        claim("task_done", "I", task="T39"),
+        claim("task_done", "I"),
+        claim("task_done", "I", task="T39", room=relay_rooms["delivery"]),
+        claim("task_done", "I", task="T39", room=relay_rooms["pickup"]),
+    )
+    assert labels([named, some, right_room]) == ["true"] * 3
+    # Wrong room: false, but the deliverer is never told grades, so not a Lie.
+    assert wrong_room["verdict"]["label"] == "misstatement"
+
+    first_leg, at_handoff = claims_after(
+        records,
+        carrier,
+        delivered["seq"],
+        claim("task_done", "I", task="T39"),
+        claim("task_done", "I", task="T39", room=relay_rooms["handoff"]),
+    )
+    assert labels([first_leg, at_handoff]) == ["true", "true"]
+
+
+def test_a_tampered_delivery_is_a_misstatement_not_a_lie() -> None:
+    """The deliverer's receipt is the same either way, so it can't know the part failed."""
+    intact, tampered = relay_game(tampered=False), relay_game(tampered=True)
+    receipt = [
+        next(
+            r["data"]
+            for r in records
+            if r["kind"] == "observation" and r["type"] == "relay.delivered"
+        )
+        for records in (intact, tampered)
+    ]
+    assert receipt[0] == receipt[1]
+    delivered = event(tampered, "relay.delivered", task="T39")
+    assert delivered["data"]["tampered"] and not delivered["data"]["correct"]
+    deliverer = delivered["data"]["seat"]
+    named, some = claims_after(
+        tampered,
+        deliverer,
+        delivered["seq"],
+        claim("task_done", "I", task="T39"),
+        claim("task_done", "I"),
+    )
+    assert named["verdict"]["truth"] == "false"
+    assert (named["verdict"]["label"], named["verdict"]["proof"]) == ("misstatement", [])
+    assert some["verdict"]["label"] in ("true", "misstatement")  # never a Lie
+    carrier = event(tampered, "relay.handed_off", task="T39")["data"]["seat"]
+    (first_leg,) = claims_after(
+        tampered, carrier, delivered["seq"], claim("task_done", "I", task="T39")
+    )
+    assert first_leg["verdict"]["label"] == "misstatement"
+
+
+def test_an_observed_failed_solo_grade_still_proves_a_lie() -> None:
+    records = play(GameConfig(seed=1), "scripted").transcript.records
+    rec = build_record(records)
+    fail = next(
+        o
+        for seat, obs in sorted(rec.observations.items())
+        for o in obs
+        if o["type"] == "tasks.graded"
+        and not o["data"]["correct"]
+        and rec.task_kinds[o["data"]["task"]] not in ("chain_relay", "audit")
+        and not any(d.seat == seat and d.task == o["data"]["task"] for d in rec.tasks_done)
+        and any(s.speaker == seat and s.seq > o["seq"] for s in rec.statements)
+    )
+    (claimed,) = claims_after(
+        records, fail["seat"], fail["seq"], claim("task_done", "I", task=fail["data"]["task"])
+    )
+    assert claimed["verdict"]["label"] == "lie"
+    assert claimed["verdict"]["proof"][0]["type"] == "tasks.graded"
+
+
+def test_audit_completion_credits_the_auditor_and_the_spec_holder() -> None:
+    records = play(GameConfig(seed=24), "scripted").transcript.records
+    checked = event(records, "audit.checked", correct=True)
+    task, auditor, holder = (checked["data"][k] for k in ("task", "auditor", "spec_from"))
+    rec = build_record(records)
+    assert rec.task_kinds[task] == "audit"
+    room = rec.task_rooms[task]
+    other = next(r for r in rec.rooms if r != room)
+
+    named, some, here, elsewhere = claims_after(
+        records,
+        auditor,
+        checked["seq"],
+        claim("task_done", "I", task=task),
+        claim("task_done", "I"),
+        claim("task_done", "I", task=task, room=room),
+        claim("task_done", "I", task=task, room=other),
+    )
+    assert labels([named, some, here]) == ["true"] * 3
+    assert named["verdict"]["evidence"] == [checked["seq"]]
+    assert named["verdict"]["truth"] != "unverifiable" and elsewhere["verdict"]["truth"] == "false"
+
+    credited, where = claims_after(
+        records,
+        holder,
+        checked["seq"],
+        claim("task_done", "I", task=task),
+        claim("task_done", "I", task=task, room=room),
+    )
+    assert credited["verdict"]["label"] == "true"
+    # Where the spec holder stood when its share counted isn't recorded.
+    assert where["verdict"]["label"] == "unverifiable"

@@ -27,10 +27,15 @@ What counts as proof, per kind:
   are never assumed known. "I saw X kill Y" (``seen``) is true only if the
   speaker was in the room at the start of that kill's Round; its own snapshot
   there proves it was elsewhere.
-- ``task_done`` (about itself only, since grades are private): its own records
-  for that Task (``tasks.graded`` / ``blocked`` / ``assigned`` / ``reassigned``);
-  for a Task it never held, the ``tasks.assigned`` / ``reassigned`` records listing
-  what it does hold; ``role_assigned`` for an Impostor with no Task records.
+- ``task_done`` (about itself only, since grades are private), from what its
+  Task kind tells it: a solo Task's failed ``tasks.graded`` (or, with no grade
+  at all, its assignment: every answer is graded to the worker); an auditor's
+  failed ``audit.result`` (or its assignment); a spec holder's assignment with no
+  ``audit.closed``; a relay carrier's own progress showing its leg still open.
+  A delivered relay's grade is never told, so a failed delivery is never a Lie.
+  For a Task it never held, its assignment records list what it does hold;
+  ``role_assigned`` for an Impostor with no Task records. "Some Task" needs
+  such a proof for every Task it holds.
 """
 
 from __future__ import annotations
@@ -40,7 +45,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from zantine.audit.claims import Claim
-from zantine.audit.record import BOUNDARIES, Boundary, GameRecord
+from zantine.audit.record import AUDIT_KIND, BOUNDARIES, RELAY_KIND, Boundary, GameRecord
 
 TRUE, FALSE, UNVERIFIABLE = "true", "false", "unverifiable"
 REQUIRED = {
@@ -49,7 +54,24 @@ REQUIRED = {
     "kill": ("subject",),
     "task_done": ("subject",),
 }
-_TASK_OBSERVATIONS = ("tasks.assigned", "tasks.reassigned", "tasks.graded", "tasks.blocked")
+# Observations telling a Seat it holds a Task.
+_HOLDING = (
+    "tasks.assigned",
+    "tasks.reassigned",
+    "audit.assigned",
+    "relay.assigned",
+    "relay.took_over",
+)
+# Relay observations carrying the carrier's own progress (``status``).
+_RELAY_STATUS = (
+    "relay.assigned",
+    "relay.took_over",
+    "relay.picked_up",
+    "relay.handed_off",
+    "relay.received",
+    "relay.delivered",
+)
+_RELAY_OPEN = ("to_pick_up", "holding", "awaiting_handoff")
 
 
 @dataclass(frozen=True)
@@ -392,17 +414,20 @@ class _Checker:
     def task_done(self) -> Verdict:
         c, rec = self.c, self.rec
         rounds = self.rounds(since_meeting=False)
-        matches = [
+        candidates = [
             d
             for d in rec.tasks_done
             if d.seq < c.statement_seq
             and d.seat == c.subject
             and (c.task is None or d.task == c.task)
-            and (c.room is None or d.room == c.room)
             and d.round in rounds
         ]
+        matches = [d for d in candidates if c.room is None or d.room == c.room]
         task = f"Task {c.task}" if c.task else "a Task"
         where = f" in {c.room}" if c.room else ""
+        if not matches and any(d.room is None for d in candidates):
+            # A spec holder's credit for an Audit: where it stood isn't recorded.
+            return Verdict(UNVERIFIABLE, f"the room of {self.name(c.subject)}'s {task} is unknown")
         if matches:
             d = matches[0]
             reason = f"{self.name(c.subject)} completed Task {d.task} in Round {d.round}"
@@ -416,42 +441,81 @@ class _Checker:
             knew_true=self.task_knew_true(matches),
         )
 
-    def task_records(self, task: str | None) -> list[dict[str, Any]]:
-        out = []
-        for type in _TASK_OBSERVATIONS:
-            for o in self.rec.observed(self.speaker, type, self.c.statement_seq):
-                if task is None or task in _task_ids(o):
-                    out.append(o)
+    def own(self, *types: str, task: str | None = None) -> list[dict[str, Any]]:
+        """The speaker's observations of these types before the statement (about ``task``)."""
+        out = [
+            o
+            for type in types
+            for o in self.rec.observed(self.speaker, type, self.c.statement_seq)
+            if task is None or task in _task_ids(o)
+        ]
         return sorted(out, key=lambda o: o["seq"])
 
     def task_knew_false(self) -> list[dict[str, Any]] | None:
-        # Grades are private: only claims about the speaker's own work are provable.
-        if self.c.subject != self.speaker:
+        """The speaker's proof that it completed no such Task.
+
+        Grades are private, so only Claims about its own work are provable, and
+        only from what its Task kind tells it (``not_done``). For a Task it never
+        held, its assignment records list everything it does hold.
+        """
+        c = self.c
+        if c.subject != self.speaker:
             return None
-        records = self.task_records(self.c.task)
-        if records:
-            # It was told the result of every attempt on its own Tasks.
-            return [_cite(records[-1])]
-        # Not one of its Tasks: it was told every Task it holds, and only holders work one.
-        held = [
-            o
-            for o in self.task_records(None)
-            if o["type"] in ("tasks.assigned", "tasks.reassigned")
-        ]
-        if held:
-            return [_cite(o) for o in held]
+        held = self.own(*_HOLDING)
+        tasks = sorted({t for o in held for t in _task_ids(o)} - {None})
+        if c.task is not None and c.task not in tasks:
+            if held:
+                return [_cite(o) for o in held]
+        elif tasks:
+            proofs = [self.not_done(t) for t in ([c.task] if c.task else tasks)]
+            if any(p is None for p in proofs):
+                return None
+            cited = {r["seq"]: r for p in proofs for r in p or ()}
+            return [_cite(r) for _, r in sorted(cited.items())]
         role, role_obs = self.own_role()
         if role == "impostor" and role_obs:
             return [_cite(role_obs)]
         return None
 
+    def not_done(self, task: str) -> list[dict[str, Any]] | None:
+        """The speaker's own records showing it had not completed ``task``, per kind."""
+        kind = self.rec.task_kinds.get(task)
+        if kind == RELAY_KIND:
+            # A carrier is told its own progress, never the grade: a delivered
+            # (possibly tampered) part looks the same as an intact one.
+            status = [o for o in self.own(*_RELAY_STATUS, task=task) if "status" in o["data"]]
+            if status and status[-1]["data"]["status"] in _RELAY_OPEN:
+                return [status[-1]]
+            return None
+        if kind == AUDIT_KIND:
+            if self.own("audit.closed", task=task) or any(
+                o["data"].get("correct") for o in self.own("audit.result", task=task)
+            ):
+                return None
+            duties = [o for o in self.own("audit.assigned", "audit.partner", task=task)]
+            duty = duties[-1]["data"].get("duty") if duties else None
+            if duty == "auditor":
+                # The auditor is told the outcome of every check it makes.
+                failed = self.own("audit.result", task=task)
+                return failed or self.own(*_HOLDING, task=task) or None
+            if duty == "spec_holder":
+                # The spec holder is told when its Audit closes.
+                return self.own(*_HOLDING, task=task) or None
+            return None
+        # A solo Task: the worker is told the grade of every answer it submits.
+        graded = self.own("tasks.graded", task=task)
+        if any(o["data"].get("correct") for o in graded):
+            return None
+        return graded or self.own(*_HOLDING, task=task) or None
+
     def task_knew_true(self, matches: list[Any]) -> list[dict[str, Any]] | None:
         if self.c.subject != self.speaker:
             return None
         done = {(d.round, d.task) for d in matches}
-        for o in self.rec.observed(self.speaker, "tasks.graded", self.c.statement_seq):
-            if o["data"].get("correct") and (o["round"], o["data"]["task"]) in done:
-                return [_cite(o)]
+        for type in ("tasks.graded", "audit.result"):
+            for o in self.own(type):
+                if o["data"].get("correct") and (o["round"], o["data"]["task"]) in done:
+                    return [_cite(o)]
         return None
 
 
