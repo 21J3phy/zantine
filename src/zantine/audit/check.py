@@ -519,8 +519,13 @@ class _Checker:
                 return self.ruled_out(passed, lambda o: room, holding)
             if duty == "spec_holder":
                 if task in self.rec.required_audits:
-                    # A mandatory check's holder is never told whether it passed.
-                    return None
+                    # A mandatory check's holder earns its credit only through a half
+                    # it shared, and is never told whether the check then passed: it
+                    # knows only that nothing could complete before its first share.
+                    shared = self.own("audit.shared", task=task)
+                    if not shared:
+                        return holding or None
+                    return self.before_all(shared, holding)
                 # The spec holder is told when its Audit closes; it shares the credit
                 # only for a spec it shared itself. Where it stood is not recorded.
                 closed = self.own("audit.closed", task=task)
@@ -551,10 +556,23 @@ class _Checker:
             return graded or holding or None
         if task in self.rec.gated:
             # Mandatory checks: the worker knows its work went in, never whether or
-            # when the checks passed, so nothing it was told rules a completion out.
-            return None
+            # when the checks passed. It knows only that the Task could not be
+            # complete before its first correct submission.
+            return self.before_all(passed, holding)
         room = self.rec.task_rooms.get(task)
         return self.ruled_out(passed, lambda o: room, holding)
+
+    def before_all(
+        self, occasions: list[dict[str, Any]], context: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | None:
+        """Proof that the claimed Round(s) all precede the earliest of ``occasions``
+        (e.g. the first correct submission of gated work, or a holder's first
+        share), before which no completion was possible; None when a claimed Round
+        is at or after it, where the speaker cannot know."""
+        first = min(o["round"] for o in occasions)
+        if any(r >= first for r in self.rounds(since_meeting=False)):
+            return None
+        return sorted([*occasions, *context], key=lambda o: o["seq"]) or None
 
     def splitkey_shares(self, task: str) -> list[dict[str, Any]]:
         """The speaker's completion notices for split-key attempts it read itself."""

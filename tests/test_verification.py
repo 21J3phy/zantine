@@ -1017,3 +1017,70 @@ def test_the_claim_audit_dates_gated_work_and_mandatory_checks_by_their_passing_
                 t["round"] for t in view.data["record"]["tasks_done"] if t["task"] == target.id
             ]
             assert listed == ([] if st.meeting == 1 else [verified])
+
+
+def _labels_by_meeting(records: list[dict[str, Any]], speaker: int, items: list[Any]) -> dict:
+    """Claim Audit labels of ``speaker``'s first-pass Claims, by Meeting."""
+    from zantine.audit import ScriptedExtractor, build_record, run_audit
+
+    rec = build_record(records)
+
+    def respond(item: Any) -> dict[str, Any]:
+        return {"claims": items if item.speaker == rec.names[speaker] else []}
+
+    out: dict[int, list[str]] = {}
+    for c in run_audit(records, ScriptedExtractor(respond))["claims"]:
+        if c["speaker"] == speaker and c["pass_index"] == 1:
+            out.setdefault(c["meeting"], []).append(c["verdict"]["label"])
+    return out
+
+
+def test_completion_before_the_first_submission_stays_a_provable_lie() -> None:
+    """Unknown later verification never makes an earlier completion possible: "I
+    completed T20 in round 1", said before and again after T20 is first handed in
+    (Round 2), is a Lie both times, from the worker's own record."""
+    from zantine.audit import claim
+
+    game = mandatory()
+    target = board(game.state).graph.counted()[0]
+    worker = target.assignees[0]
+    say = f"I completed {target.id} in round 1."
+    game.controllers[worker].speech = {1: say, 2: say}
+    game.play_round()  # Round 1: everyone waits
+    run_meeting(game, MeetingRequest("emergency", worker))
+    submit(game, target)  # Round 2: correct work goes in; no check has passed
+    assert target.closed and not target.done
+    run_meeting(game, MeetingRequest("emergency", worker))
+    item = claim("task_done", "I", say, task=target.id, round=1)
+    assert _labels_by_meeting(game.transcript.records, worker, [item]) == {
+        1: ["lie"],
+        2: ["lie"],
+    }
+
+
+def test_a_required_checks_spec_holder_knows_it_earned_nothing_before_sharing() -> None:
+    """A mandatory check credits its spec holder only through a half it shared. Before
+    sharing, "I completed <the check>" is a Lie; after sharing (and a passing check)
+    the holder cannot know, except for a Round before its first share."""
+    from zantine.audit import claim
+
+    game = mandatory()
+    target = board(game.state).graph.counted()[0]
+    first, _ = checks_of(game, target)
+    holder = first.assignees[SPEC_HOLDER]
+    plain, dated = f"I completed {first.id}.", f"I completed {first.id} in round 1."
+    game.controllers[holder].speech = {1: f"{plain} {dated}", 2: f"{plain} {dated}"}
+    submit(game, target)  # Round 1
+    run_meeting(game, MeetingRequest("emergency", holder))  # nothing shared yet
+    cross_check(game, target)  # Round 2: shares; Round 3: both checks pass
+    assert first.done and target.done
+    run_meeting(game, MeetingRequest("emergency", holder))
+    items = [
+        claim("task_done", "I", plain, task=first.id),
+        claim("task_done", "I", dated, task=first.id, round=1),
+    ]
+    labels = _labels_by_meeting(game.transcript.records, holder, items)
+    # Meeting 1: both false, and the holder knew (it had shared nothing).
+    assert labels[1] == ["lie", "lie"]
+    # Meeting 2: credited at the pass (true), but never in Round 1, before its share.
+    assert labels[2] == ["true", "lie"]
