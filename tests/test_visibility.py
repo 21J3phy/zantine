@@ -22,6 +22,7 @@ class SpyBot(SeatController):
         self.inner = inner
         self.game: Game | None = None
         self.checked = 0
+        self.heard = 0
 
     def choose_action(self, ctx: ActionContext) -> Action:
         assert self.game is not None
@@ -36,8 +37,21 @@ class SpyBot(SeatController):
             "players": list(ctx.players_here),
             "bodies": list(ctx.bodies_here),
         }
+        # Room Chat was heard only in the room the player ended that Round in.
+        # (A Round's first snapshot is its end; a Meeting adds a later one.)
+        rooms: dict[int, str] = {}
+        for o in ctx.observations:
+            if o.type == "room_snapshot":
+                rooms.setdefault(o.round, o.data["room"])
+        for o in ctx.observations:
+            if o.type == "chat.message":
+                assert o.data["room"] == rooms[o.round]
+                self.heard += 1
         self.checked += 1
         return self.inner.choose_action(ctx)
+
+    def say(self, ctx: ActionContext) -> str:
+        return self.inner.say(ctx)
 
     def speak(self, ctx: MeetingContext) -> str:
         return self.inner.speak(ctx)
@@ -47,14 +61,20 @@ class SpyBot(SeatController):
 
 
 def test_every_context_matches_only_the_players_own_room() -> None:
-    for seed in range(5):
-        game = new_game(GameConfig(seed=seed))
-        spies = [SpyBot(ScriptedBot(GameRng(seed).fork(f"s{i}"))) for i in range(10)]
+    # The games without solo steps get split-key holders talking in Room Chat early.
+    configs = [GameConfig(seed=s) for s in range(5)]
+    configs += [GameConfig(seed=s, tasks_per_crewmate=0) for s in range(2)]
+    heard = 0
+    for config in configs:
+        game = new_game(config)
+        spies = [SpyBot(ScriptedBot(GameRng(config.seed).fork(f"s{i}"))) for i in range(10)]
         game.controllers = list(spies)
         for spy in spies:
             spy.game = game
         game.run()
         assert sum(s.checked for s in spies) > 50
+        heard += sum(s.heard for s in spies)
+    assert heard > 0
 
 
 def test_events_in_other_rooms_are_invisible() -> None:

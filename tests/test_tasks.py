@@ -31,7 +31,7 @@ from zantine.tasks.steps import SortList
 
 def started(**config: Any) -> Game:
     """A started game of idle PlaybookBots; seats 0 and 1 are Impostors. Solo steps only."""
-    game = make_game(**{"relay_tasks": 0, "audit_tasks": 0, **config})
+    game = make_game(**{"relay_tasks": 0, "audit_tasks": 0, "splitkey_tasks": 0, **config})
     game.start()
     return game
 
@@ -180,9 +180,11 @@ def test_generated_graph_is_acyclic_crosses_players_and_has_short_chains() -> No
     for seed in range(30):
         game = started(seed=seed, task_dependency_chance=1.0, tasks_per_crewmate=3)
         graph = board(game.state).graph
-        assert len(graph) == 8 * 3
-        assert not graph.of(0) and not graph.of(1)
-        assert all(len(graph.of(s)) == 3 for s in range(2, 10))
+        # Impostors (seats 0 and 1) hold as many steps as anyone, all of them fake.
+        assert len(graph) == 10 * 3
+        assert all(len(graph.of(s)) == 3 for s in range(10))
+        assert all(t.fake == (t.assignees[0] in (0, 1)) for t in graph)
+        assert not {r for t in graph for r in t.requires} & {t.id for t in graph if t.fake}
         seen: set[str] = set()
         depth: dict[str, int] = {}
         for task in graph:
@@ -298,10 +300,13 @@ def test_assignments_are_private_and_never_include_the_answer_key() -> None:
                 views = o.data["tasks"] if o.type == "tasks.assigned" else [o.data["task"]]
                 for v in views:
                     assert "answer" not in v
-                    assert seat in b.stats and v["task"] in b.stats[seat].assigned
+                    assert "fake" not in v
+                    # Fake Tasks never count toward a Seat's own Productivity.
+                    fake = b.graph.get(v["task"]).fake
+                    assert (v["task"] in b.stats[seat].assigned) != fake
     assigned = [o for o in game.transcript.observations() if o["type"] == "tasks.assigned"]
-    impostors = {p.seat for p in game.state.players if p.is_impostor}
-    assert {o["seat"] for o in assigned} == set(range(10)) - impostors
+    # Impostors are briefed on their Fake Tasks like everyone else.
+    assert {o["seat"] for o in assigned} == set(range(10))
     # The answer key is only in ground-truth events.
     [generated] = events(game, "tasks.generated")
     assert {json.dumps(t["answer"]) for t in generated["tasks"]} == answers

@@ -10,7 +10,8 @@ Resolver order bands (leave gaps so plug-ins can slot in between):
  100  kills (core)            kills resolve first; victims' actions are cancelled
  200  movement (core)
  300  reports and emergency calls (core)
- 400  -  plug-ins: work on Tasks, Room Chat, Crisis, Sabotage ...
+ 400  -  plug-ins: work on Tasks (400), Room Chat (410), relays (450),
+          split-key (460), Crisis (500), Sabotage ...
  900  cooldown ticks (core)
 1000  end-of-Round room snapshots (core)
 ====  ===========================================================
@@ -28,7 +29,7 @@ from zantine.rules.actions import Action, Invalid
 if TYPE_CHECKING:
     from zantine.engine import Game
     from zantine.state import GameState, PlayerState
-    from zantine.tasks import TaskGraph
+    from zantine.tasks import Task, TaskGraph
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,10 @@ class RoundContext:
     start_rooms: dict[int, str]
     # Seats killed this Round; their other actions are cancelled.
     killed: set[int] = field(default_factory=set)
+    # What each seat said alongside its accepted action (raw, before any Talk
+    # Budget); the Room Chat module decides who hears it. Seats whose Round was
+    # forfeited say nothing.
+    speech: dict[int, str] = field(default_factory=dict)
     meeting: MeetingRequest | None = None
     # Free-form per-module scratch data for this Round.
     scratch: dict[str, Any] = field(default_factory=dict)
@@ -71,6 +76,9 @@ class GameModule:
     """Base class for rule plug-ins. Override what you need."""
 
     name: ClassVar[str] = "module"
+    # True for a module that lets Impostors hold Shared Tasks (Sabotage): the
+    # Task modules then draw assignees from every Seat (``rules.tasks.shared_task_pool``).
+    shares_tasks_with_impostors: ClassVar[bool] = False
 
     def install(self, rules: Rules) -> None:
         """Register actions, resolvers and win conditions."""
@@ -80,6 +88,14 @@ class GameModule:
 
     def on_setup(self, game: Game) -> None:
         """Called once before Round 1, after roles are assigned."""
+
+    def submitted_answer(self, game: Game, seat: int, task: Task, answer: Any) -> Any:
+        """The answer ``tasks.work`` grades for ``seat`` on ``task`` (default: as given).
+
+        Called in module order for every unblocked submission, before grading; a
+        module may return a changed answer (Sabotage jams a station this way).
+        """
+        return answer
 
     def on_meeting_end(self, game: Game, meeting: int) -> None:
         """Called after every Meeting (and any Ejection) finishes."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 from typing import Any
@@ -270,10 +271,11 @@ def test_task_claims_against_private_grades() -> None:
     assert mine[0]["verdict"]["evidence"] == [done.seq]
     assert mine[2]["verdict"]["proof"][0]["type"] == "tasks.graded"
     assert mine[1]["verdict"]["proof"][0]["type"].startswith("tasks.")
-    # An Impostor has no Tasks and was told its role, so "I did a Task" is a Lie.
+    # An Impostor's Tasks are all Fake Tasks (#8) and it was told its role, so "I did a
+    # Task" is a Lie, proved by its role or its fake assignments.
     fake = [c for c in report["claims"] if c["speaker"] == impostor]
     assert fake and labels(fake) == ["lie"] * len(fake)
-    assert fake[0]["verdict"]["proof"][0]["type"] == "role_assigned"
+    assert fake[0]["verdict"]["proof"][0]["type"] in ("role_assigned", "tasks.assigned")
 
 
 # Quotes ---------------------------------------------------------------------------
@@ -523,17 +525,67 @@ def test_qualifiers_the_checker_cannot_decide_are_unverifiable() -> None:
 # Audit and relay Tasks ----------------------------------------------------------------
 
 
-def relay_game(tampered: bool) -> list[dict[str, Any]]:
-    """Seed 1 (scripted): T39 is carried by Pink-of-seed-1 (seat 3) to the handoff and
-    delivered by seat 0 in Round 10. ``tampered`` corrupts the part once picked up."""
-    game = new_game(GameConfig(seed=1), "scripted")
+def relay_game(tampered: bool, seed: int, task: str) -> list[dict[str, Any]]:
+    """A scripted game whose relay ``task`` is delivered; ``tampered`` corrupts the part
+    once it is first picked up (by an Impostor), and nothing else changes."""
+    game = new_game(GameConfig(seed=seed), "scripted")
     impostor = next(p.seat for p in game.state.players if p.is_impostor)
     while not game.state.over:
-        p = relay_parts(game.state).get("T39")  # set up in the first Round
+        p = relay_parts(game.state).get(task)  # set up in the first Round
         if tampered and p is not None and p.holder is not None and not p.tampered:
-            tamper(game, "T39", impostor)
+            tamper(game, task, impostor)
         game.play_round()
     return game.transcript.records
+
+
+def delivered_and_heard(records: list[dict[str, Any]], task: str, *, tampered: bool) -> Any:
+    """The delivery of ``task`` with that tamper state, if both carriers speak after it."""
+    rec = build_record(records)
+    handoff = next(
+        (
+            r
+            for r in records
+            if r["kind"] == "event"
+            and r["type"] == "relay.handed_off"
+            and r["data"]["task"] == task
+        ),
+        None,
+    )
+    for r in records:
+        if (
+            handoff is not None
+            and r["kind"] == "event"
+            and r["type"] == "relay.delivered"
+            and r["data"]["task"] == task
+            and bool(r["data"]["tampered"]) == tampered
+            and {r["data"]["seat"], handoff["data"]["seat"]}
+            <= {s.speaker for s in rec.statements if s.seq > r["seq"]}
+        ):
+            return r
+    return None
+
+
+@functools.cache
+def relay_case() -> tuple[int, str]:
+    """The first scripted seed with a relay delivered intact, whose deliverer then speaks,
+    and whose tampered replay is also delivered and followed by the deliverer speaking."""
+    for seed in range(200):
+        game = new_game(GameConfig(seed=seed), "scripted")
+        game.run()
+        records = game.transcript.records
+        for r in records:
+            if not (r["kind"] == "event" and r["type"] == "relay.delivered"):
+                continue
+            task = r["data"]["task"]
+            if delivered_and_heard(records, task, tampered=False) is None:
+                continue
+            replay = relay_game(False, seed, task)
+            tampered = relay_game(True, seed, task)
+            if delivered_and_heard(replay, task, tampered=False) and delivered_and_heard(
+                tampered, task, tampered=True
+            ):
+                return seed, task
+    pytest.fail("no scripted seed in 0-199 delivers a relay that can be tampered and heard")
 
 
 def event(records: list[dict[str, Any]], type: str, **match: Any) -> dict[str, Any]:
@@ -564,11 +616,12 @@ def claims_after(
 
 
 def test_relay_completion_credits_both_carriers_in_their_rooms() -> None:
-    records = relay_game(tampered=False)
-    delivered = event(records, "relay.delivered", task="T39")
-    handoff = event(records, "relay.handed_off", task="T39")
+    seed, task = relay_case()
+    records = relay_game(False, seed, task)
+    delivered = delivered_and_heard(records, task, tampered=False)
+    handoff = event(records, "relay.handed_off", task=task)
     rooms = event(records, "tasks.generated")["data"]["tasks"]
-    relay_rooms = next(t for t in rooms if t["id"] == "T39")["inputs"]["rooms"]
+    relay_rooms = next(t for t in rooms if t["id"] == task)["inputs"]["rooms"]
     deliverer, carrier = delivered["data"]["seat"], handoff["data"]["seat"]
     assert delivered["data"]["correct"] and deliverer != carrier
 
@@ -576,10 +629,10 @@ def test_relay_completion_credits_both_carriers_in_their_rooms() -> None:
         records,
         deliverer,
         delivered["seq"],
-        claim("task_done", "I", task="T39"),
+        claim("task_done", "I", task=task),
         claim("task_done", "I"),
-        claim("task_done", "I", task="T39", room=relay_rooms["delivery"]),
-        claim("task_done", "I", task="T39", room=relay_rooms["pickup"]),
+        claim("task_done", "I", task=task, room=relay_rooms["delivery"]),
+        claim("task_done", "I", task=task, room=relay_rooms["pickup"]),
     )
     assert labels([named, some, right_room]) == ["true"] * 3
     # Wrong room: it saw where it delivered (grade or not), so it knew.
@@ -590,15 +643,16 @@ def test_relay_completion_credits_both_carriers_in_their_rooms() -> None:
         records,
         carrier,
         delivered["seq"],
-        claim("task_done", "I", task="T39"),
-        claim("task_done", "I", task="T39", room=relay_rooms["handoff"]),
+        claim("task_done", "I", task=task),
+        claim("task_done", "I", task=task, room=relay_rooms["handoff"]),
     )
     assert labels([first_leg, at_handoff]) == ["true", "true"]
 
 
 def test_a_tampered_delivery_is_a_misstatement_not_a_lie() -> None:
     """The deliverer's receipt is the same either way, so it can't know the part failed."""
-    intact, tampered = relay_game(tampered=False), relay_game(tampered=True)
+    seed, task = relay_case()
+    intact, tampered = relay_game(False, seed, task), relay_game(True, seed, task)
     receipt = [
         next(
             r["data"]
@@ -608,17 +662,17 @@ def test_a_tampered_delivery_is_a_misstatement_not_a_lie() -> None:
         for records in (intact, tampered)
     ]
     assert receipt[0] == receipt[1]
-    delivered = event(tampered, "relay.delivered", task="T39")
+    delivered = delivered_and_heard(tampered, task, tampered=True)
     assert delivered["data"]["tampered"] and not delivered["data"]["correct"]
     deliverer = delivered["data"]["seat"]
     named, some, that_round, too_early = claims_after(
         tampered,
         deliverer,
         delivered["seq"],
-        claim("task_done", "I", task="T39"),
+        claim("task_done", "I", task=task),
         claim("task_done", "I"),
-        claim("task_done", "I", task="T39", round=delivered["round"]),
-        claim("task_done", "I", task="T39", round=1),
+        claim("task_done", "I", task=task, round=delivered["round"]),
+        claim("task_done", "I", task=task, round=1),
     )
     assert named["verdict"]["truth"] == "false"
     assert (named["verdict"]["label"], named["verdict"]["proof"]) == ("misstatement", [])
@@ -626,26 +680,47 @@ def test_a_tampered_delivery_is_a_misstatement_not_a_lie() -> None:
     # But it knows it delivered in a later Round, so "in Round 1" was known false.
     assert too_early["verdict"]["label"] == "lie"
     assert some["verdict"]["label"] in ("true", "misstatement")  # never a Lie
-    carrier = event(tampered, "relay.handed_off", task="T39")["data"]["seat"]
+    carrier = event(tampered, "relay.handed_off", task=task)["data"]["seat"]
     (first_leg,) = claims_after(
-        tampered, carrier, delivered["seq"], claim("task_done", "I", task="T39")
+        tampered, carrier, delivered["seq"], claim("task_done", "I", task=task)
     )
     assert first_leg["verdict"]["label"] == "misstatement"
 
 
-def test_an_observed_failed_solo_grade_still_proves_a_lie() -> None:
-    records = play(GameConfig(seed=1), "scripted").transcript.records
+def observed_failed_solo_grade(records: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """A wrong solo grade its worker saw, never fixed, then spoke after."""
     rec = build_record(records)
-    fail = next(
-        o
-        for seat, obs in sorted(rec.observations.items())
-        for o in obs
-        if o["type"] == "tasks.graded"
-        and not o["data"]["correct"]
-        and rec.task_kinds[o["data"]["task"]] not in ("chain_relay", "audit")
-        and not any(d.seat == seat and d.task == o["data"]["task"] for d in rec.tasks_done)
-        and any(s.speaker == seat and s.seq > o["seq"] for s in rec.statements)
+    return next(
+        (
+            o
+            for seat, obs in sorted(rec.observations.items())
+            for o in obs
+            if o["type"] == "tasks.graded"
+            and not o["data"]["correct"]
+            and rec.task_kinds[o["data"]["task"]] not in ("chain_relay", "audit")
+            and not any(d.seat == seat and d.task == o["data"]["task"] for d in rec.tasks_done)
+            and any(s.speaker == seat and s.seq > o["seq"] for s in rec.statements)
+        ),
+        None,
     )
+
+
+def first_game(find: Any, seeds: range = range(200)) -> tuple[list[dict[str, Any]], Any]:
+    """The first scripted game (by seed) containing the situation ``find`` looks for.
+
+    Searching instead of pinning a seed keeps these tests valid when a scenario
+    version bump changes what each seed generates.
+    """
+    for seed in seeds:
+        records = play(GameConfig(seed=seed), "scripted").transcript.records
+        found = find(records)
+        if found is not None:
+            return records, found
+    pytest.fail(f"no scripted game in seeds {seeds.start}-{seeds.stop - 1} has the situation")
+
+
+def test_an_observed_failed_solo_grade_still_proves_a_lie() -> None:
+    records, fail = first_game(observed_failed_solo_grade)
     (claimed,) = claims_after(
         records, fail["seat"], fail["seq"], claim("task_done", "I", task=fail["data"]["task"])
     )
@@ -653,9 +728,20 @@ def test_an_observed_failed_solo_grade_still_proves_a_lie() -> None:
     assert claimed["verdict"]["proof"][0]["type"] == "tasks.graded"
 
 
+def audit_checked_and_heard(records: list[dict[str, Any]]) -> Any:
+    """A passing Audit check after Round 1 whose auditor and spec holder both speak later."""
+    rec = build_record(records)
+    for r in records:
+        if not (r["kind"] == "event" and r["type"] == "audit.checked" and r["data"].get("correct")):
+            continue
+        later = {s.speaker for s in rec.statements if s.seq > r["seq"]}
+        if r["round"] > 1 and {r["data"]["auditor"], r["data"]["spec_from"]} <= later:
+            return r
+    return None
+
+
 def test_audit_completion_credits_the_auditor_and_the_spec_holder() -> None:
-    records = play(GameConfig(seed=24), "scripted").transcript.records
-    checked = event(records, "audit.checked", correct=True)
+    records, checked = first_game(audit_checked_and_heard)
     task, auditor, holder = (checked["data"][k] for k in ("task", "auditor", "spec_from"))
     rec = build_record(records)
     assert rec.task_kinds[task] == "audit"
@@ -725,8 +811,7 @@ def test_a_worker_knows_when_and_where_it_completed_its_task() -> None:
 
 
 def test_audit_knowledge_respects_round_room_and_the_spec_holders_closure() -> None:
-    records = play(GameConfig(seed=24), "scripted").transcript.records
-    checked = event(records, "audit.checked", correct=True)
+    records, checked = first_game(audit_checked_and_heard)
     task, auditor, holder = (checked["data"][k] for k in ("task", "auditor", "spec_from"))
     rec = build_record(records)
     room, when = rec.task_rooms[task], checked["round"]
@@ -759,18 +844,32 @@ def test_audit_knowledge_respects_round_room_and_the_spec_holders_closure() -> N
 
 def test_a_spec_holder_before_closure_knows_its_audit_is_open() -> None:
     """Control: before the check, no closure was told, so the denial is simply true."""
-    # Seed 46: T58's spec holder speaks at a Meeting before the Audit is checked.
-    records = play(GameConfig(seed=46), "scripted").transcript.records
-    checked = event(records, "audit.checked", task="T58", correct=True)
-    task, holder = checked["data"]["task"], checked["data"]["spec_from"]
-    placed = next(
-        r["seq"]
-        for r in records
-        if r["kind"] == "event" and r["type"] == "audit.placed" and r["data"]["task"]["id"] == task
-    )
-    rec = build_record(records)
-    before = [s for s in rec.statements if s.speaker == holder and placed < s.seq < checked["seq"]]
-    assert before
+
+    def holder_speaks_while_open(records: list[dict[str, Any]]) -> Any:
+        rec = build_record(records)
+        for checked in records:
+            if not (
+                checked["kind"] == "event"
+                and checked["type"] == "audit.checked"
+                and checked["data"].get("correct")
+            ):
+                continue
+            task, holder = checked["data"]["task"], checked["data"]["spec_from"]
+            placed = next(
+                r["seq"]
+                for r in records
+                if r["kind"] == "event"
+                and r["type"] == "audit.placed"
+                and r["data"]["task"]["id"] == task
+            )
+            before = [
+                s for s in rec.statements if s.speaker == holder and placed < s.seq < checked["seq"]
+            ]
+            if before:
+                return task, holder, before
+        return None
+
+    records, (task, holder, before) = first_game(holder_speaks_while_open)
     denial, claimed = claims_after(
         records,
         holder,
@@ -781,3 +880,122 @@ def test_a_spec_holder_before_closure_knows_its_audit_is_open() -> None:
     assert denial["verdict"]["label"] == "true"
     assert claimed["verdict"]["label"] == "lie"  # it would have been told of the closure
     assert "audit.closed" not in {p["type"] for p in claimed["verdict"]["proof"]}
+
+
+# Split-key Shared Tasks ------------------------------------------------------------
+
+
+def splitkey_successes(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The engine's own record of each completed split-key attempt (``read_by``)."""
+    result = next(r for r in records if r["kind"] == "result")
+    return [
+        {"task": key["task"], **h}
+        for key in result.get("splitkey", {}).get("keys", [])
+        for h in key["history"]
+        if h["result"] == "done"
+    ]
+
+
+def test_split_key_credit_matches_the_engine_for_every_completion() -> None:
+    """Every holder who read the successful attempt shares the completion, and nobody
+    else: not a holder who read only a reset attempt, never read, or replaced one."""
+    seen = 0
+    for seed in range(40):
+        records = play(GameConfig(seed=seed), "scripted").transcript.records
+        rec = build_record(records)
+        done_by = {
+            r["data"]["task"]: r["data"]["seat"]
+            for r in records
+            if r["kind"] == "event" and r["type"] == "splitkey.completed"
+        }
+        for s in splitkey_successes(records):
+            credited = {d.seat for d in rec.tasks_done if d.task == s["task"]}
+            assert credited == {*s["read_by"], done_by[s["task"]]}, (seed, s["task"])
+            seen += 1
+    assert seen, "no split-key Task was completed in seeds 0-39"
+
+
+def reader_heard_after(records: list[dict[str, Any]]) -> Any:
+    """A completed split-key Task with a reader other than the enterer who speaks later."""
+    rec = build_record(records)
+    for r in records:
+        if r["kind"] != "event" or r["type"] != "splitkey.completed":
+            continue
+        success = next(
+            s
+            for s in splitkey_successes(records)
+            if s["task"] == r["data"]["task"] and s["attempt"] == r["data"]["attempt"]
+        )
+        later = {s.speaker for s in rec.statements if s.seq > r["seq"]}
+        readers = [s for s in success["read_by"] if s != r["data"]["seat"] and s in later]
+        if readers:
+            return r, readers[0]
+    return None
+
+
+def test_a_split_key_reader_truly_completed_the_shared_task() -> None:
+    records, (completed, reader) = first_game(reader_heard_after)
+    task = completed["data"]["task"]
+    # Scripted holders all enter the code once they know it; drop this reader's own
+    # entry so only its read and the completion notice tell it the Task is done.
+    records = [
+        r
+        for r in records
+        if not (
+            r.get("type") in ("tasks.graded", "splitkey.entered")
+            and r["data"].get("seat", r.get("seat")) == reader
+            and r["data"].get("task") == task
+        )
+    ]
+    named, some, denial, wrong_round = claims_after(
+        records,
+        reader,
+        completed["seq"],
+        claim("task_done", "I", task=task),
+        claim("task_done", "I"),
+        claim("task_done", "I", task=task, negated=True),
+        claim("task_done", "I", task=task, round=1),
+    )
+    assert labels([named, some]) == ["true", "true"]
+    assert named["verdict"]["evidence"] == [completed["seq"]]
+    # It read that attempt and was told it completed, so it knew.
+    assert denial["verdict"]["label"] == "lie"
+    assert {p["type"] for p in denial["verdict"]["proof"]} == {
+        "splitkey.read",
+        "splitkey.completed",
+    }
+    if completed["round"] != 1:
+        assert wrong_round["verdict"]["label"] == "lie"
+
+
+def test_a_split_key_holder_without_a_completion_notice_knows_it_is_open() -> None:
+    """Control: before the Task completes, a holder's "I completed it" is a Lie."""
+
+    def holder_speaks_while_open(records: list[dict[str, Any]]) -> Any:
+        rec = build_record(records)
+        for r in records:
+            if r["kind"] == "event" and r["type"] == "splitkey.read":
+                task, seat = r["data"]["task"], r["data"]["seat"]
+                done = next(
+                    (
+                        c["seq"]
+                        for c in records
+                        if c["kind"] == "event"
+                        and c["type"] == "splitkey.completed"
+                        and c["data"]["task"] == task
+                    ),
+                    None,
+                )
+                before = [
+                    s
+                    for s in rec.statements
+                    if s.speaker == seat and s.seq > r["seq"] and (done is None or s.seq < done)
+                ]
+                if before:
+                    return task, seat, before[0]
+        return None
+
+    records, (task, seat, statement) = first_game(holder_speaks_while_open)
+    (claimed,) = claims_after(records, seat, statement.seq - 1, claim("task_done", "I", task=task))
+    assert claimed["verdict"]["truth"] == "false"
+    assert claimed["verdict"]["label"] == "lie"

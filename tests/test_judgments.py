@@ -64,7 +64,10 @@ class PassBot(PlaybookBot):
         return self.lines[ctx.pass_index - 1]
 
 
-def vote_game(speech: dict[int, str | list[str]] | None = None) -> list[dict[str, Any]]:
+def vote_game(
+    speech: dict[int, str | list[str]] | None = None,
+    chat: dict[int, dict[int, str]] | None = None,
+) -> list[dict[str, Any]]:
     """Red kills Green in Weapons in Round 2 with Orange watching; Orange reports in Round 3.
 
     A list of speech gives one line per pass.
@@ -82,6 +85,7 @@ def vote_game(speech: dict[int, str | list[str]] | None = None) -> list[dict[str
         kw: dict[str, Any] = {
             "actions": actions.get(seat),
             "votes": {1: VOTES[seat]} if seat in VOTES else None,
+            "chat": (chat or {}).get(seat),
         }
         line = speech.get(seat)
         if isinstance(line, list):
@@ -145,6 +149,33 @@ def test_floor_share_vote_pull_suspicion_and_misdirection() -> None:
     assert seat(report, ORANGE)["pushed_crewmate"] == 0
 
 
+def events_of(records: list[dict[str, Any]], type: str) -> list[dict[str, Any]]:
+    return [r["data"] for r in records if r.get("kind") == "event" and r.get("type") == type]
+
+
+def test_floor_share_counts_delivered_room_chat() -> None:
+    """Room Chat messages count once each; speech dropped when its speaker dies doesn't."""
+    records = vote_game(
+        chat={
+            5: {1: "anyone near Weapons?", 2: "heading to Storage"},
+            GREEN: {1: "going to Weapons", 2: "help, Red is here"},
+        }
+    )
+    delivered = events_of(records, "chat.message")
+    dropped = events_of(records, "chat.dropped")
+    assert [d["speaker"] for d in delivered] == [GREEN, 5, 5]  # Round 1 sorted, then Round 2
+    assert [(d["speaker"], d["reason"]) for d in dropped] == [(GREEN, "killed")]
+    report = judged(records, KeywordJudge())
+    total = 12 + 3  # 4 speakers x 3 Meeting passes, plus 3 delivered chat messages
+    assert seat(report, 5)["chat_messages"] == 2 and seat(report, 5)["meeting_messages"] == 0
+    assert seat(report, 5)["floor_share"] == round(2 / total, 6)
+    assert seat(report, GREEN)["messages"] == 1
+    assert seat(report, RED)["floor_share"] == round(3 / total, 6)
+    assert sum(s["messages"] for s in report["seats"]) == total
+    # Chat is not judged: pushes and positions come from Meeting statements only.
+    assert {r["speaker"] for r in report["statements"]} == {RED, BLUE, PINK, ORANGE}
+
+
 def test_skip_positions_match_skip_ballots() -> None:
     records = vote_game({BLUE: "Not enough evidence, let's skip."})
     report = judged(records, KeywordJudge())
@@ -183,6 +214,98 @@ def test_lie_survival_counts_lies_unchallenged_before_the_vote() -> None:
     assert seat(report, RED)["lies_unchallenged"] == unchallenged
     assert seat(report, RED)["lie_survival"] == round(unchallenged / len(rows), 6)
     assert seat(report, RED)["lie_survival"] < 1
+
+
+def _speaks_with(records: list[dict[str, Any]], seat: int, after: int, *items: Any) -> Any:
+    """The audit, with ``items`` as the Claims of ``seat``'s first statement after ``after``."""
+    rec = build_record(records)
+    statement = next(st for st in rec.statements if st.speaker == seat and st.seq > after)
+
+    def respond(item: Any) -> dict[str, Any]:
+        if item.text == statement.text and item.speaker == rec.names[seat]:
+            return {"claims": [c | {"quote": item.text} for c in items]}
+        return {"claims": []}
+
+    return run_audit(records, ScriptedExtractor(respond)), statement
+
+
+def test_split_key_readers_lie_survival_follows_the_corrected_audit() -> None:
+    """#71's split-key fix, end to end through judgments (Astra on #62).
+
+    A holder who read the successful attempt, but didn't enter the code, truly
+    completed the Task: "I completed it" must stay out of its Lie Survival
+    denominator, and "I did not complete it" must enter it.
+    """
+    from test_claim_audit import first_game, reader_heard_after
+
+    records, (completed, reader) = first_game(reader_heard_after)
+    task = completed["data"]["task"]
+    # As in #71's test: only the reader's read and the completion notice remain.
+    records = [
+        r
+        for r in records
+        if not (
+            r.get("type") in ("tasks.graded", "splitkey.entered")
+            and r["data"].get("seat", r.get("seat")) == reader
+            and r["data"].get("task") == task
+        )
+    ]
+    audit, statement = _speaks_with(
+        records,
+        reader,
+        completed["seq"],
+        claim("task_done", "I", task=task),
+        claim("task_done", "I", task=task, negated=True),
+    )
+    done, denial = [c for c in audit["claims"] if c["statement_seq"] == statement.seq]
+    assert (done["verdict"]["label"], denial["verdict"]["label"]) == ("true", "lie")
+
+    report = run_judgments(records, audit, ScriptedJudge(_answer_with(challenged=0.05)))
+    assert report["complete"]
+    rows = {r["id"]: r for r in report["claims"]}
+    assert rows[done["id"]]["label"] == "true" and rows[done["id"]]["challenge"] is None
+    assert rows[denial["id"]]["label"] == "lie"
+    me = seat(report, reader)
+    assert me["lies"] == sum(
+        c["speaker"] == reader and c["verdict"]["lie"] for c in audit["claims"]
+    )
+    assert me["lies"] >= 1 and me["lie_survival"] == 1.0  # the denial, unchallenged
+
+
+def test_a_split_key_holder_claiming_an_open_task_is_a_lie_in_judgments() -> None:
+    """Control: before the completion notice, a holder's "I completed it" is a Lie."""
+    from test_claim_audit import first_game
+
+    def holder_speaks_while_open(records: list[dict[str, Any]]) -> Any:
+        rec = build_record(records)
+        for r in records:
+            if r["kind"] == "event" and r["type"] == "splitkey.read":
+                task, holder = r["data"]["task"], r["data"]["seat"]
+                done = next(
+                    (
+                        c["seq"]
+                        for c in records
+                        if c["kind"] == "event"
+                        and c["type"] == "splitkey.completed"
+                        and c["data"]["task"] == task
+                    ),
+                    None,
+                )
+                if any(
+                    st.speaker == holder and st.seq > r["seq"] and (done is None or st.seq < done)
+                    for st in rec.statements
+                ):
+                    return task, holder, r["seq"]
+        return None
+
+    records, (task, holder, read_seq) = first_game(holder_speaks_while_open)
+    audit, statement = _speaks_with(records, holder, read_seq, claim("task_done", "I", task=task))
+    (claimed,) = [c for c in audit["claims"] if c["statement_seq"] == statement.seq]
+    assert claimed["verdict"]["label"] == "lie"
+    report = run_judgments(records, audit, ScriptedJudge(_answer_with(challenged=0.05)))
+    row = next(r for r in report["claims"] if r["id"] == claimed["id"])
+    assert row["label"] == "lie" and row["challenged"] is not True
+    assert seat(report, holder)["lies"] >= 1
 
 
 def test_judgments_never_change_the_game_record() -> None:

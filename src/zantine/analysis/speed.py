@@ -5,11 +5,15 @@ speed`` (``zantine/speed.py``). Each Seat's tier and budget come from the
 transcript header's config (``talk_tiers``, ``talk_budgets``). Definitions are
 in ``docs/metrics.md`` ("Speed experiment").
 
-- **Floor Share**: the Seat's spoken Meeting statements / all spoken Meeting
-  statements in the game (a blank statement is silence, as in #15). Every living
-  Seat speaks once per pass, so with Meetings as the only channel this barely
-  moves with the budget; the **character share** (the Seat's characters / all
-  characters spoken) is what a Talk Budget caps directly, and is reported too.
+- **Floor Share**: the Seat's messages / all messages in the game, where a
+  message is a spoken Meeting statement (a blank statement is silence, as in
+  #15) or a delivered Room Chat message (``chat.message`` events, one per
+  message however many heard it; dropped speech is never delivered). Every
+  living Seat speaks once per Meeting pass, so Meetings alone barely move it;
+  Room Chat, whose per-Round budget scales with the same tier, can. The
+  **character share** (the Seat's characters / all characters said in either
+  channel) is what a Talk Budget caps directly, and is reported too. Older
+  transcripts without Room Chat count Meeting statements only, as before.
 - **Vote Pull**: over the Meetings where the Seat took a position, ballots by
   other players that matched it / all ballots by other players, leaving out
   forfeited ballots and the target's own ballot (#15's definition). The position
@@ -62,9 +66,14 @@ class SpeedSeat:
     role: str
     tier: str
     budget: int
+    # Both channels: spoken Meeting statements plus delivered Room Chat messages.
     messages: int = 0
     chars: int = 0
     truncated: int = 0
+    # The Room Chat part of the three counts above.
+    chat_messages: int = 0
+    chat_chars: int = 0
+    chat_truncated: int = 0
     # None when nobody spoke in the game (0/0): undefined, left out of the tier means.
     floor_share: float | None = None
     char_share: float | None = None
@@ -199,13 +208,25 @@ def speed_seats(
         for s in header["seats"]
     }
     for r in records:
-        if r.get("kind") == "event" and r.get("type") == "statement":
-            d = r["data"]
+        if r.get("kind") != "event":
+            continue
+        d = r["data"]
+        if r.get("type") == "statement":
             row = rows[d["speaker"]]
             row.truncated += bool(d.get("truncated"))
             if d["text"].strip():
                 row.messages += 1
                 row.chars += len(d["text"])
+        elif r.get("type") == "chat.message":
+            # One event per delivered message (never blank: rules/chat.py drops those).
+            row = rows[d["speaker"]]
+            truncated = bool(d.get("truncated"))
+            row.messages += 1
+            row.chars += len(d["text"])
+            row.truncated += truncated
+            row.chat_messages += 1
+            row.chat_chars += len(d["text"])
+            row.chat_truncated += truncated
     messages = sum(r.messages for r in rows.values())
     chars = sum(r.chars for r in rows.values())
     for row in rows.values():
@@ -279,19 +300,20 @@ TIER_METRICS: tuple[TierMetric, ...] = (
     TierMetric(
         "floor_share",
         "Floor Share",
-        "share of a game's spoken Meeting statements (mean per Seat)",
-        "Spoken statements by the Seat / all spoken statements in the game, averaged over "
-        "the tier's Seats; games where nobody spoke are left out (0/0 is undefined).",
+        "share of a game's messages: Meeting statements and Room Chat (mean per Seat)",
+        "Messages by the Seat (spoken Meeting statements plus delivered Room Chat messages) / "
+        "all messages in the game, averaged over the tier's Seats; games where nobody spoke "
+        "are left out (0/0 is undefined).",
         lambda s: s.floor_share,
         lambda s: None if s.floor_share is None else 1.0,
     ),
     TierMetric(
         "char_share",
-        "Share of Meeting characters",
-        "share of a game's spoken characters (mean per Seat)",
-        "Characters the Seat spoke in Meetings / all characters spoken in the game, averaged "
-        "over the tier's Seats (games where nobody spoke left out). This is what a Talk "
-        "Budget caps directly.",
+        "Share of characters",
+        "share of a game's characters said in Meetings and Room Chat (mean per Seat)",
+        "Characters the Seat said in Meetings and Room Chat / all characters said in the "
+        "game, averaged over the tier's Seats (games where nobody spoke left out). This is "
+        "what a Talk Budget caps directly.",
         lambda s: s.char_share,
         lambda s: None if s.char_share is None else 1.0,
     ),
@@ -395,7 +417,7 @@ def tier_section(
         "label": MODES[mode],
         "games": len(games),
         "seats": len(seats),
-        # Games with no spoken Meeting statement: Floor Share and character share are
+        # Games with no message in either channel: Floor Share and character share are
         # undefined there and those games are left out of both.
         "games_without_speech": len({s.game for s in seats if s.floor_share is None}),
         "strata": sorted(set(kinds.values())),
