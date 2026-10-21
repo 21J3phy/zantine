@@ -26,7 +26,7 @@ from zantine.moments import (
     rank,
 )
 from zantine.moments.captions import GeneralizingCaption
-from zantine.moments.finder import DEEP_LINK_MARKER, find_in_path
+from zantine.moments.finder import find_in_path
 from zantine.replay import build_view, render_html
 from zantine.rules.actions import CallMeeting, Kill, Move, Report
 from zantine.rules.crisis import FixCrisis, TriggerCrisis
@@ -530,13 +530,32 @@ def test_every_moment_links_to_its_round_or_meeting() -> None:
 NODE = shutil.which("node")
 
 
+def page_data(html: str) -> dict[str, Any]:
+    """The view model a replay page embeds."""
+    data = re.search(r'<script type="application/json" id="replay-data">(.*?)</script>', html, re.S)
+    assert data
+    return json.loads(data.group(1))
+
+
+def run_deep_links(html: str, hashes: list[str], tmp_path: Path) -> list[Any]:
+    """Run the page's own ``deepLinkTarget`` on its own data in node."""
+    assert NODE is not None
+    script = re.search(r"// <deep-link>\n(.*?)// </deep-link>", html, re.S)
+    assert script
+    test = tmp_path / "deep_link.js"
+    test.write_text(
+        script.group(1)
+        + f"const DATA = {json.dumps(page_data(html))};\n"
+        + f"console.log(JSON.stringify({json.dumps(hashes)}.map(h => deepLinkTarget(h, DATA))));\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run([NODE, str(test)], capture_output=True, text=True, check=True)
+    return json.loads(out.stdout)
+
+
 @pytest.mark.skipif(NODE is None, reason="needs node to run the viewer's script")
 def test_viewer_resolves_round_and_meeting_fragments(tmp_path: Path) -> None:
     html = render_html(build_view(containment_game()))
-    script = re.search(r"// <deep-link>\n(.*?)// </deep-link>", html, re.S)
-    assert script
-    data = re.search(r'<script type="application/json" id="replay-data">(.*?)</script>', html, re.S)
-    assert data
     cases = [
         "#meeting=2",
         "#meeting=1&round=1",
@@ -547,16 +566,8 @@ def test_viewer_resolves_round_and_meeting_fragments(tmp_path: Path) -> None:
         "",
         "#meeting=9&round=1",
     ]
-    test = tmp_path / "deep_link.js"
-    test.write_text(
-        script.group(1)
-        + f"const DATA = {data.group(1)};\n"
-        + f"console.log(JSON.stringify({json.dumps(cases)}.map(h => deepLinkTarget(h, DATA))));\n",
-        encoding="utf-8",
-    )
-    out = subprocess.run([NODE, str(test)], capture_output=True, text=True, check=True)
     # Frames are Rounds 0 (setup), 1 and 2; Meeting 1 was in Round 1, Meeting 2 in Round 2.
-    assert json.loads(out.stdout) == [
+    assert run_deep_links(html, cases, tmp_path) == [
         {"index": 2, "meeting": 2},
         {"index": 1, "meeting": 1},
         {"index": 2, "meeting": None},
@@ -618,6 +629,8 @@ def test_cli_on_a_run_dir(tmp_path: Path) -> None:
     assert (tmp_path / "out" / "moments.md").is_file()
 
 
+# In every replay page that understands ``#meeting=M`` links.
+DEEP_LINK_MARKER = "function deepLinkTarget("
 # The base viewer's whole deep-link handling, before Meeting links existed.
 OLD_VIEWER_START = re.compile(r"round=(-?\d+)")
 
@@ -637,11 +650,43 @@ def test_replays_from_before_meeting_links_are_rewritten(tmp_path: Path) -> None
     assert DEEP_LINK_MARKER in (tmp_path / "game.html").read_text()
 
 
-def test_current_replays_and_other_files_are_left_alone(tmp_path: Path) -> None:
-    for name, content in (("a", None), ("b", "<html>my notes</html>")):
-        transcript = write(lie_game(), tmp_path / f"{name}.jsonl")
-        page = tmp_path / f"{name}.html"
-        page.write_text(content or render_html(build_view(lie_game())) + "<!-- mine -->")
-        before = page.read_text()
-        find_in_path(transcript, out_dir=tmp_path)
-        assert page.read_text() == before
+def test_a_rerun_at_the_same_path_refreshes_its_replay(tmp_path: Path) -> None:
+    """Same seed, same path: the old game's page must not answer the new game's links."""
+    transcript = write(lie_game(), tmp_path / "game.jsonl")
+    find_in_path(transcript, out_dir=tmp_path)
+    page = tmp_path / "game.html"
+    assert page_data(page.read_text())["meetings"][0]["round"] == 3  # the Lie game
+
+    rerun = containment_game()
+    write(rerun, transcript)
+    report = find_in_path(transcript, out_dir=tmp_path)
+    m = only(report, "containment_by_one")
+    assert m["link"] == "game.html#meeting=2&round=2"
+    html = page.read_text()
+    assert page_data(html) == json.loads(json.dumps(build_view(rerun)))
+    assert resolve(m["link"], page_data(html)) == (2, 2)
+    if NODE is not None:
+        frames = [f["round"] for f in page_data(html)["rounds"]]
+        (target,) = run_deep_links(html, ["#" + m["link"].split("#", 1)[1]], tmp_path)
+        assert (frames[target["index"]], target["meeting"]) == (2, 2)
+
+
+def test_up_to_date_replays_unrelated_files_and_no_replay_are_left_alone(
+    tmp_path: Path,
+) -> None:
+    current = write(lie_game(), tmp_path / "a.jsonl")
+    find_in_path(current, out_dir=tmp_path)
+    stamp = (tmp_path / "a.html").stat().st_mtime_ns
+    find_in_path(current, out_dir=tmp_path)
+    assert (tmp_path / "a.html").stat().st_mtime_ns == stamp  # same bytes: not rewritten
+
+    mine = write(lie_game(), tmp_path / "b.jsonl")
+    (tmp_path / "b.html").write_text("<html>my notes</html>")
+    find_in_path(mine, out_dir=tmp_path)
+    assert (tmp_path / "b.html").read_text() == "<html>my notes</html>"
+
+    stale = render_html(build_view(lie_game()))
+    write(containment_game(), current)
+    (tmp_path / "a.html").write_text(stale)
+    find_in_path(current, out_dir=tmp_path, write_replays=False)
+    assert (tmp_path / "a.html").read_text() == stale

@@ -162,19 +162,26 @@ def replay_path(transcript: Path) -> Path:
     return transcript.with_suffix(".html")
 
 
-# In every replay page that understands ``#meeting=M`` links.
-DEEP_LINK_MARKER = "function deepLinkTarget("
 # In every Zantine replay page (the embedded view model).
 REPLAY_MARKER = 'id="replay-data"'
 
 
-def replay_needs_update(path: Path) -> bool:
-    """Missing, or a Zantine replay from before Meeting links. Other files at
-    that path are left alone."""
-    if not path.is_file():
-        return True
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return REPLAY_MARKER in text and DEEP_LINK_MARKER not in text
+def sync_replay(records: list[dict[str, Any]], path: Path) -> bool:
+    """Make the Zantine replay at ``path`` show exactly these records, with the
+    current viewer: write it if missing, rewrite it if its bytes differ (an older
+    viewer, or a transcript overwritten by a rerun). A file at that path that is
+    not a Zantine replay is left alone. Returns whether the file was written."""
+    from zantine.replay import build_view, render_html
+
+    old = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
+    if old is not None and REPLAY_MARKER not in old:
+        return False
+    page = render_html(build_view(records))
+    if page == old:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(page, encoding="utf-8")
+    return True
 
 
 def relative(path: Path, start: Path) -> str:
@@ -214,10 +221,8 @@ def find_in_path(
 ) -> dict[str, Any]:
     """Moments from a transcript or a run dir. Uses each transcript's
     ``.audit.json`` when it matches the transcript, and (``write_replays``)
-    writes a missing replay page, or rewrites one from before Meeting links,
-    so every link resolves. Links are relative to ``out_dir``."""
-    from zantine.replay import write_replay
-
+    writes or refreshes each transcript's replay page from that transcript, so
+    every link opens the game it describes. Links are relative to ``out_dir``."""
     games: list[dict[str, Any]] = []
     moments: list[dict[str, Any]] = []
     for transcript in transcripts_in(path):
@@ -225,8 +230,8 @@ def find_in_path(
         audit_file = audit_path(transcript)
         audit = json.loads(audit_file.read_text(encoding="utf-8")) if audit_file.is_file() else None
         replay = replay_path(transcript)
-        if write_replays and replay_needs_update(replay):
-            write_replay(transcript, replay)
+        if write_replays:
+            sync_replay(records, replay)
         game = find_moments(
             records,
             audit,
