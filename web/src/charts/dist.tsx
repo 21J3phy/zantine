@@ -1,9 +1,9 @@
 import { Fragment } from 'react';
 import { useTip } from '../components/Tooltip';
-import { EFFORT_TAG, INK, LABS, MODEL_BY_ID, MODELS, effortOf, entryName, modelOf, type LabId } from '../data/models';
+import { EFFORT_TAG, INK, LABS, MODEL_BY_ID, MODELS, effortOf, entryName, modelOf, type LabId, topEntries, entryLabel } from '../data/models';
 import type { Est } from '../data/sim';
 import { CM } from '../lib/units';
-import { AxisTitle, Grid, Legend, MarkDot, ModelName, Svg, Watermark, XTicks, YTicks, localPoint, vBarPath, textWidth, type ChartProps } from './kit';
+import { AxisTitle, Grid, Legend, MarkDot, ModelName, Svg, XTicks, YTicks, localPoint, vBarPath, textWidth, type ChartProps } from './kit';
 import { cmAxis, fixedAxis, fmt, type CmAxis } from './scale';
 
 /** 0–100% over the largest whole-cm length with a round step. */
@@ -67,8 +67,7 @@ export function RoundsHistogram(p: ChartProps & { label: string; series: HistSer
   return (
     <Svg w={p.w} h={p.h} label={p.label}>
       <Legend items={p.series.map((s) => ({ label: s.label, color: s.color }))} x={x0} y={CM / 2} />
-      <Grid x={x0} y={y0} nx={nx} ny={ny} base="bottom" />
-      {p.simulated && <Watermark x={x0} y={y0} w={nx * CM} h={ny * CM} />}
+      <Grid x={x0} y={y0} nx={nx} ny={ny} base="bottom" every={ny > 8 ? 2 : 1} />
       <rect className="cap-band" x={x0 + bins * CM} y={y0} width={CM} height={ny * CM} />
       {shares.map((sh, k) =>
         sh.map((v, i) => {
@@ -156,8 +155,7 @@ export function StepLines(p: ChartProps & { label: string; series: LineSeries[];
 
   return (
     <Svg w={p.w} h={p.h} label={p.label}>
-      <Grid x={x0} y={y0} nx={nx} ny={ny} base="bottom" />
-      {p.simulated && <Watermark x={x0} y={y0} w={nx * CM} h={ny * CM} />}
+      <Grid x={x0} y={y0} nx={nx} ny={ny} base="bottom" every={ay.labelEvery} />
       {p.series.map((s) => (
         <path key={s.label} d={path(s.values)} fill="none" stroke={s.color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
       ))}
@@ -203,11 +201,13 @@ export interface Metric {
 
 export function Forest(p: ChartProps & { label: string; metrics: Metric[]; simulated?: boolean }) {
   const tip = useTip();
-  const byEffort = p.models.some((id) => effortOf(id));
-  const L = byEffort ? 4 : 3;
+  // A card shows one row per model, at its highest effort; full screen shows every effort level.
+  const card = !p.expanded;
+  const byEffort = !card && p.models.some((id) => effortOf(id));
+  const L = 4;
   const k = p.metrics.length;
   const pw = Math.floor((p.w - L - (k - 1)) / k);
-  const rows = byEffort ? p.models : MODELS.filter((m) => p.models.includes(m.id)).map((m) => m.id);
+  const rows = card ? topEntries(p.models) : byEffort ? p.models : MODELS.filter((m) => p.models.includes(m.id)).map((m) => m.id);
   // Rows share the plot height; whole centimetres when they fit, tighter for many effort levels.
   const avail = (p.h - 2) * CM;
   const pitch = Math.min(CM, avail / Math.max(rows.length, 1));
@@ -222,8 +222,8 @@ export function Forest(p: ChartProps & { label: string; metrics: Metric[]; simul
         const e = effortOf(id);
         return (
           <g key={id}>
-            {groupStart(i) && <ModelName id={id} x={(L - (byEffort ? 1.1 : 0)) * CM - 8} y={yc} />}
-            {e && (
+            {groupStart(i) && <ModelName id={id} x={(L - (byEffort ? 1.1 : 0)) * CM - 8} y={yc} text={card ? entryLabel(id, true) : undefined} />}
+            {byEffort && e && (
               <text className="effort-tag" x={L * CM - 8} y={yc + 3.5} textAnchor="end">
                 {EFFORT_TAG[e]}
               </text>
@@ -258,12 +258,11 @@ export function Forest(p: ChartProps & { label: string; metrics: Metric[]; simul
               {met.title}
               {met.better && <tspan className="panel-sub">{met.better === 'higher' ? '  higher is better' : '  lower is better'}</tspan>}
             </text>
-            {Array.from({ length: pw + 1 }, (_, c) => (
-              <line key={c} className="grid" x1={x0 + c * CM} x2={x0 + c * CM} y1={y0} y2={y0 + H} />
-            ))}
+            {Array.from({ length: pw + 1 }, (_, c) =>
+              c % ax.labelEvery === 0 ? <line key={c} className="grid" x1={x0 + c * CM} x2={x0 + c * CM} y1={y0} y2={y0 + H} /> : null,
+            )}
             <line className="grid" x1={x0} x2={x0 + pw * CM} y1={y0} y2={y0} />
             <line className="grid" x1={x0} x2={x0 + pw * CM} y1={y0 + H} y2={y0 + H} />
-            {p.simulated && <Watermark x={x0} y={y0} w={pw * CM} h={H} text="Simulated" />}
             {rows.map((id, i) => {
               const est = met.get(id);
               const m = modelOf(id);
@@ -327,8 +326,7 @@ export function Dumbbell(p: ChartProps & { label: string; metrics: Metric[]; sim
             <text className="panel-title" x={x0} y={y0 - 12}>
               {met.short && textWidth(met.title, 12) > (pw + 0.8) * CM ? met.short : met.title}
             </text>
-            <Grid x={x0} y={y0} nx={pw} ny={ny} />
-            {p.simulated && met.key !== 'cost' && <Watermark x={x0} y={y0} w={pw * CM} h={ny * CM} text="Simulated" />}
+            <Grid x={x0} y={y0} nx={pw} ny={ny} h={false} v vEvery={ax.labelEvery} />
             {pairs.map((m, i) => {
               const f = met.get(m.id).v;
               const s = met.get(m.pair!).v;
@@ -396,8 +394,7 @@ export function Columns(p: ChartProps & { label: string; groups: { label: string
       <AxisTitle x={x0} y={y0 - 12}>
         ↑ {p.yTitle}
       </AxisTitle>
-      <Grid x={x0} y={y0} nx={nx} ny={ny} base="bottom" />
-      {p.simulated && <Watermark x={x0} y={y0} w={nx * CM} h={ny * CM} />}
+      <Grid x={x0} y={y0} nx={nx} ny={ny} base="bottom" every={ny > 8 ? 2 : 1} />
       {p.groups.map((g, gi) => {
         const gx = x0 + gi * gw * CM;
         const n = g.bars.length;
@@ -471,7 +468,7 @@ export function LineMultiples(p: ChartProps & { label: string; panels: { title: 
             <text className="panel-title" x={x0} y={y0 - 12}>
               {panel.title}
             </text>
-            <Grid x={x0} y={y0} nx={pw} ny={ny} base="bottom" />
+            <Grid x={x0} y={y0} nx={pw} ny={ny} base="bottom" every={2} />
             <line className="refline" x1={X(p.mark)} x2={X(p.mark)} y1={y0} y2={y0 + ny * CM} />
             <path d={d} fill="none" stroke={INK} strokeWidth={2} strokeLinejoin="round" />
             <MarkDot x={X(p.mark)} y={Y(mv)} r={4.5} color={INK} />
