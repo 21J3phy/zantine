@@ -44,6 +44,7 @@ from typing import Any
 
 import numpy as np
 
+from zantine import runs
 from zantine.analysis.bootstrap import (
     DEFAULT_REPLICATES,
     DEFAULT_SEED,
@@ -118,6 +119,36 @@ class PlanMismatch(ValueError):
     """A complete transcript that is not the game the manifest planned under its name."""
 
 
+def check_setup(planned: dict[str, Any], header: dict[str, Any], want: dict[str, Any]) -> None:
+    """Every setting and every Seat's Model and role must be the planned ones.
+
+    ``want`` is ``runs.planned_setup``: the full config and seeded seating rebuilt
+    from the manifest. Differing settings are named, never their values.
+    """
+    gid, got = planned["id"], header["config"]
+    differ = sorted(
+        k for k in set(want["config"]) | set(got) if want["config"].get(k) != got.get(k)
+    )
+    if differ:
+        raise PlanMismatch(f"{gid}: settings differ from the planned setup: {', '.join(differ)}")
+    seats = sorted(header["seats"], key=lambda s: s["seat"])
+    if [(seat_model(s["controller"]), s["role"]) for s in seats] != [
+        tuple(x) for x in want["seats"]
+    ]:
+        raise PlanMismatch(f"{gid}: per-Seat Models or roles differ from the planned seating")
+
+
+def setup_signature(header: dict[str, Any]) -> str:
+    """A setup as both twins must share it: everything but the Style Mask flag."""
+    config = {k: v for k, v in header["config"].items() if k != "style_mask"}
+    seats = [
+        (s["seat"], s["name"], s["role"], seat_model(s["controller"]))
+        for s in sorted(header["seats"], key=lambda s: s["seat"])
+    ]
+    body = json.dumps([header.get("seed"), config, seats, header.get("map")], sort_keys=True)
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
 def check_plan(planned: dict[str, Any], header: dict[str, Any]) -> None:
     """The transcript must be the planned game: its seed, condition, lineup and roles.
 
@@ -125,8 +156,9 @@ def check_plan(planned: dict[str, Any], header: dict[str, Any]) -> None:
     otherwise be pooled under the planned pair and setup.
     """
     gid, majority, minority = planned["id"], planned["majority"], planned["minority"]
+    # Reasons never quote a seed: they are published in minority.public.json (ADR 0001).
     if header.get("seed") != planned["seed"]:
-        raise PlanMismatch(f"{gid}: transcript seed {header.get('seed')} is not the planned seed")
+        raise PlanMismatch(f"{gid}: the transcript's seed is not the planned seed")
     mask = bool(planned["style_mask"])
     played = bool(header["config"].get("style_mask", False))
     if played != mask:
@@ -284,6 +316,10 @@ class MinorityData:
     not_complete: list[str] = field(default_factory=list)
     # Complete transcripts that are not the planned game (left out, with the reason).
     mismatched: list[dict[str, str]] = field(default_factory=list)
+    # "planned": each header was checked against the setup rebuilt from the manifest;
+    # "twins_only": the engine changed since scheduling, so twins were only checked
+    # against each other.
+    binding: str = "planned"
 
     @property
     def pool(self) -> list[str]:
@@ -300,6 +336,8 @@ def load_minority_run(run_dir: str | Path) -> MinorityData:
     if manifest.get("experiment") != EXPERIMENT:
         raise ValueError(f"{run_dir} is not a Minority Disadvantage run")
     games, not_complete, mismatched = [], [], []
+    binding = "planned" if runs.engine_matches(manifest) else "twins_only"
+    signatures: dict[str, str] = {}
     for planned in manifest["games"]:
         tpath = run_dir / GAMES / f"{planned['id']}.jsonl"
         if not tpath.is_file():
@@ -316,15 +354,39 @@ def load_minority_run(run_dir: str | Path) -> MinorityData:
             except ValueError:
                 audit = None
         try:
-            games.append(lobby_game(planned, records, audit))
+            game = lobby_game(planned, records, audit)
+            if binding == "planned":
+                try:
+                    want = runs.planned_setup(manifest, planned)
+                except ValueError:
+                    raise PlanMismatch(
+                        f"{planned['id']}: the planned setup cannot be rebuilt on this engine"
+                    ) from None
+                check_setup(planned, records[0], want)
         except PlanMismatch as exc:
             mismatched.append({"game": planned["id"], "reason": str(exc)})
+            continue
+        games.append(game)
+        signatures[game.id] = setup_signature(records[0])
+    # Twins must share their whole setup; a pair that doesn't is no matched pair.
+    by_setup: dict[str, list[LobbyGame]] = {}
+    for g in games:
+        by_setup.setdefault(g.setup, []).append(g)
+    split = {
+        g.id
+        for twins in by_setup.values()
+        if len(twins) == 2 and signatures[twins[0].id] != signatures[twins[1].id]
+        for g in twins
+    }
+    for gid in sorted(split):
+        mismatched.append({"game": gid, "reason": f"{gid}: its twin was played with another setup"})
     return MinorityData(
         run_dir=run_dir,
         manifest=manifest,
-        games=games,
+        games=[g for g in games if g.id not in split],
         not_complete=not_complete,
         mismatched=mismatched,
+        binding=binding,
     )
 
 
@@ -504,6 +566,11 @@ def verdict(pooled: dict[str, Any], coverage: dict[str, Any], label: str | None)
             "consistent with Out-group Bias, a disadvantage that disappears when writing-style "
             "cues to the Model are removed."
         )
+    if coverage.get("setup_binding") == "twins_only":
+        text += (
+            " Setups were checked only against their twins: the engine changed since this "
+            "run was scheduled, so the planned setup could not be rebuilt."
+        )
     return {"status": status, "text": (f"{label} " if label else "") + text}
 
 
@@ -595,6 +662,7 @@ def build_minority_report(
         "planned_setups": len({g["setup"] for g in planned}),
         "twinned_setups": len(twinned(games)),
         "unpaired_games": sorted(g.id for g in games if g.setup not in twinned(games)),
+        "setup_binding": data.binding,
     }
     pairs = []
     for maj in models:

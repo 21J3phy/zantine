@@ -8,6 +8,7 @@ rather than silently played without the mask; once #66 is in, they run.
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import re
 import shutil
@@ -27,11 +28,13 @@ from zantine.analysis.minority import (
     cluster_weights,
     load_minority_run,
     lobby_game,
+    setup_signature,
     transcript_digest,
     write_minority_report,
 )
 from zantine.cli import main
 from zantine.config import GameConfig
+from zantine.harness.live import play_live
 from zantine.rng import GameRng
 from zantine.roles import Role
 from zantine.runner import new_game
@@ -637,6 +640,67 @@ def test_transcripts_that_are_not_the_planned_game_are_left_out(
     assert {g.id for g in data.games}.isdisjoint(left_out)
     report = build_minority_report(data, replicates=50)
     assert {m["game"] for m in report["run"]["transcripts_not_matching_plan"]} == set(left_out)
+    # No game's seed reaches the public report, not even inside a reason.
+    out, _ = write_minority_report(run_dir, replicates=50)
+    public = (out / "minority.public.json").read_text("utf-8")
+    assert "transcripts_not_matching_plan" in public
+    for g in manifest["games"]:
+        assert str(g["seed"]) not in public, g["id"]
+
+
+def replay_altered(run_dir: Path, game: dict[str, Any], *, round_cap=None, swap=None) -> None:
+    """Play the planned game with one thing changed and store it under the game's name."""
+    manifest = load_manifest(run_dir)
+    config, spec = game_setup(manifest, game, "dry")
+    if round_cap is not None:
+        config = dataclasses.replace(config, round_cap=round_cap)
+    entries = spec.split(",")
+    if swap is not None:
+        i, j = swap
+        entries[i], entries[j] = entries[j], entries[i]
+    run = play_live(config, ",".join(entries), spend_cap_usd=runs.DRY_RUN_CAP_USD)
+    assert run.aborted is None
+    (run_dir / "games" / f"{game['id']}.jsonl").write_text(run.game.transcript.to_jsonl(), "utf-8")
+
+
+def test_a_transcript_with_other_settings_or_seating_is_left_out(
+    off_run: Path, tmp_path: Path
+) -> None:
+    run_dir = tmp_path / "altered"
+    shutil.copytree(off_run, run_dir, ignore=shutil.ignore_patterns("report"))
+    manifest = load_manifest(run_dir)
+    a, b = manifest["games"][:2]
+    replay_altered(run_dir, a, round_cap=1)  # the right seed and lineup, another round cap
+    replay_altered(run_dir, b, swap=(2, 8))  # 8/2 and both Impostors kept, minority moved
+    assert read_jsonl(run_dir / "games" / f"{b['id']}.jsonl")[0]["seed"] == b["seed"]
+    data = load_minority_run(run_dir)
+    assert data.binding == "planned"
+    reasons = {m["game"]: m["reason"] for m in data.mismatched}
+    assert set(reasons) == {a["id"], b["id"]}
+    assert "round_cap" in reasons[a["id"]] and "seating" in reasons[b["id"]]
+    assert {g.id for g in data.games}.isdisjoint(reasons)
+    assert len(data.games) == 82
+
+
+def test_twins_must_share_their_whole_setup() -> None:
+    manifest = make_minority_manifest(POOL, 3)
+    g = next(g for g in manifest["games"] if not g["style_mask"])
+    config, spec = game_setup(manifest, g, "dry")
+    played = new_game(config, spec)
+    played.run()
+    header = played.transcript.records[0]
+    masked = copy.deepcopy(header)
+    masked["config"]["style_mask"] = True
+    assert setup_signature(masked) == setup_signature(header)  # only the mask differs
+    other = copy.deepcopy(header)
+    other["config"]["round_cap"] = 1
+    assert setup_signature(other) != setup_signature(header)
+    moved = copy.deepcopy(header)
+    moved["seats"][0]["name"], moved["seats"][1]["name"] = (
+        moved["seats"][1]["name"],
+        moved["seats"][0]["name"],
+    )
+    assert setup_signature(moved) != setup_signature(header)
 
 
 def svg_texts(out: Path) -> dict[str, str]:

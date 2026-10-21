@@ -116,6 +116,31 @@ def check_seating(game: dict[str, Any], header: dict[str, Any]) -> None:
         raise RuntimeError(f"{game['id']}: seating does not match the schedule")
 
 
+def planned_setup(manifest: dict[str, Any], game: dict[str, Any]) -> dict[str, Any]:
+    """What the header of the planned game must say, rebuilt on this engine.
+
+    ``config``: the full ``GameConfig`` as the header records it (JSON-normalized);
+    ``seats``: each Seat's ``(model, role)`` in Seat order, from the seeded seat
+    order. Only meaningful while the engine still matches the manifest
+    (``engine_matches``); raises ``ValueError`` if the game cannot be set up here.
+    """
+    config, _ = game_setup(manifest, game, "dry")
+    scenario = build_scenario(config, GameRng(config.seed).fork("scenario"))
+    entries, _ = seat_lineup(game)
+    impostors = set(config.impostor_seats or ())
+    seats = [
+        (model, "impostor" if seat in impostors else "crewmate")
+        for seat, model in enumerate(scenario.seat(entries))
+    ]
+    return {"config": json.loads(json.dumps(config.to_dict())), "seats": seats}
+
+
+def engine_matches(manifest: dict[str, Any]) -> bool:
+    """The scenario and transcript versions are still the ones the run was scheduled with."""
+    planned, current = manifest["engine"], engine_versions()
+    return all(planned.get(k) == current[k] for k in ("scenario_version", "transcript_schema"))
+
+
 # Run directory ----------------------------------------------------------------------
 
 
