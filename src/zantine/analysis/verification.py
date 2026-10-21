@@ -237,9 +237,12 @@ HISTORICAL_DEFAULTS: dict[str, Any] = {
     "splitkey_tasks": 0,  # #72: no split-key Tasks before them
     "visual_task_chance": 0,  # #74: no Visual Tasks before them
 }
+# Rule modules left out of the comparison: ``verification`` (the protocol is the
+# treatment, compared separately) and modules that only record ground truth and change
+# nothing a player sees or does (``relevance``, #61).
+NOT_COMPARED = frozenset({"verification", "relevance"})
 # Rule modules that change nothing when their setting is 0, so a header listing them
-# switched off means the same as one from before they existed. ``verification`` is
-# always left out: the protocol is the treatment, compared separately.
+# switched off means the same as one from before they existed.
 NEUTRAL_AT_ZERO = {
     "relay": "relay_tasks",
     "splitkey": "splitkey_tasks",
@@ -269,7 +272,8 @@ def effective_conditions(
         c["modules"] = sorted(
             m
             for m in modules
-            if m != "verification" and not (m in NEUTRAL_AT_ZERO and c.get(NEUTRAL_AT_ZERO[m]) == 0)
+            if m not in NOT_COMPARED
+            and not (m in NEUTRAL_AT_ZERO and c.get(NEUTRAL_AT_ZERO[m]) == 0)
         )
     return {k: v for k, v in c.items() if k not in DESIGN_KEYS}
 

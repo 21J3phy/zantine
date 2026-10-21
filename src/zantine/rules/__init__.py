@@ -11,6 +11,7 @@ from zantine.rules.core import CoreModule
 from zantine.rules.crisis import CrisisModule
 from zantine.rules.registry import GameModule, MeetingRequest, RoundContext, Rules
 from zantine.rules.relay import RelayModule
+from zantine.rules.relevance import RelevanceModule
 from zantine.rules.sabotage import SabotageModule
 from zantine.rules.splitkey import SplitKeyModule
 from zantine.rules.tasks import TasksModule
@@ -34,6 +35,7 @@ def default_modules() -> list[GameModule]:
         VerificationModule(),
         ChatModule(),
         ContainmentModule(),
+        RelevanceModule(),
     ]
 
 
