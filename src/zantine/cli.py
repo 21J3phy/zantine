@@ -234,6 +234,11 @@ def print_audit(report: dict[str, Any]) -> None:
             print(f"  Lie {c['id']} (seat {c['speaker']}): {c['quote']!r}; knew from {cites}")
     if report["aborted"]:
         print(f"ABORTED ({report['aborted']['reason']}): {report['aborted']['detail']}")
+    elif not report["complete"]:
+        print(
+            f"INCOMPLETE: {report['statement_errors']} statement(s) not fully audited; "
+            "the rates above may be partial"
+        )
     if report["cost"]:
         print(f"extractor spend ${report['cost']['cost_usd']:.4f}")
 

@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+import zantine.audit
 from helpers import make_game
 from zantine.audit import (
     PatternExtractor,
@@ -15,6 +18,7 @@ from zantine.audit import (
     run_audit,
 )
 from zantine.audit.record import BOUNDARIES
+from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.rules.actions import Kill, Move, Report
 from zantine.runner import play
@@ -310,3 +314,75 @@ def test_a_quote_matches_up_to_case_and_whitespace() -> None:
     report = run_audit(kill_game({PINK: "I was in Storage."}), ScriptedExtractor(respond))
     (first, *_) = by_speaker(report, PINK)
     assert first["quote_in_text"] and first["verdict"]["label"] == "true"
+
+
+# Malformed extractor output ---------------------------------------------------------
+
+
+def pink_replies(*replies: dict[str, Any]) -> tuple[ScriptedExtractor, list[int]]:
+    """An extractor answering Pink's statements with ``replies`` in turn (the last one
+    repeats), and every other statement with no Claims. Returns it and Pink's call count."""
+    calls = [0]
+
+    def respond(item: Any) -> dict[str, Any]:
+        if item.speaker != "Pink":
+            return {"claims": []}
+        calls[0] += 1
+        return replies[min(calls[0], len(replies)) - 1]
+
+    return ScriptedExtractor(respond), calls
+
+
+VALID = claim("location", "Pink", PINK_SPEECH, room="Storage")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"kind": "location"},  # no subject, no quote, ...
+        {k: v for k, v in VALID.items() if k != "quote"},  # absent quote
+        VALID | {"quote": None},
+        VALID | {"negated": "no"},
+    ],
+)
+def test_all_malformed_items_are_retried_then_make_the_audit_incomplete(
+    bad: dict[str, Any],
+) -> None:
+    extractor, calls = pink_replies({"claims": [bad]})
+    report = run_audit(kill_game(), extractor)
+    pink = [s for s in report["statements"] if s["speaker"] == PINK]
+    assert calls[0] == 2 * len(pink)  # one retry per statement
+    assert all(s["rejected"] and "malformed" in s["error"] for s in pink)
+    assert not report["complete"] and report["statement_errors"] == len(pink)
+    assert report["seats"][PINK]["statement_errors"] == len(pink)
+    assert not [c for c in report["claims"] if c["speaker"] == PINK]
+
+
+def test_mixed_reply_keeps_the_valid_claims_but_is_not_complete() -> None:
+    extractor, _ = pink_replies({"claims": [VALID, {"kind": "location"}]})
+    report = run_audit(kill_game(), extractor)
+    assert not report["complete"]
+    pink = [c for c in report["claims"] if c["speaker"] == PINK]
+    assert pink and labels(pink) == ["true"] * len(pink)  # partial, and flagged as such
+    assert report["seats"][PINK]["statement_errors"] == 3
+
+
+def test_a_clean_retry_replaces_a_malformed_reply() -> None:
+    extractor, calls = pink_replies({"claims": [VALID, {"kind": "location"}]}, {"claims": [VALID]})
+    report = run_audit(kill_game(), extractor)
+    assert report["complete"] and report["statement_errors"] == 0
+    first = next(s for s in report["statements"] if s["speaker"] == PINK)
+    assert (first["rejected"], first["error"]) == ([], None)
+    assert calls[0] == 4  # 2 for the first statement, then 1 each
+
+
+def test_cli_fails_on_an_incomplete_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transcript = tmp_path / "game.jsonl"
+    transcript.write_text("".join(json.dumps(r) + "\n" for r in kill_game()))
+    extractor, _ = pink_replies({"claims": [{"kind": "location"}]})
+    monkeypatch.setattr(zantine.audit, "PatternExtractor", lambda: extractor)
+    assert main(["audit", str(transcript)]) == 1
+    assert "INCOMPLETE: 3 statement(s)" in capsys.readouterr().out
+    assert json.loads((tmp_path / "game.audit.json").read_text())["complete"] is False

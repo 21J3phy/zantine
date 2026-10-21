@@ -7,6 +7,10 @@ report:
 
 - ``extractor``: the extractor's pinned identity (model, revision, prompt hash, ...)
 - ``statements``: every statement with its Claim ids, dropped items and any error
+  (a reply whose Claim items were dropped as malformed, even after the retry,
+  is an error: its surviving Claims are kept, but the audit is not ``complete``)
+- ``complete``: false if the audit aborted or any statement has an error, so the
+  metrics may be partial (``statement_errors`` counts them, overall and per Seat)
 - ``claims``: every Claim with its ``verdict`` (``label`` is ``true``, ``lie``,
   ``misstatement`` or ``unverifiable``; Lies carry ``proof``, the speaker's own
   records that show it knew)
@@ -30,7 +34,13 @@ from pathlib import Path
 from typing import Any
 
 from zantine.audit.check import check_claim
-from zantine.audit.claims import ExtractionError, ExtractionInput, parse_payload, resolve
+from zantine.audit.claims import (
+    ExtractionError,
+    ExtractionInput,
+    ParsedPayload,
+    parse_payload,
+    resolve,
+)
 from zantine.audit.extractors import ClaimExtractor
 from zantine.audit.record import GameRecord, StatementRecord, build_record
 from zantine.harness.ledger import Ledger, SpendCapReached, summarize
@@ -99,6 +109,12 @@ def run_audit(
             continue
         entry["rejected"] = list(parsed.rejected)
         entry["ignored_fields"] = list(parsed.ignored_fields)
+        if parsed.rejected:
+            # Dropped items may have been Claims: the statement is only partly audited.
+            entry["error"] = (
+                f"{len(parsed.rejected)} malformed Claim item(s) dropped after "
+                f"{attempts} attempt(s)"
+            )
         for i, draft in enumerate(parsed.drafts):
             claim = resolve(
                 draft,
@@ -133,17 +149,22 @@ def run_audit(
     }
 
 
-def _extract(extractor: ClaimExtractor, item: ExtractionInput, attempts: int) -> Any:
-    """One retry for unusable output or a transient API error; the second failure stands."""
+def _extract(extractor: ClaimExtractor, item: ExtractionInput, attempts: int) -> ParsedPayload:
+    """One retry for unusable output, malformed Claim items or a transient API error;
+    the second failure stands (with malformed items, the last reply is kept, partial)."""
     for attempt in range(1, attempts + 1):
         try:
-            return parse_payload(extractor.extract(item))
+            parsed = parse_payload(extractor.extract(item))
         except ExtractionError:
             if attempt == attempts:
                 raise
+            continue
         except ProviderError as exc:
             if exc.fatal or attempt == attempts:
                 raise
+            continue
+        if not parsed.rejected or attempt == attempts:
+            return parsed
     raise AssertionError("unreachable")
 
 
@@ -180,6 +201,10 @@ def seat_metrics(
                 "role": rec.roles.get(seat),
                 "controller": controllers.get(seat),
                 "statements": sum(s["speaker"] == seat for s in statements),
+                # Statements not (fully) audited: this Seat's rates may be partial.
+                "statement_errors": sum(
+                    s["speaker"] == seat and s["error"] is not None for s in statements
+                ),
                 **metrics(c for c in claims if c["speaker"] == seat),
             }
         )
