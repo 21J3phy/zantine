@@ -1,0 +1,29 @@
+# The v1.5 speed experiment (src/zantine/speed.py, docs/roadmap.md P6).
+
+# Talk Budget of each tier, in characters per Meeting pass. "normal" is the v1
+# budget (GameConfig.talk_budget_chars); fast doubles it and slow halves it.
+[tiers]
+fast = 1000
+normal = 500
+slow = 250
+
+# Realism check: each Model's measured API output throughput, in tokens per
+# second. The Models are ranked by it: the fastest third get the fast tier, the
+# slowest third the slow tier, the rest normal (ties keep Model Pool order).
+#
+# PLACEHOLDER VALUES, NOT MEASUREMENTS. Fill them from pilot data (per Model,
+# the median over the pilot's calls of output tokens / response latency), set
+# `measured = true` and name the pilot run in `source`. Until then the realism
+# check can be scheduled and dry-run, but `zantine run --live` refuses it.
+[throughput]
+measured = false
+source = "placeholder: to be filled from pilot data"
+
+[throughput.tokens_per_second]
+"claude-fable-5-1" = 1.0  # PLACEHOLDER
+"claude-opus-5-5" = 1.0  # PLACEHOLDER
+"gpt-6-astra" = 1.0  # PLACEHOLDER
+"gpt-6.1-sol" = 1.0  # PLACEHOLDER
+"gemini-4-argon" = 1.0  # PLACEHOLDER
+"grok-4.7" = 1.0  # PLACEHOLDER
+"muse-wonder-1.0" = 1.0  # PLACEHOLDER

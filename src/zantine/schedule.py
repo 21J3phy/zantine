@@ -72,7 +72,6 @@ SEED_DERIVATION = "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >
 # gets 63 Balanced Lobbies + 21 Benign Matches, i.e. 3 blocks; the optional
 # protocol's data is the v1 run.
 VERIFICATION = "verification"
-EXPERIMENTS = (VERIFICATION,)
 VERIFICATION_BLOCKS = 3
 VERIFICATION_NEW_PROTOCOLS = ("none", "mandatory")
 
@@ -400,7 +399,7 @@ def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
 
 def verify(manifest: dict[str, Any]) -> list[str]:
     """Every scheduling invariant; returns the problems found (empty = valid)."""
-    if "experiment" in manifest:
+    if manifest.get("experiment") == VERIFICATION:
         return _verify_experiment(manifest)
     return _verify_plan(manifest)
 
@@ -408,8 +407,6 @@ def verify(manifest: dict[str, Any]) -> list[str]:
 def _verify_experiment(manifest: dict[str, Any]) -> list[str]:
     """Each protocol's games are a valid plan of their own, with the same lineups
     and Impostor Pairings per block, and each game is configured for its protocol."""
-    if manifest["experiment"] != VERIFICATION:
-        return [f"unknown experiment {manifest['experiment']!r}"]
     games, protocols = manifest["games"], manifest["protocols"]
     out: list[str] = []
     if len({g["id"] for g in games}) != len(games):
