@@ -1,9 +1,34 @@
 import type { LabId } from '../data/models';
 
-// Lab marks under each column and on scatter points, as Artificial Analysis shows them, so a reader
-// knows whose model it is at a glance. The paths come from Lobe Icons (MIT,
-// https://github.com/lobehub/lobe-icons), on a 24-unit grid; the marks are the labs' trademarks and
-// are used only to identify their models.
+// Lab marks under each column, as Artificial Analysis shows them, so a reader knows whose model it is at a
+// glance. The marks are the labs' trademarks and are used only to identify their models. The paths are
+// copied from Lobe Icons (https://github.com/lobehub/lobe-icons), on a 24-unit grid, under its license,
+// which the build also ships as /third-party-notices.txt:
+
+/*!
+ * Lobe Icons
+ * MIT License
+ *
+ * Copyright (c) 2023 LobeHub
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ */
 
 interface Mark {
   paths: { d: string; fill: string }[];
