@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import http.client
 import io
 import json
 import urllib.request
@@ -570,17 +571,54 @@ def test_malformed_replies_are_still_billed(body: str, estimated: bool) -> None:
     assert 0 < capped.spent_usd <= capped.spend_cap_usd + 1000 * 0.042e-6
 
 
-class _LostReply(io.BytesIO):
+class _FailingBody(io.BytesIO):
+    def __init__(self, exc: Exception) -> None:
+        super().__init__()
+        self.exc = exc
+
     def read(self, *args: Any) -> bytes:
-        raise TimeoutError("the read operation timed out")
+        raise self.exc
 
 
-def _opener(code: int) -> urllib.request.OpenerDirector:
-    """An in-process HTTPS transport: a 200 whose body read times out, or an error status."""
+class _Socket:
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+
+    def makefile(self, mode: str) -> io.BytesIO:
+        return io.BytesIO(self.data)
+
+
+def _truncated_reply() -> http.client.HTTPResponse:
+    """A real stdlib response that promises 100 body bytes and delivers 11."""
+    raw = b'HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{"answers":'
+    resp = http.client.HTTPResponse(_Socket(raw))  # type: ignore[arg-type]
+    resp.begin()
+    return resp
+
+
+# How the reply is lost after the request was sent.
+LOST = {
+    "timeout": lambda: _FailingBody(TimeoutError("the read operation timed out")),
+    "reset": lambda: _FailingBody(ConnectionResetError(54, "Connection reset by peer")),
+    "truncated": None,
+}
+
+
+def _opener(code: int, lost: str = "timeout") -> urllib.request.OpenerDirector:
+    """An in-process HTTPS transport: a 200 whose body is lost, or an error status."""
 
     class Fake(urllib.request.HTTPSHandler):
         def https_open(self, req: urllib.request.Request) -> Any:
-            body = _LostReply() if code == 200 else io.BytesIO(b'{"detail": "slow down"}')
+            if code == 200 and lost == "truncated":
+                resp: Any = _truncated_reply()
+                resp.url, resp.msg = req.full_url, resp.reason
+                return resp
+            if code == 200:
+                body: io.BytesIO = LOST[lost]()
+            elif lost == "reset":  # an error status whose body can't be read either
+                body = LOST["reset"]()
+            else:
+                body = io.BytesIO(b'{"detail": "slow down"}')
             resp = urllib.request.addinfourl(body, Message(), req.full_url, code)
             resp.msg = "OK" if code == 200 else "Too Many Requests"
             return resp
@@ -588,22 +626,27 @@ def _opener(code: int) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener(_NoRedirect, Fake)
 
 
-def _http_jev(ledger: Ledger, code: int) -> JevJudge:
+def _http_jev(ledger: Ledger, code: int, lost: str = "timeout") -> JevJudge:
     spec = JevSpec()
 
     def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
-        return http_post(url, headers, payload, opener=_opener(code))
+        return http_post(url, headers, payload, opener=_opener(code, lost))
 
     return JevJudge(spec, ledger, JevAdapter(spec, post, "test-key"))
 
 
-def test_a_lost_reply_keeps_its_reservation() -> None:
-    """A request whose reply is lost may have been billed: its worst case stays held."""
+@pytest.mark.parametrize("lost", list(LOST))
+def test_a_lost_reply_keeps_its_reservation(lost: str) -> None:
+    """A request whose reply is lost may have been billed: its worst case stays held.
+
+    Covers a read timeout, a connection reset and a truncated body (IncompleteRead),
+    all through the real ``http_post``: none escapes ``run_judgments``.
+    """
     records = vote_game()
     ledger = Ledger(1.0)
-    judge = _http_jev(ledger, 200)
+    judge = _http_jev(ledger, 200, lost)
     report = judged(records, judge, ledger=ledger)
-    assert report["batch_errors"] == len(report["calls"])
+    assert report["batch_errors"] == len(report["calls"]) and not report["complete"]
     # Every batch was tried twice; each attempt's worst case is held, with no usage to price.
     assert len(ledger.records) == len(judge.info()["held"]) == 2 * len(report["calls"])
     assert all(not r.ok and r.cost_usd == 0 for r in ledger.records)
@@ -612,13 +655,36 @@ def test_a_lost_reply_keeps_its_reservation() -> None:
 
     # Repeated runs on one ledger stop at the cap instead of continuing for free.
     capped = Ledger(0.002)
-    judge = _http_jev(capped, 200)
+    judge = _http_jev(capped, 200, lost)
     for _ in range(100):
         report = judged(records, judge, ledger=capped)
         if report["aborted"]:
             break
     assert report["aborted"]["reason"] == "spend_cap"
     assert 0 < capped.spent_usd <= capped.spend_cap_usd
+
+
+def test_an_unreadable_error_body_keeps_its_status() -> None:
+    """A 429 whose error body can't be read is still a known rejection: nothing held."""
+    ledger = Ledger(1.0)
+    judge = _http_jev(ledger, 429, "reset")
+    report = judged(vote_game(), judge, ledger=ledger)
+    assert report["batch_errors"] == len(report["calls"])
+    assert all("HTTP 429" in c["error"] for c in report["calls"])
+    assert ledger.spent_usd == 0 and judge.info()["held"] == []
+
+
+def test_a_lost_reply_still_writes_the_audit(tmp_path: Path, monkeypatch: Any) -> None:
+    """End to end: a reset mid-reply leaves an incomplete audit on disk, not a crash."""
+    path = tmp_path / "game.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in vote_game()), encoding="utf-8")
+    monkeypatch.setattr(
+        JevJudge, "from_env", classmethod(lambda cls, ledger, live: _http_jev(ledger, 200, "reset"))
+    )
+    assert main(["audit", str(path), "--judge", "jev", "--live"]) == 1
+    report = json.loads(path.with_suffix(".audit.json").read_text())
+    assert report["judgments"]["complete"] is False
+    assert report["judgments"]["judge"]["held"]
 
 
 def test_an_http_rejection_is_not_held() -> None:
