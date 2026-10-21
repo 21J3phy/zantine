@@ -49,6 +49,8 @@ if TYPE_CHECKING:
 class OpenAIAdapter(ProviderAdapter):
     provider = "openai"
     key_env = "OPENAI_API_KEY"
+    # ``reasoning.effort``: Astra and Sol take low to max (only these are used here).
+    effort_settings = ("low", "medium", "high", "max")
     # None = the SDK's default (api.openai.com). Labs serving an OpenAI-compatible
     # Responses API (xAI, Meta) subclass this adapter and set their own.
     base_url: str | None = None

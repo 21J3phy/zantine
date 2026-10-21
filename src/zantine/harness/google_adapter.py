@@ -48,6 +48,8 @@ _BLOCKED = {"SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "
 class GoogleAdapter(ProviderAdapter):
     provider = "google"
     key_env = "GEMINI_API_KEY"
+    # ``thinking_config.thinking_level`` on Gemini 4 Argon.
+    effort_settings = ("low", "medium", "high")
 
     def __init__(self, model: ModelSpec, client: Any) -> None:
         """``client`` is a ``google.genai.Client`` (or a fake with ``models.generate_content``)."""

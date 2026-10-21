@@ -53,7 +53,16 @@ from zantine.harness.pricing import ModelSpec
 from zantine.harness.provider import ProviderAdapter
 from zantine.rng import GameRng
 from zantine.scenario import build_scenario
-from zantine.schedule import engine_versions, load_pool, make_manifest, seat_lineup, summary
+from zantine.schedule import (
+    EFFORT,
+    EFFORT_PER_LEVEL,
+    engine_versions,
+    load_pool,
+    make_effort_manifest,
+    make_manifest,
+    seat_lineup,
+    summary,
+)
 
 MANIFEST = "manifest.json"
 RUN = "run.json"
@@ -76,7 +85,8 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
     The scenario (names, seat order, map) comes from the game seed as usual; the
     Impostor Seats are then fixed to wherever the seed seats the lineup entries of
     the scheduled Impostor Models (``schedule.seat_lineup``). A speed-experiment
-    game also gets its per-Seat Talk Budgets (``speed.talk_config``).
+    game also gets its per-Seat Talk Budgets (``speed.talk_config``). A game with
+    an ``effort`` (the effort sweep) seats every Model at that level.
     """
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
@@ -90,17 +100,21 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
             impostor_seats=seats if impostor_positions else config.impostor_seats,
             **speed.talk_config(manifest, game, scenario.seat_order),
         )
-    return config, ",".join(f"{mode}:{model}" for model in entries)
+    option = f"?effort={game['effort']}" if game.get("effort") else ""
+    return config, ",".join(f"{mode}:{model}{option}" for model in entries)
 
 
 def check_seating(game: dict[str, Any], header: dict[str, Any]) -> None:
-    """The transcript header must seat exactly the scheduled Models and Impostors."""
+    """The transcript header must seat exactly the scheduled Models, Impostors and effort."""
     seats = header["seats"]
     entries, _ = seat_lineup(game)
     models = Counter(s["controller"]["model"] for s in seats)
     impostors = sorted(s["controller"]["model"] for s in seats if s["role"] == "impostor")
     if models != Counter(entries) or impostors != sorted(game["impostors"]):
         raise RuntimeError(f"{game['id']}: seating does not match the schedule")
+    effort = game.get("effort")
+    if effort is not None and any(s["controller"].get("effort") != effort for s in seats):
+        raise RuntimeError(f"{game['id']}: Seats did not play at effort {effort!r}")
 
 
 # Run directory ----------------------------------------------------------------------
@@ -340,6 +354,7 @@ def _index_line(
         "kind": game["kind"],
         "block": game["block"],
         "lineup_id": game["lineup_id"],
+        "effort": game.get("effort"),
         "seed": game["seed"],
         "cost_usd": cost["game"]["cost_usd"],
         "calls": cost["game"]["calls"],
@@ -499,16 +514,22 @@ def add_commands(sub: Any) -> None:
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
     s.add_argument(
         "--experiment",
-        choices=("v1", speed.EXPERIMENT),
+        choices=("v1", speed.EXPERIMENT, EFFORT),
         default="v1",
-        help="v1 (default), or speed: random per-Seat Talk Budget tiers plus a realism check",
+        help="v1 (default); speed: random per-Seat Talk Budget tiers plus a realism check; "
+        "effort: the v1.6 effort sweep, Mirror Matches at low and high effort",
     )
     s.add_argument(
         "--blocks",
         type=int,
         help=f"blocks of 28 games (default 12; {speed.TIER_BLOCKS} for --experiment speed)",
     )
-    s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model")
+    s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model (v1)")
+    s.add_argument(
+        "--per-level",
+        type=int,
+        help=f"Mirror Matches per Model per effort level (effort; default {EFFORT_PER_LEVEL})",
+    )
     s.add_argument(
         "--realism-games",
         type=int,
@@ -547,7 +568,17 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 def _schedule(args: argparse.Namespace) -> int:
     master_seed = args.master_seed if args.master_seed is not None else secrets.randbits(63)
     config = {"round_cap": args.round_cap} if args.round_cap is not None else {}
-    if args.experiment == speed.EXPERIMENT:
+    if args.per_level is not None and args.experiment != EFFORT:
+        raise ValueError("--per-level is for --experiment effort")
+    if args.experiment == EFFORT:
+        if args.blocks is not None or args.mirror:
+            raise ValueError("--blocks and --mirror are not for the effort sweep")
+        per_level = EFFORT_PER_LEVEL if args.per_level is None else args.per_level
+        manifest = make_effort_manifest(
+            load_pool(), master_seed, per_level=per_level, config=config
+        )
+        text = summary(manifest)
+    elif args.experiment == speed.EXPERIMENT:
         if args.mirror:
             raise ValueError("the speed experiment has no Mirror Matches")
         manifest = speed.make_speed_manifest(

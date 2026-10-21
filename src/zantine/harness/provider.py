@@ -10,7 +10,9 @@ Adding a provider: subclass ``ProviderAdapter`` in its own module under
 ``register_provider("name")``, set ``provider = "name"`` for its models in
 ``models.toml``, and import the module at the bottom of this file. Factories
 get the key via ``live_api_key(key_env)``, which refuses unless ``ZANTINE_LIVE=1``;
-send the lab's own effort value, ``model.effort_setting``.
+send the lab's own effort value, ``model.effort_setting``, and list the values the
+lab documents in ``effort_settings`` (an adapter refuses a Model whose setting is
+not one of them).
 """
 
 from __future__ import annotations
@@ -145,8 +147,18 @@ class ProviderAdapter(ABC):
     provider: str = "abstract"
     # Environment variable holding this provider's API key (keys come from env only).
     key_env: str = ""
+    # The lab's own effort values, as its docs list them (``docs/model-pool.md``).
+    # Empty means unchecked (test adapters); otherwise a Model whose
+    # ``effort_setting`` is not listed is refused before any call is made.
+    effort_settings: tuple[str, ...] = ()
 
     def __init__(self, model: ModelSpec) -> None:
+        setting = model.effort_setting
+        if self.effort_settings and setting not in self.effort_settings:
+            raise ValueError(
+                f"{model.id}: {self.provider} does not accept effort {setting!r} "
+                f"(it takes {', '.join(self.effort_settings)}); fix `efforts` in models.toml"
+            )
         self.model = model
 
     @abstractmethod
