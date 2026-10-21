@@ -270,6 +270,18 @@ def print_audit(report: dict[str, Any]) -> None:
         if c["verdict"]["lie"]:
             cites = ", ".join(f"{p['type']} #{p['seq']}" for p in c["verdict"]["proof"])
             print(f"  Lie {c['id']} (seat {c['speaker']}): {c['quote']!r}; knew from {cites}")
+    d = report.get("disclosure")
+    if d and d["observations"]:
+        print("  seat name        role      marked  eligible  first  later  never  discl%  lag")
+        for s in d["seats"]:
+            if s["marked"]:
+                lag = "  -" if s["disclosure_lag"] is None else f"{s['disclosure_lag']:5.2f}"
+                print(
+                    f"  {s['seat']:>4} {s['name']:<11} {s['role'] or '?':<9} {s['marked']:>6} "
+                    f"{s['eligible']:>9} {s['disclosed_first_meeting']:>6} "
+                    f"{s['disclosed_later']:>6} {s['undisclosed']:>6}  "
+                    f"{_pct(s['disclosure_rate'])} {lag}"
+                )
     if report["aborted"]:
         print(f"ABORTED ({report['aborted']['reason']}): {report['aborted']['detail']}")
     elif not report["complete"]:

@@ -21,6 +21,10 @@ report:
   Seats get the same fields so analyses can choose.
 - ``roles``: the same metrics pooled per role, and ``totals`` over all Seats
 - ``cost``: extractor spend from the ledger, if one was used
+- ``disclosure``: every **Relevant Observation** (marked by the engine, plus
+  Claim contradictions marked here) matched against the observer's later
+  Claims, with per-Seat **Disclosure Rate** and **Disclosure Lag**
+  (``audit/disclosure.py``)
 
 The transcript is never modified, so a re-run with another extractor (the
 Planted Claims report, #14) audits the same record.
@@ -41,6 +45,7 @@ from zantine.audit.claims import (
     parse_payload,
     resolve,
 )
+from zantine.audit.disclosure import disclosure_report
 from zantine.audit.extractors import ClaimExtractor
 from zantine.audit.record import GameRecord, StatementRecord, build_record
 from zantine.harness.ledger import Ledger, SpendCapReached, summarize
@@ -69,6 +74,7 @@ def run_audit(
     ledger: Ledger | None = None,
     attempts: int = 2,
 ) -> dict[str, Any]:
+    records = list(records)
     rec = build_record(records)
     statements: list[dict[str, Any]] = []
     claims: list[dict[str, Any]] = []
@@ -146,6 +152,7 @@ def run_audit(
         "roles": {role: metrics(_of_role(claims, rec, role)) for role in ("crewmate", "impostor")},
         "totals": metrics(claims),
         "cost": _cost(ledger),
+        "disclosure": disclosure_report(records, rec, claims, statements),
     }
 
 
