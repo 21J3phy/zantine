@@ -3,9 +3,13 @@ prompt-injection safety and the ``zantine audit`` command. No network."""
 
 from __future__ import annotations
 
+import email.message
+import io
 import json
 import os
 import re
+import urllib.request
+import urllib.response
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +23,9 @@ from zantine.audit.llm import (
     ExtractorSpec,
     LLMExtractor,
     OpenAICompatAdapter,
+    http_post,
     load_extractor_specs,
+    make_opener,
     prompt_hash,
 )
 from zantine.cli import main
@@ -322,3 +328,67 @@ def test_live_extractor_smoke() -> None:
         )
     )
     assert any(d.kind == "location" and d.room == "Medbay" for d in parsed.drafts)
+
+
+# Transport: redirects never carry the API key elsewhere ------------------------------
+
+
+class FakeTransport(urllib.request.BaseHandler):
+    """Answers HTTP(S) requests from a table instead of the network; records each request."""
+
+    handler_order = 100  # ahead of the real HTTP(S) handlers
+
+    def __init__(self, routes: dict[str, tuple[int, dict[str, str], bytes]]) -> None:
+        self.routes = routes
+        self.requests: list[tuple[str, str, dict[str, str]]] = []
+
+    def _open(self, req: urllib.request.Request) -> urllib.response.addinfourl:
+        self.requests.append((req.get_method(), req.full_url, dict(req.header_items())))
+        status, headers, body = self.routes[req.full_url]
+        msg = email.message.Message()
+        for k, v in headers.items():
+            msg[k] = v
+        resp = urllib.response.addinfourl(io.BytesIO(body), msg, req.full_url, status)
+        resp.msg = "Found" if status in (301, 302, 303, 307, 308) else "OK"
+        return resp
+
+    http_open = https_open = _open
+
+
+API = "https://provider.invalid/v1/chat/completions"
+OK_BODY = json.dumps({"choices": []}).encode()
+
+
+def post_through(routes: dict[str, tuple[int, dict[str, str], bytes]]) -> FakeTransport:
+    transport = FakeTransport(routes)
+    http_post(API, {"Authorization": "Bearer sk-secret"}, {"x": 1}, opener=make_opener(transport))
+    return transport
+
+
+def test_same_origin_redirect_is_followed_with_the_key() -> None:
+    moved = "https://provider.invalid/v2/chat/completions"
+    transport = post_through(
+        {API: (302, {"Location": "/v2/chat/completions"}, b""), moved: (200, {}, OK_BODY)}
+    )
+    assert [url for _, url, _ in transport.requests] == [API, moved]
+    assert transport.requests[1][2]["Authorization"] == "Bearer sk-secret"
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://other.invalid/collect",  # another host
+        "http://provider.invalid/v1/chat/completions",  # HTTPS downgraded to HTTP
+        "https://provider.invalid:8443/v1/chat/completions",  # another port
+    ],
+)
+@pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+def test_cross_origin_redirect_is_refused_before_sending_the_key(location: str, code: int) -> None:
+    routes = {API: (code, {"Location": location}, b""), location: (200, {}, OK_BODY)}
+    transport = FakeTransport(routes)
+    with pytest.raises(ProviderError) as info:
+        http_post(API, {"Authorization": "Bearer sk-secret"}, {}, opener=make_opener(transport))
+    assert [url for _, url, _ in transport.requests] == [API]  # nothing sent to the new origin
+    assert "sk-secret" not in str(info.value)
+    if code not in (307, 308):  # urllib itself refuses to re-POST on 307/308
+        assert info.value.fatal and "refused redirect" in str(info.value)

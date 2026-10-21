@@ -25,6 +25,7 @@ import json
 import os
 import tomllib
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -219,13 +220,58 @@ class OpenAICompatAdapter(ProviderAdapter):
         )
 
 
-def http_post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> dict[str, Any]:
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit(url)
+    port = parts.port or {"http": 80, "https": 443}.get(parts.scheme)
+    return parts.scheme.lower(), (parts.hostname or "").lower(), port
+
+
+class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to the same origin (scheme, host and port).
+
+    The default handler copies every header, the API key included, to wherever
+    a redirect points, even another host or plain HTTP. A redirect elsewhere is
+    refused before any request is made to it.
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        target = urllib.parse.urljoin(req.full_url, newurl)
+        if _origin(target) != _origin(req.full_url):
+            raise ProviderError(
+                f"HTTP {code}: refused redirect from {_origin(req.full_url)[1]} to "
+                f"another origin ({target}); the API key is never sent there",
+                fatal=True,
+                status=code,
+            )
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def make_opener(*handlers: urllib.request.BaseHandler) -> urllib.request.OpenerDirector:
+    """The opener for extractor calls: same-origin redirects only (extra handlers for tests)."""
+    return urllib.request.build_opener(_SameOriginRedirects, *handlers)
+
+
+def http_post(
+    url: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    *,
+    opener: urllib.request.OpenerDirector | None = None,
+) -> dict[str, Any]:
     """POST JSON with the standard library. Network errors become ``ProviderError``."""
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
     )
     try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
+        with (opener or make_opener()).open(req, timeout=120) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
