@@ -17,8 +17,11 @@ What counts as proof, per kind:
   or stood in the claimed room without the subject; for itself, its own room).
 - ``kill``: it saw that victim's kill (``kill_witnessed``); it made that kill
   itself (its valid ``kill`` action) while blaming a player not its fellow
-  Impostor; or it is a Crewmate claiming it killed (``role_assigned``). A denial
-  is a Lie when it made or witnessed the kill.
+  Impostor; it claims a kill of its own that its own actions rule out (no
+  ``kill`` action for that victim, Round and room; its start-of-Round view for
+  the room); or it is a Crewmate claiming it killed (``role_assigned``). A denial
+  is a Lie when it made or witnessed the kill. A fellow Impostor's unseen kills
+  are never assumed known.
 - ``task_done`` (about itself only, since grades are private): its own records
   for that Task (``tasks.graded`` / ``blocked`` / ``assigned`` / ``reassigned``);
   for a Task it never held, the ``tasks.assigned`` / ``reassigned`` records listing
@@ -238,6 +241,8 @@ class _Checker:
         role, role_obs = self.own_role()
         if c.subject == self.speaker and role == "crewmate" and role_obs:
             return [_cite(role_obs)]
+        if c.subject == self.speaker:
+            return self.own_kill_knew_false()
         if c.object is None:
             return None
         # A player dies once, so a witnessed or self-made kill of the victim
@@ -251,6 +256,39 @@ class _Checker:
                 if a["data"]["value"].get("target") == c.object:
                     return [_cite(a)]
         return None
+
+    def own_kill_knew_false(self) -> list[dict[str, Any]] | None:
+        """The speaker claims it killed: its own actions show it made no such kill.
+
+        A Seat knows every action it submitted, and only a valid ``kill`` action
+        kills. Proof is its kill actions before the statement (none matching the
+        claimed victim, Round and room; a room is ruled out by its own view at the
+        start of that Round, where the kill happens), or, if it made no kill at all,
+        everything it did in the claimed Rounds.
+        """
+        c, rec = self.c, self.rec
+        rounds = self.rounds(since_meeting=False)
+        kills = rec.actions(self.speaker, "kill", c.statement_seq)
+        proof: list[dict[str, Any]] = []
+        for a in kills:
+            if c.object is not None and a["data"]["value"].get("target") != c.object:
+                continue
+            if a["round"] not in rounds:
+                continue
+            if c.room is None:
+                return None  # it did kill that victim in that Round
+            start = self.snap(a["round"], "start")
+            if start is None or start["data"]["room"] == c.room:
+                return None  # possibly (or provably) in that room
+            proof.append(start)
+        if kills:
+            return [_cite(r) for r in sorted([*kills, *proof], key=lambda r: r["seq"])]
+        done = [
+            a
+            for a in rec.own_actions.get(self.speaker, [])
+            if a["round"] in rounds and a["seq"] < c.statement_seq
+        ]
+        return [_cite(a) for a in done] or None
 
     def kill_knew_true(self, kill: Any) -> list[dict[str, Any]] | None:
         c, rec = self.c, self.rec

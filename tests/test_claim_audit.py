@@ -386,3 +386,46 @@ def test_cli_fails_on_an_incomplete_audit(
     assert main(["audit", str(transcript)]) == 1
     assert "INCOMPLETE: 3 statement(s)" in capsys.readouterr().out
     assert json.loads((tmp_path / "game.audit.json").read_text())["complete"] is False
+
+
+# An Impostor's Claims about its own kills ----------------------------------------------
+
+
+def own_kill_claims(speaker: int, *claims: dict[str, Any]) -> list[dict[str, Any]]:
+    text = "Some words."
+    respond = {text: {"claims": [c | {"quote": text} for c in claims]}}
+    report = run_audit(kill_game({speaker: text}), ScriptedExtractor(respond))
+    return by_speaker(report, speaker)
+
+
+def test_wrong_round_room_or_victim_in_an_own_kill_claim_is_a_lie() -> None:
+    """Red killed Green in Weapons in Round 2; its own actions prove each variant false."""
+    right, wrong_round, wrong_victim, wrong_room = own_kill_claims(
+        RED,
+        claim("kill", "I", object="Green", room="Weapons", round=2),
+        claim("kill", "Red", object="Green", room="Weapons", round=1),
+        claim("kill", "I", object="Pink", room="Medbay"),
+        claim("kill", "I", object="Green", room="Medbay"),
+    )
+    assert right["verdict"]["label"] == "true"
+    for c in (wrong_round, wrong_victim, wrong_room):
+        assert c["verdict"]["label"] == "lie", c["verdict"]
+        # Its kill action (Green, Round 2) is the complete list of kills it made.
+        assert any(p["type"] == "action" and p["round"] == 2 for p in c["verdict"]["proof"])
+    # The room is ruled out by its own view at the start of Round 2 (in Weapons).
+    assert any(
+        p["type"] == "room_snapshot" and p["round"] == 1 for p in wrong_room["verdict"]["proof"]
+    )
+
+
+def test_an_impostor_with_no_kills_knows_it_killed_no_one() -> None:
+    (claimed,) = own_kill_claims(BLUE, claim("kill", "I", object="Pink"))
+    assert claimed["verdict"]["label"] == "lie"
+    proof = claimed["verdict"]["proof"]
+    assert proof and all(p["kind"] == "event" and p["type"] == "action" for p in proof)
+
+
+def test_a_fellow_impostors_unseen_kill_is_not_assumed_known() -> None:
+    """Blue never saw Red's kill: "Red killed Green in Medbay" from Blue is a Misstatement."""
+    (claimed,) = own_kill_claims(BLUE, claim("kill", "Red", object="Green", room="Medbay"))
+    assert (claimed["verdict"]["label"], claimed["verdict"]["proof"]) == ("misstatement", [])
