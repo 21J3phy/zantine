@@ -70,6 +70,9 @@ class Recorder(SeatController):
         self.contexts.append(ctx)
         return self.inner.choose_action(ctx)
 
+    def say(self, ctx: ActionContext) -> str:
+        return self.inner.say(ctx)
+
     def speak(self, ctx: MeetingContext) -> str:
         self.contexts.append(ctx)
         return self.inner.speak(ctx)
@@ -97,13 +100,18 @@ SAMPLE = [
 ] + [next(g for g in MANIFEST["games"] if g["kind"] == kind) for kind in ("benign", "mirror")]
 
 
-@pytest.mark.parametrize("game_plan", SAMPLE, ids=lambda g: g["id"])
-def test_dry_run_players_never_see_a_model_identity(game_plan: dict[str, Any]) -> None:
+def scanned_dry_run(game_plan: dict[str, Any]) -> tuple[Any, list[Recorder]]:
     config, spec = game_setup(MANIFEST, game_plan, "dry")
     game = new_game(config, spec)
     recorders = [Recorder(c) for c in game.controllers]
     game.controllers = list(recorders)
     game.run()
+    return game, recorders
+
+
+@pytest.mark.parametrize("game_plan", SAMPLE, ids=lambda g: g["id"])
+def test_dry_run_players_never_see_a_model_identity(game_plan: dict[str, Any]) -> None:
+    game, recorders = scanned_dry_run(game_plan)
     header = game.transcript.records[0]
     assert identity_leaks(header["seats"])  # ground truth has the Models ...
     for seat, recorder in enumerate(recorders):
@@ -115,6 +123,39 @@ def test_dry_run_players_never_see_a_model_identity(game_plan: dict[str, Any]) -
         assert identity_leaks(contexts) == [], f"seat {seat} contexts"
         assert identity_leaks(observations) == [], f"seat {seat} observations"
         assert identity_leaks(prompts) == [], f"seat {seat} prompts"
+
+
+def test_dry_run_room_chat_reaches_the_scan_without_a_model_identity() -> None:
+    """Recorder forwards ``say``, so delivered Room Chat is part of what is scanned.
+    Scripted holders often die before reading, so take the first scheduled game
+    whose dry run has Room Chat."""
+    for game_plan in MANIFEST["games"]:
+        game, recorders = scanned_dry_run(game_plan)
+        chat = list(game.transcript.events("chat.message"))
+        if chat:
+            break
+    else:
+        raise AssertionError("no scheduled dry run has Room Chat")
+    for message in chat:
+        listener = message["data"]["listeners"][0]
+        heard = [
+            o["data"]["text"]
+            for o in game.transcript.observations(listener)
+            if o["type"] == "chat.message"
+        ]
+        assert message["data"]["text"] in heard
+        # Every later prompt of that listener shows it, and none names a Model.
+        later = [
+            c
+            for c in recorders[listener].contexts
+            if isinstance(c, ActionContext) and c.round > message["round"]
+        ]
+        if later:
+            prompt = harness_prompt(game, later[0])
+            assert message["data"]["text"] in json.dumps(prompt, ensure_ascii=False)
+            assert identity_leaks(prompt) == []
+    for record in game.transcript.observations():
+        assert identity_leaks(record) == []
 
 
 def covering_lobbies() -> list[dict[str, Any]]:
