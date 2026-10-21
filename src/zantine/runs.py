@@ -206,12 +206,13 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def spent_usd(run_dir: Path) -> float:
     """Everything the run has spent so far, from the spend log: every settled call,
-    every hold (the worst case of a call lost without a reply, which the provider
-    may have billed), plus the worst case of any reservation never settled (a
-    crash mid-call)."""
+    the worst case of every uncertain call (failed without an HTTP status, so the
+    provider may have billed it) and every other hold, plus the worst case of any
+    reservation never settled (a crash mid-call)."""
     lines = read_jsonl(run_dir / SPEND)
     settled = {r["reservation"] for r in lines if r["kind"] == "call"}
     total = sum(r["cost_usd"] for r in lines if r["kind"] == "call")
+    total += sum(r["held_usd"] for r in lines if r["kind"] == "call" and r.get("uncertain"))
     total += sum(r["hold_usd"] for r in lines if r["kind"] == "hold")
     total += sum(
         r["reserved_usd"]
@@ -225,10 +226,13 @@ class RunLedger(Ledger):
     """A Ledger that journals every paid call to ``spend.jsonl``.
 
     Before a call is sent, a ``reserve`` line records its worst-case cost; after
-    it, a ``call`` line settles it at its real cost. A caller's ``hold`` (the
-    worst case of a call that failed without a reply, e.g. lost in transit) is a
-    ``hold`` line, so a resume can't forget it. The log survives a crash at any
-    point, so the run-level cap stays honest. ``game_attempt`` is the attempt
+    it, a ``call`` line settles it at its real cost. A call that failed without an
+    HTTP status (lost in transit, untrustworthy usage) may still have been billed:
+    its ``call`` line is ``uncertain`` and keeps its worst case as ``held_usd``,
+    in the same single append that settles it, so no crash can free that charge.
+    A caller's ``hold`` of that same call adds nothing more; any other ``hold`` is
+    its own ``hold`` line. The log survives a crash at any point, so the run-level
+    cap stays honest. ``game_attempt`` is the attempt
     at the scheduled game; ``call_attempt`` is the Seat's retry of one decision.
     """
 
@@ -240,8 +244,13 @@ class RunLedger(Ledger):
         self.spent_usd = spent_usd(path.parent)
         self._calls = 0
         self._pending: str | None = None
+        self._pending_usd = 0.0
+        # Worst case of the last uncertain call, already counted, until its caller holds it.
+        self._held_uncertain: float | None = None
 
     def _reserve(self, model: ModelSpec, needed: float, attempt: int) -> None:
+        self._held_uncertain = None
+        self._pending_usd = needed
         self._calls += 1
         self._pending = f"{self.game}/{self.attempt}/{self._calls}"
         line = {
@@ -256,6 +265,10 @@ class RunLedger(Ledger):
         _append_line(self.path, line)
 
     def hold(self, amount_usd: float) -> None:
+        if self._held_uncertain is not None and amount_usd == self._held_uncertain:
+            # The uncertain call's own line already holds this; don't charge it twice.
+            self._held_uncertain = None
+            return
         super().hold(amount_usd)
         line = {
             "kind": "hold",
@@ -265,7 +278,7 @@ class RunLedger(Ledger):
         }
         _append_line(self.path, line)
 
-    def _record(self, *args: Any, **kwargs: Any) -> None:
+    def _record(self, *args: Any, uncertain: bool = False, **kwargs: Any) -> None:
         super()._record(*args, **kwargs)
         record = self.records[-1].to_dict()
         line = {
@@ -276,7 +289,12 @@ class RunLedger(Ledger):
             "call_attempt": record.pop("attempt"),
             **record,
         }
+        if uncertain:
+            line |= {"uncertain": True, "held_usd": self._pending_usd}
         _append_line(self.path, line)
+        if uncertain:
+            self.spent_usd += self._pending_usd
+            self._held_uncertain = self._pending_usd
         self._pending = None
 
 

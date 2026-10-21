@@ -1075,10 +1075,11 @@ def test_lost_masking_calls_stay_held_across_a_resume(
     live = {"mode": "live", "spend_cap_usd": 0.01, "adapter_factory": fake_adapter}
     first = execute(run_dir, models=models, style_mask=factory, **live)
     assert first.stopped == "spend_cap" and sent
-    held = [r for r in read_jsonl(run_dir / "spend.jsonl") if r["kind"] == "hold"]
-    assert len(held) == len(sent)
+    lines = read_jsonl(run_dir / "spend.jsonl")
+    held = [r for r in lines if r["kind"] == "call" and r.get("uncertain")]
+    assert len(held) == len(sent) and not [r for r in lines if r["kind"] == "hold"]
     durable = spent_usd(run_dir)
-    assert durable == pytest.approx(sum(r["hold_usd"] for r in held)) and durable > 0
+    assert durable == pytest.approx(sum(r["held_usd"] for r in held)) and durable > 0
     # A resume starts from the held spend: it can't buy back the budget.
     before = len(sent)
     called.clear()
@@ -1097,5 +1098,51 @@ def test_lost_masking_calls_stay_held_across_a_resume(
         with contextlib.suppress(ProviderError):
             masker.rewrite(item("I was in Storage"))
     lines = read_jsonl(tmp_path / "control" / "spend.jsonl")
-    assert not [r for r in lines if r["kind"] == "hold"]
+    assert not [r for r in lines if r["kind"] == "hold" or r.get("uncertain")]
     assert spent_usd(tmp_path / "control") == pytest.approx((300 * 1.0 + 40 * 2.0) / 1e6)
+
+
+def lost_call(tmp_path: Path) -> tuple[Any, Path, float]:
+    """A RunLedger whose one masking call was dispatched and lost its reply."""
+    from zantine.runs import RunLedger
+
+    def lost(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        raise ProviderError("read timed out after sending", fatal=False)
+
+    ledger = RunLedger(1.0, tmp_path / "spend.jsonl")
+    masker = LLMMasker(SPEC, ledger, OpenAICompatAdapter(SPEC, lost, "sk"))
+    worst = SPEC.model_spec().worst_case_cost(masker.request(item("hi")).text_size())
+    return masker, tmp_path, worst
+
+
+def test_a_crash_right_after_an_uncertain_failure_keeps_its_worst_case(tmp_path: Path) -> None:
+    """Settling an uncertain call and holding its charge is one append: no crash frees it."""
+    from zantine.runs import spent_usd
+
+    masker, run_dir, worst = lost_call(tmp_path)
+
+    # Stop the process right after the failure line is written, before any hold.
+    def crash(self: Any, amount: float) -> None:
+        raise SystemExit("crash")
+
+    with pytest.raises(SystemExit), pytest.MonkeyPatch.context() as mp:
+        mp.setattr(type(masker.ledger), "hold", crash)
+        masker.rewrite(item("hi"))
+    assert spent_usd(run_dir) == pytest.approx(worst)
+
+
+def test_a_held_uncertain_call_is_charged_once_and_torn_lines_keep_the_reservation(
+    tmp_path: Path,
+) -> None:
+    from zantine.runs import spent_usd
+
+    masker, run_dir, worst = lost_call(tmp_path)
+    with pytest.raises(ProviderError):
+        masker.rewrite(item("hi"))  # the masker holds; the ledger must not add it again
+    assert masker.ledger.spent_usd == pytest.approx(worst)
+    assert spent_usd(run_dir) == pytest.approx(worst)
+    # A torn settling append: the reservation stays unsettled and counts its worst case.
+    path = run_dir / "spend.jsonl"
+    lines = path.read_text().splitlines()
+    path.write_text("\n".join(lines[:-1]) + "\n" + lines[-1][: len(lines[-1]) // 2])
+    assert spent_usd(run_dir) == pytest.approx(worst)
