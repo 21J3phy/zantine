@@ -29,7 +29,7 @@ from zantine.rules.actions import Action, Invalid
 if TYPE_CHECKING:
     from zantine.engine import Game
     from zantine.state import GameState, PlayerState
-    from zantine.tasks import TaskGraph
+    from zantine.tasks import Task, TaskGraph
 
 
 @dataclass(frozen=True)
@@ -76,6 +76,9 @@ class GameModule:
     """Base class for rule plug-ins. Override what you need."""
 
     name: ClassVar[str] = "module"
+    # True for a module that lets Impostors hold Shared Tasks (Sabotage): the
+    # Task modules then draw assignees from every Seat (``rules.tasks.shared_task_pool``).
+    shares_tasks_with_impostors: ClassVar[bool] = False
 
     def install(self, rules: Rules) -> None:
         """Register actions, resolvers and win conditions."""
@@ -85,6 +88,14 @@ class GameModule:
 
     def on_setup(self, game: Game) -> None:
         """Called once before Round 1, after roles are assigned."""
+
+    def submitted_answer(self, game: Game, seat: int, task: Task, answer: Any) -> Any:
+        """The answer ``tasks.work`` grades for ``seat`` on ``task`` (default: as given).
+
+        Called in module order for every unblocked submission, before grading; a
+        module may return a changed answer (Sabotage jams a station this way).
+        """
+        return answer
 
     def on_meeting_end(self, game: Game, meeting: int) -> None:
         """Called after every Meeting (and any Ejection) finishes."""

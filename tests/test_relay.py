@@ -9,6 +9,7 @@ from helpers import events, make_game, obs_of
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.rng import GameRng
+from zantine.rules import Rules, default_modules, default_rules
 from zantine.rules.actions import Action, CallMeeting, Kill, Move
 from zantine.rules.relay import Deliver, HandOff, Part, PickUp, part, parts, tamper
 from zantine.rules.tasks import WorkOnTask, board, route
@@ -28,9 +29,16 @@ def started(**config: Any) -> tuple[Game, Task, Part]:
             **config,
         }
     )
+    # Relay mechanics with Crewmate carriers: Sabotage (Impostor carriers, Fake
+    # Tasks) is tested in test_sabotage.py.
+    game.rules = crew_only_rules()
     game.start()
     task = next(t for t in board(game.state).graph if t.kind == "chain_relay")
     return game, task, part(game.state, task.id)
+
+
+def crew_only_rules() -> Rules:
+    return default_rules([m for m in default_modules() if m.name != "sabotage"])
 
 
 def act(game: Game, seat: int, action: Action) -> None:
@@ -359,9 +367,15 @@ def test_relay_settings_and_small_lobbies() -> None:
     with pytest.raises(ValueError, match="bad task settings"):
         GameConfig(relay_tasks=-1)
     config = GameConfig(num_seats=2, num_impostors=1, tasks_per_crewmate=0)
-    game = Game(config, [IdleBot(), IdleBot()])
+    # Without Sabotage only Crewmates carry, so one Crewmate gets no relay.
+    game = Game(config, [IdleBot(), IdleBot()], rules=crew_only_rules())
     game.start()
     assert not parts(game.state)
+    # With Sabotage an Impostor can be a carrier.
+    game = Game(config, [IdleBot(), IdleBot()])
+    game.start()
+    relays = [sorted(board(game.state).graph.get(t).assignees) for t in parts(game.state)]
+    assert relays == [[0, 1], [0, 1]]
     config = GameConfig(num_rooms=2, tasks_per_crewmate=0)
     with pytest.raises(ValueError, match="three rooms"):
         Game(config, [IdleBot() for _ in range(10)]).start()

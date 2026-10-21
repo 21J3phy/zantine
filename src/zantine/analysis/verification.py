@@ -235,14 +235,26 @@ HISTORICAL_DEFAULTS: dict[str, Any] = {
     "verification_protocol": BASELINE,  # #37: the v1 rule
     "room_chat_budget_chars": 0,  # #72: 0 = no Room Chat, as before it existed
     "splitkey_tasks": 0,  # #72: no split-key Tasks before them
+    "visual_task_chance": 0,  # #74: no Visual Tasks before them
+}
+# Rule modules that change nothing when their setting is 0, so a header listing them
+# switched off means the same as one from before they existed. ``verification`` is
+# always left out: the protocol is the treatment, compared separately.
+NEUTRAL_AT_ZERO = {
+    "relay": "relay_tasks",
+    "splitkey": "splitkey_tasks",
+    "chat": "room_chat_budget_chars",
 }
 
 
-def effective_conditions(config: dict[str, Any]) -> dict[str, Any]:
+def effective_conditions(
+    config: dict[str, Any], modules: Sequence[str] | None = None
+) -> dict[str, Any]:
     """How a game was played, apart from its design and protocol: its header config
     with historical defaults filled in and derived settings made explicit (each
     Seat's actual Talk Budget, whether it came from talk_budget_chars or a per-Seat
-    override)."""
+    override), and, given the header's ``modules``, the rule modules in play (e.g.
+    Sabotage gives Impostors Fake Tasks and Sabotage actions)."""
     c = {**HISTORICAL_DEFAULTS, **config}
     budgets = c.pop("talk_budgets")
     chars = c.pop("talk_budget_chars", None)
@@ -253,6 +265,12 @@ def effective_conditions(config: dict[str, Any]) -> dict[str, Any]:
     if c.get("splitkey_tasks") == 0:
         # A game with no split-key Tasks plays the same whatever their window.
         c.pop("splitkey_window", None)
+    if modules is not None:
+        c["modules"] = sorted(
+            m
+            for m in modules
+            if m != "verification" and not (m in NEUTRAL_AT_ZERO and c.get(NEUTRAL_AT_ZERO[m]) == 0)
+        )
     return {k: v for k, v in c.items() if k not in DESIGN_KEYS}
 
 
@@ -261,7 +279,7 @@ def conditions(data: RunData, game_id: str) -> dict[str, Any]:
     path = data.run_dir / "games" / f"{game_id}.jsonl"
     with path.open(encoding="utf-8") as f:
         header = json.loads(f.readline())
-    return effective_conditions(header["config"])
+    return effective_conditions(header["config"], header.get("modules"))
 
 
 def check_conditions(games: Sequence[tuple[RunData, GameRow]]) -> None:

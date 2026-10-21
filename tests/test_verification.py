@@ -115,8 +115,11 @@ def cross_check(game: Game, target: Task, verdicts: tuple[str, str] = (APPROVE, 
 def test_mandatory_gates_every_auditable_task_with_two_independent_cross_checks() -> None:
     game = mandatory(tasks_per_crewmate=2)
     tb = board(game.state)
-    targets = [t for t in tb.graph.counted() if t.checks_required]
-    assert targets and targets == [t for t in tb.graph.counted() if auditable(t)]
+    # Every auditable solo step is gated: the crew's and the Impostors' Fake Tasks
+    # alike, so a gated brief never marks a step out as real or fake.
+    targets = [t for t in tb.graph if t.checks_required]
+    solo = [t for t in tb.graph if t.kind != "audit" and auditable(t)]
+    assert targets == solo and {t.fake for t in targets} == {False, True}
     assert len(audits(tb)) == CHECKS * len(targets)
     for target in targets:
         first, second = checks_of(game, target)
@@ -284,8 +287,9 @@ def test_wrong_work_never_counts_and_a_correct_rejection_keeps_the_check_open() 
     # leaves both mandatory checks open for the resubmission.
     cross_check(game, target, (APPROVE, REJECT))
     assert not first.done and not second.done and not target.done
-    results = [r for r in audit_board(game.state).checks if r["task"] in (first.id, second.id)]
-    assert [(r["verdict"], r["correct"]) for r in results] == [(APPROVE, False), (REJECT, True)]
+    results = {r["task"]: r for r in audit_board(game.state).checks}
+    assert (results[first.id]["verdict"], results[first.id]["correct"]) == (APPROVE, False)
+    assert (results[second.id]["verdict"], results[second.id]["correct"]) == (REJECT, True)
     ctx = game.action_context(game.state.player(second.assignees[AUDITOR]))
     [entry] = [a for a in ctx.extra["audit"]["audits"] if a["task"] == second.id]
     assert entry["required"] and entry["last_result"] == {
@@ -726,16 +730,16 @@ def test_a_baseline_played_under_other_conditions_is_refused(
 
 def test_default_optional_reassignment_is_the_v1_rule() -> None:
     """Under the default protocol a death and Meeting hand out work exactly as on the
-    base branch (same seed, checked against main at b2aaad0: T20 -> 8, T77 -> 6,
-    T56 -> 8), so a v1 run's optional games stay comparable; only the mandatory
-    protocol weighs open work."""
+    base branch (same seed, checked against main at e665a8f: T20 -> 6, T77 -> 4), so
+    a v1 run's optional games stay comparable; only the mandatory protocol weighs
+    open work."""
     game = make_game(seed=1)
     game.start()
     assert not board(game.state).outcome_blind_load
     game.state.player(2).alive = False
     run_meeting(game, MeetingRequest("emergency", 9))
     moved = [(e["task"], e["to_seat"]) for e in events(game, "tasks.reassigned")]
-    assert moved == [("T20", 8), ("T77", 6), ("T56", 8)]
+    assert moved == [("T20", 6), ("T77", 4)]
     assert board(mandatory().state).outcome_blind_load
 
 
@@ -780,39 +784,82 @@ def header_run(tmp_path: Path, headers: dict[str, dict[str, Any]]) -> Any:
     return SimpleNamespace(run_dir=tmp_path), {g: SimpleNamespace(id=g) for g in headers}
 
 
+def header_of(config: GameConfig, without: tuple[str, ...] = ()) -> dict[str, Any]:
+    """The JSON header of a scripted game played now, optionally without some modules."""
+    from zantine.rules import default_modules, default_rules
+    from zantine.runner import new_game
+
+    game = new_game(config)
+    game.rules = default_rules([m for m in default_modules() if m.name not in without])
+    game.run()
+    return json.loads(json.dumps(game.transcript.records[0]))
+
+
 def test_historical_headers_are_compared_by_their_effective_settings(tmp_path: Path) -> None:
     """A genuine header written by the engine at issue-12 (tests/fixtures), before
-    per-Seat Talk Budgets (#25), Room Chat and split-key Tasks (#72), means 500
-    characters for every Seat, no Room Chat and no split-key Tasks. It matches a
-    current game played that way, but not one whose Seats are all overridden to 1000
-    nor a current default game (which has Room Chat), and a field missing with no
-    known historical default is refused, never a wildcard."""
+    per-Seat Talk Budgets (#25), Room Chat and split-key Tasks (#72) and Sabotage
+    (#74), means 500 characters for every Seat, no Room Chat, no split-key Tasks, no
+    Visual Tasks and no Sabotage module. It matches a current game played that way,
+    but not one whose Seats are all overridden to 1000, nor one with Sabotage
+    installed, nor a current default game; and a field missing with no known
+    historical default is refused, never a wildcard."""
     from zantine.analysis.verification import check_conditions, effective_conditions
 
     old = json.loads((FIXTURES / "pre_talk_budgets_header.json").read_text())
     assert "talk_budgets" not in old["config"] and old["config"]["talk_budget_chars"] == 500
-    # Through JSON, as analysis reads every header.
-    then = {"room_chat_budget_chars": 0, "splitkey_tasks": 0}
-    current, louder, default = (
-        json.loads(json.dumps(play(config, "scripted").transcript.records[0]))
-        for config in (
-            GameConfig(seed=5, **then),
-            GameConfig(seed=6, talk_budgets=(1000,) * 10, **then),
-            GameConfig(seed=7),
-        )
+    assert "sabotage" not in old["modules"]
+    then = {"room_chat_budget_chars": 0, "splitkey_tasks": 0, "visual_task_chance": 0}
+    current = header_of(GameConfig(seed=5, **then), without=("sabotage",))
+    louder = header_of(GameConfig(seed=6, talk_budgets=(1000,) * 10, **then), ("sabotage",))
+    sabotaged = header_of(GameConfig(seed=7, **then))
+    default = header_of(GameConfig(seed=8))
+    assert effective_conditions(old["config"], old["modules"]) == effective_conditions(
+        current["config"], current["modules"]
     )
-    assert effective_conditions(old["config"]) == effective_conditions(current["config"])
     assert effective_conditions(louder["config"])["seat_talk_budgets"] == [1000] * 10
     gappy = json.loads(json.dumps(old))
     del gappy["config"]["relay_tasks"]
     data, g = header_run(
         tmp_path,
-        {"old": old, "current": current, "louder": louder, "default": default, "gappy": gappy},
+        {
+            "old": old,
+            "current": current,
+            "louder": louder,
+            "sabotaged": sabotaged,
+            "default": default,
+            "gappy": gappy,
+        },
     )
     check_conditions([(data, g["old"]), (data, g["current"])])
     with pytest.raises(ValueError, match="seat_talk_budgets"):
         check_conditions([(data, g["old"]), (data, g["louder"])])
-    with pytest.raises(ValueError, match="room_chat_budget_chars is 0"):
+    with pytest.raises(ValueError, match="different conditions: modules"):
+        check_conditions([(data, g["old"]), (data, g["sabotaged"])])
+    with pytest.raises(ValueError, match="different conditions"):
         check_conditions([(data, g["old"]), (data, g["default"])])
     with pytest.raises(ValueError, match="no 'relay_tasks'"):
         check_conditions([(data, g["current"]), (data, g["gappy"])])
+
+
+def test_a_gated_visual_task_is_seen_when_handed_in_and_fake_work_never_counts() -> None:
+    """With Sabotage installed: a Visual Task that needs mandatory checks gives its
+    room the alibi when correct work is handed in (the Task is done only later), and
+    an Impostor's Fake Task is gated like real work but never counts once verified."""
+    game = mandatory()
+    tb = board(game.state)
+    target = next(t for t in tb.graph.counted() if t.checks_required)
+    target.visual = True
+    worker = target.assignees[0]
+    witness = next(p.seat for p in game.state.living() if p.seat != worker and p.seat not in (0, 1))
+    game.state.player(witness).room = target.room
+    submit(game, target)
+    assert target.closed and not target.done
+    [seen] = obs_of(game, witness, "tasks.visual_done")
+    assert seen["task"] == target.id and seen["seat"] == worker
+
+    fake = next(t for t in tb.graph if t.fake and t.checks_required)
+    holder = fake.assignees[0]
+    submit(game, fake)
+    cross_check(game, fake)
+    assert fake.done and tb.stats[holder].done == 0
+    assert fake not in tb.graph.counted()

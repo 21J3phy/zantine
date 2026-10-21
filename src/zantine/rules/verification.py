@@ -37,7 +37,7 @@ from zantine.rules.audit import NAME as AUDIT
 from zantine.rules.audit import audit_board, auditable, passed, place_audit
 from zantine.rules.registry import GameModule, RoundContext, Rules
 from zantine.rules.tasks import NAME as TASKS
-from zantine.rules.tasks import TaskBoard
+from zantine.rules.tasks import TaskBoard, shared_task_pool
 from zantine.tasks import task_kind
 from zantine.tasks.graph import TASK_ID_RANGE
 
@@ -90,6 +90,9 @@ class VerificationModule(GameModule):
     def place_tasks(self, game: Game, graph: TaskGraph) -> None:
         if game.config.verification_protocol != "mandatory":
             return
+        # Fake Tasks too (auditable admits them): they look and grade like real steps,
+        # so gating only real ones would mark them out, and with every step gated
+        # each Seat has the same checking load whatever the crew size.
         for task in graph:
             if task_kind(task.kind).required_for_completion and auditable(task):
                 task.checks_required = CHECKS
@@ -111,10 +114,12 @@ class VerificationModule(GameModule):
                 f"only {free} Task ids are left"
             )
         rng = game.rng.fork(NAME)
-        crew = [p.seat for p in state.living() if not p.is_impostor]
-        load = dict.fromkeys(crew, 0)
+        # The Seats Shared Tasks are drawn from (every Seat when Sabotage lets
+        # Impostors hold them), so a check partner says nothing about anyone's role.
+        pool = [s for s in shared_task_pool(game) if state.player(s).alive]
+        load = dict.fromkeys(pool, 0)
         for target in targets:
-            options = [s for s in crew if s not in target.assignees]
+            options = [s for s in pool if s not in target.assignees]
             if len(options) < CHECKS:
                 raise ValueError(
                     f"mandatory verification needs {CHECKS} Crewmates besides {target.id}'s holder"
@@ -176,7 +181,8 @@ def resolve_verification(game: Game, rc: RoundContext) -> None:
         # The work that passed: a gated Task closes on its first correct submission.
         work = next(s for s in reversed(ab.submissions[task_id]) if s.correct)
         task.done, task.done_by, task.done_round = True, work.seat, rc.round
-        tb.stats[work.seat].done += 1
+        if not task.fake:
+            tb.stats[work.seat].done += 1
         vb.verified[task_id] = rc.round
         # Ground truth only: the worker is not told, and each checker knows only
         # its own result.
