@@ -56,7 +56,10 @@ class TaskBoard:
     known_done: dict[int, set[str]]
 
     def view(self, task: Task, seat: int) -> dict[str, Any]:
-        """A seat's private brief for one of its Tasks (never the answer key)."""
+        """A seat's private brief for one of its Tasks (never the answer key).
+
+        A Fake Task's brief has exactly the shape of a real one.
+        """
         brief = task_kind(task.kind).brief(task.content, task.assignees.index(seat))
         view = {
             "task": task.id,
@@ -65,6 +68,8 @@ class TaskBoard:
             "requires": [self._ref(r) for r in task.requires],
             "unlocks": [self._ref(d) for d in self.graph.dependents(task.id)],
         }
+        if task.visual:
+            view["visual"] = True
         if len(task.assignees) > 1:
             # Everyone on a multi-player Task, in slot order.
             view["assignees"] = list(task.assignees)
@@ -80,7 +85,9 @@ class TaskBoard:
         }
 
     def assign(self, task: Task, seat: int) -> dict[str, Any]:
-        self.stats[seat].assigned.append(task.id)
+        # Fake Tasks never count toward Productivity, the Seat's own included.
+        if not task.fake:
+            self.stats[seat].assigned.append(task.id)
         view = self.view(task, seat)
         self.views[seat][task.id] = view
         return view
@@ -108,6 +115,19 @@ class TaskBoard:
 
 def board(state: GameState) -> TaskBoard:
     return state.ext[NAME]
+
+
+def shared_task_pool(game: Game) -> list[int]:
+    """Seats that Shared Tasks (relays, split-key, audits) are drawn from at setup.
+
+    Crewmates only, unless an installed module lets Impostors hold Shared Tasks
+    (``GameModule.shares_tasks_with_impostors``, set by Sabotage): then every
+    Seat, so holding one says nothing about a player's role.
+    """
+    players = game.state.players
+    if any(m.shares_tasks_with_impostors for m in game.rules.modules):
+        return [p.seat for p in players]
+    return [p.seat for p in players if not p.is_impostor]
 
 
 @dataclass(frozen=True)
@@ -169,9 +189,13 @@ class TasksModule(GameModule):
         )
         state.ext[NAME] = b
         game.event("tasks.generated", tasks=[t.to_record() for t in graph])
-        for seat in crew:
-            views = [b.assign(task, seat) for task in graph.of(seat)]
-            game.observe(seat, "tasks.assigned", tasks=views)
+        for p in state.players:
+            # Impostors are briefed too when they hold Tasks (Fake Tasks, or Shared
+            # Tasks under Sabotage); a brief never says whether a Task is fake.
+            if p.is_impostor and not graph.of(p.seat):
+                continue
+            views = [b.assign(task, p.seat) for task in graph.of(p.seat)]
+            game.observe(p.seat, "tasks.assigned", tasks=views)
 
     def on_meeting_end(self, game: Game, meeting: int) -> None:
         """Hand unfinished Tasks of dead or ejected players to living Crewmates."""
@@ -179,7 +203,9 @@ class TasksModule(GameModule):
         living_crew = [p.seat for p in state.living() if not p.is_impostor]
         rng = game.rng.fork(f"{NAME}/reassign/{meeting}")
         for task in b.graph:
-            if task.done or task.fake or task.closed or task_kind(task.kind).manages_reassignment:
+            # Fake Tasks are handed on too (and stay fake), so whether an ejected
+            # player's Tasks reappear says nothing about its role.
+            if task.done or task.closed or task_kind(task.kind).manages_reassignment:
                 continue
             for slot, seat in enumerate(task.assignees):
                 options = [s for s in living_crew if s not in task.assignees]
@@ -225,20 +251,26 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
         stats = b.stats[seat]
         waiting = [r for r in task.requires if r not in done_before]
         if waiting:
-            stats.blocked += 1
+            if not task.fake:
+                stats.blocked += 1
             game.event("tasks.blocked", seat=seat, task=task.id, waiting_on=waiting)
             game.observe(seat, "tasks.blocked", task=task.id, waiting_on=waiting)
             continue
-        correct = task_kind(task.kind).grade(task.content, action.answer)
+        answer = action.answer
+        for module in game.rules.modules:
+            answer = module.submitted_answer(game, seat, task, answer)
+        correct = task_kind(task.kind).grade(task.content, answer)
         game.event("tasks.graded", seat=seat, task=task.id, correct=correct, fake=task.fake)
-        rc.scratch.setdefault(GRADED, []).append((seat, task.id, action.answer, correct))
+        rc.scratch.setdefault(GRADED, []).append((seat, task.id, answer, correct))
         # Private: only the worker learns the grade.
         game.observe(seat, "tasks.graded", task=task.id, correct=correct)
         if not correct:
-            stats.wrong += 1
+            if not task.fake:
+                stats.wrong += 1
         elif not task.done:
             task.done, task.done_by, task.done_round = True, seat, rc.round
-            stats.done += 1
+            if not task.fake:
+                stats.done += 1
             b.known_done[seat].add(task.id)
 
 

@@ -53,8 +53,12 @@ class GameConfig:
     splitkey_tasks: int = 1
     splitkey_window: int = 4
     # Optional Audit Tasks (rules/audit.py): maximum targets checked by two other
-    # Crewmates at setup; these do not gate completion of the submitted work.
+    # players at setup; these do not gate completion of the submitted work.
     audit_tasks: int = 4
+    # Sabotage (rules/sabotage.py): the chance that a solo step (real or fake) is a
+    # Visual Task, whose real completion everyone else in its room sees. Impostors
+    # get ``tasks_per_crewmate`` Fake Tasks each.
+    visual_task_chance: float = 0.25
     # Fixed Impostor seats (tests, and scheduled runs: runs.game_setup). None = drawn
     # from the seed.
     impostor_seats: tuple[int, ...] | None = None
@@ -73,6 +77,7 @@ class GameConfig:
             or self.splitkey_tasks < 0
             or self.splitkey_window < 1
             or not 0 <= self.task_dependency_chance <= 1
+            or not 0 <= self.visual_task_chance <= 1
         ):
             raise ValueError("bad task settings")
         if self.room_chat_budget_chars < 0:

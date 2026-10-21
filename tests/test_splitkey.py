@@ -13,6 +13,7 @@ from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.observations import ActionContext
 from zantine.rng import GameRng
+from zantine.rules import default_modules, default_rules
 from zantine.rules.actions import Action, CallMeeting, Kill, Wait
 from zantine.rules.splitkey import MAX_TERMINAL_DISTANCE, EnterCode, Key, ReadFragment, key, reset
 from zantine.rules.tasks import WorkOnTask, board, route
@@ -370,7 +371,7 @@ def test_the_reset_hook_scrambles_the_code_and_tells_the_holders() -> None:
         ]
 
 
-def test_generation_is_seeded_and_places_three_crewmates_near_the_entry_room() -> None:
+def test_generation_is_seeded_and_places_three_holders_near_the_entry_room() -> None:
     seen: set[int] = set()
     for seed in range(40):
         game = new_game(GameConfig(seed=seed))
@@ -378,10 +379,11 @@ def test_generation_is_seeded_and_places_three_crewmates_near_the_entry_room() -
         graph = board(game.state).graph
         keys = [t for t in graph if t.kind == "split_key"]
         work = [t for t in graph if t.kind != "audit"]
-        assert len(keys) == 1 and len(work) == 16 + 2 + 1
+        # 16 solo steps, 4 Fake Tasks, 2 relays, 1 split-key.
+        assert len(keys) == 1 and len(work) == 16 + 4 + 2 + 1
         [task] = keys
+        # Holders are drawn from every Seat: Sabotage lets Impostors hold fragments.
         assert len(set(task.assignees)) == 3
-        assert all(not game.state.player(s).is_impostor for s in task.assignees)
         entry, terminals = rooms_of(task)
         assert task.room == entry and len({entry, *terminals}) == 4
         assert game.state.map.meeting_room not in (entry, *terminals)
@@ -397,11 +399,17 @@ def test_split_key_settings_and_small_lobbies() -> None:
     for bad in ({"splitkey_tasks": -1}, {"splitkey_window": 0}):
         with pytest.raises(ValueError, match="bad task settings"):
             GameConfig(**bad)
-    # Fewer than three Crewmates: no split-key Task.
+    # Fewer than three possible holders: no split-key Task. Without Sabotage only
+    # Crewmates hold fragments; with it an Impostor can be one of the three.
     config = GameConfig(num_seats=3, num_impostors=1, tasks_per_crewmate=0, relay_tasks=0)
-    game = Game(config, [IdleBot() for _ in range(3)])
+    crew_only = default_rules([m for m in default_modules() if m.name != "sabotage"])
+    game = Game(config, [IdleBot() for _ in range(3)], rules=crew_only)
     game.start()
     assert not [t for t in board(game.state).graph if t.kind == "split_key"]
+    game = Game(config, [IdleBot() for _ in range(3)])
+    game.start()
+    keys = [t for t in board(game.state).graph if t.kind == "split_key"]
+    assert [sorted(t.assignees) for t in keys] == [[0, 1, 2]]
     config = GameConfig(num_rooms=3, tasks_per_crewmate=0, relay_tasks=0)
     scenario = build_scenario(config, GameRng(0).fork("scenario"))
     with pytest.raises(ValueError, match="four rooms"):
