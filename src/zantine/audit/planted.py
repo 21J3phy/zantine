@@ -428,22 +428,41 @@ def _render(template: Template, e: dict[str, Any], speaker: int, names: dict[int
 # Generation -----------------------------------------------------------------------------
 
 
-def _spots(records: Sequence[GameRecord]) -> list[_Spot]:
+def _spots(g: int, records: Sequence[Record]) -> list[_Spot]:
+    """Every non-empty Meeting statement, from ``meeting_started`` and ``statement`` events
+    only: planting never needs (or rebuilds) the checker's ground truth."""
+    rounds: dict[int, int] = {}
+    stmts: list[StatementRecord] = []
+    for r in sorted((r for r in records if r.get("kind") == "event"), key=lambda r: r["seq"]):
+        d = r["data"]
+        if r["type"] == "meeting_started":
+            rounds[d["meeting"]] = r["round"]
+        elif r["type"] == "statement":
+            stmts.append(
+                StatementRecord(
+                    r["seq"], r["round"], d["meeting"], d["pass_index"], d["order"],
+                    d["speaker"], d["text"],
+                )
+            )  # fmt: skip
     out = []
-    for g, rec in enumerate(records):
-        for m in rec.meetings:
-            stmts = [s for s in rec.statements if s.meeting == m.meeting]
-            speakers = tuple(sorted({s.speaker for s in stmts}))
-            out += [_Spot(g, m.meeting, m.round, s, speakers) for s in stmts if s.text.strip()]
+    for meeting, rnd in rounds.items():
+        mine = [s for s in stmts if s.meeting == meeting]
+        speakers = tuple(sorted({s.speaker for s in mine}))
+        out += [_Spot(g, meeting, rnd, s, speakers) for s in mine if s.text.strip()]
     return out
+
+
+def _names(records: Sequence[Record]) -> dict[int, str]:
+    header = next((r for r in records if r.get("kind") == "header"), {})
+    return {s["seat"]: s["name"] for s in header.get("seats", [])}
 
 
 def generate(games: Sequence[Iterable[Record]], n: int = 400, seed: int = 0) -> list[PlantedClaim]:
     """``n`` Planted Claims over the games' Meetings; the same seed and games give the same set."""
     games = [list(g) for g in games]
-    records = [build_record(g) for g in games]
+    names = [_names(g) for g in games]
     facts = [_Facts(g) for g in games]
-    spots = _spots(records)
+    spots = [spot for g, records in enumerate(games) for spot in _spots(g, records)]
     if not spots:
         raise ValueError("no Meeting statements to plant Claims into")
     rng = GameRng(seed).fork("planted")
@@ -459,7 +478,7 @@ def generate(games: Sequence[Iterable[Record]], n: int = 400, seed: int = 0) -> 
         for attempt in range(len(KINDS) * 8):
             kind = KINDS[(first + attempt // 8) % len(KINDS)]
             planted = _plant(
-                i, phrasing, kind, truth, context, rng.choice(spots), records, facts, rng
+                i, phrasing, kind, truth, context, rng.choice(spots), names, facts, rng
             )
             if planted is not None:
                 break
@@ -476,11 +495,11 @@ def _plant(
     truth: bool,
     context: str,
     spot: _Spot,
-    records: Sequence[GameRecord],
+    names: Sequence[dict[int, str]],
     facts: Sequence[_Facts],
     rng: Rng,
 ) -> PlantedClaim | None:
-    rec, f = records[spot.game], facts[spot.game]
+    f = facts[spot.game]
     speaker = spot.statement.speaker if context == "in_meeting" else rng.choice(spot.speakers)
     denial = kind in ("location", "kill") and rng.random() < DENIAL_SHARE
     e = MAKERS[kind](f, spot, speaker, truth, denial, rng)
@@ -489,7 +508,7 @@ def _plant(
     templates = [t for t in TEMPLATES[_variant(e)][phrasing] if e["subject"] == speaker or not t[1]]
     if not templates:
         return None
-    sentence = _render(rng.choice(templates), e, speaker, rec.names)
+    sentence = _render(rng.choice(templates), e, speaker, names[spot.game])
     text = sentence
     if context == "in_meeting":
         real = spot.statement.text.strip()

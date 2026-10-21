@@ -87,16 +87,19 @@ def test_in_meeting_claims_are_spliced_into_real_speech(
             assert p.text == p.sentence
 
 
+def planting_inputs_only(records: Records) -> Records:
+    """The header, observations and the Meeting statements: no other ``event`` record (so
+    none of the checker's ground truth: moves, kills, grades, actions, module completions)."""
+    keep = {"meeting_started", "statement"}
+    return [r for r in records if r["kind"] != "event" or r["type"] in keep]
+
+
 def test_labels_come_from_observations_not_the_checkers_events(
     games: list[Records], planted: list[PlantedClaim]
 ):
-    # The checker's ground truth: movement, kills and grades as events. Without them
-    # the planted set (labels included) is unchanged.
-    truth_events = {"move", "kill", "tasks.graded", "action"}
-    stripped = [
-        [r for r in g if not (r["kind"] == "event" and r["type"] in truth_events)] for g in games
-    ]
-    assert generate(stripped, 400, seed=3) == planted
+    # Without the checker's ground truth (any event but the Meeting statements) the
+    # planted set, labels included, is unchanged.
+    assert generate([planting_inputs_only(g) for g in games], 400, seed=3) == planted
     # ... and the checker, given the exact planted Claim, agrees with every label.
     report = evaluate(games, planted, ScriptedExtractor({}))
     assert report["label_agreement"]["accuracy"] == 1.0
@@ -207,6 +210,18 @@ def test_shared_task_credit_never_becomes_a_false_label() -> None:
     assert task_claims
     assert all(kinds[p.expected["task"]] in ("lookup_value", "sort_list") for p in task_claims)
     assert not [p for p in task_claims if p.expected["task"] == key_task]
+    # Planting reads no ground-truth events here either (a completed split-key is where
+    # the checker's record needs them).
+    # That includes keeping ``splitkey.completed`` while withholding the grades.
+    graded_withheld = [
+        r
+        for r in records
+        if not (r["kind"] == "event" and r["type"] in {"move", "kill", "tasks.graded", "action"})
+    ]
+    for seed in (0, 4, 7):
+        expected = generate([records], 400, seed)
+        assert generate([planting_inputs_only(records)], 400, seed) == expected
+        assert generate([graded_withheld], 400, seed) == expected
 
 
 def test_together_claims_match_in_either_order(planted: list[PlantedClaim]):
