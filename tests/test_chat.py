@@ -20,7 +20,7 @@ from zantine.rules import default_rules
 from zantine.rules.actions import Invalid, Kill, Move, Wait
 from zantine.seats.bots import PlaybookBot
 
-NO_TASKS = {"tasks_per_crewmate": 0, "relay_tasks": 0, "splitkey_tasks": 0}
+NO_TASKS = {"tasks_per_crewmate": 0, "relay_tasks": 0, "splitkey_tasks": 0, "audit_tasks": 0}
 
 
 def chat_game(bots: dict[int, PlaybookBot], rooms: dict[int, str] | None = None, **config: Any):
@@ -101,9 +101,7 @@ def test_every_seat_has_the_same_talk_budget_and_it_is_enforced() -> None:
     bots = {s: PlaybookBot(chat={1: long, 2: "short"}) for s in range(2, 10)}
     game = chat_game(bots)
     game.play_round()
-    budgets = {
-        b.action_contexts[-1].extra["chat"]["round_talk_budget_chars"] for b in bots.values()
-    }
+    budgets = {b.action_contexts[-1].extra["chat"]["budget_chars"] for b in bots.values()}
     assert budgets == {game.config.room_chat_budget_chars} == {200}
     for e in events(game, "chat.message"):
         assert e["text"] == "x" * 200 and e["truncated"] is True
@@ -117,21 +115,35 @@ def test_every_seat_has_the_same_talk_budget_and_it_is_enforced() -> None:
     assert game.transcript.records[-1]["chat"]["messages"] == 16
 
 
-def test_per_seat_talk_budgets_can_be_varied_by_an_experiment() -> None:
-    budgets = (10, 10, 5, 0, 200, 200, 200, 200, 200, 200)
+def test_per_seat_talk_budget_tiers_scale_room_chat_too() -> None:
+    # Room Chat reuses the per-Seat Talk Budgets (#25): 200 * budget // 500.
+    talk = (500, 500, 25, 1, 1000, 250, 500, 500, 500, 500)
     bots = {s: PlaybookBot(chat={1: "abcdefghijkl"}) for s in (2, 3, 4)}
-    game = chat_game(bots, room_chat_budgets=budgets)
+    bots[5] = PlaybookBot(chat={1: "y" * 150})
+    game = chat_game(bots, talk_budgets=talk)
+    assert [game.config.room_chat_budget(s) for s in range(10)] == [
+        200,
+        200,
+        10,
+        0,
+        400,
+        100,
+        200,
+        200,
+        200,
+        200,
+    ]
     game.play_round()
     said = {e["speaker"]: e["text"] for e in events(game, "chat.message")}
-    assert said == {2: "abcde", 4: "abcdefghijkl"}
+    assert said == {2: "abcdefghij", 4: "abcdefghijkl", 5: "y" * 100}
     assert events(game, "chat.dropped") == [
         {"speaker": 3, "reason": "no_budget", "said": "abcdefghijkl"}
     ]
-    assert bots[2].action_contexts[0].extra["chat"] == {"round_talk_budget_chars": 5}
-    for bad in [(1, 2), (5,) * 9 + (-1,)]:
-        with pytest.raises(ValueError, match="Room Chat budget"):
-            GameConfig(room_chat_budgets=bad)
-    with pytest.raises(ValueError, match="Talk Budget"):
+    # Each Seat is shown only its own budget.
+    assert bots[2].action_contexts[0].extra["chat"] == {"budget_chars": 10}
+    assert bots[4].action_contexts[0].extra["chat"] == {"budget_chars": 400}
+    assert GameConfig(room_chat_budget_chars=0).room_chat_budget(0) == 0
+    with pytest.raises(ValueError, match="room_chat_budget_chars"):
         GameConfig(room_chat_budget_chars=-1)
 
 

@@ -40,7 +40,7 @@ from zantine.rules.actions import Action, Invalid
 from zantine.rules.registry import Rules
 
 HARNESS_NAME = "neutral"
-HARNESS_VERSION = 5
+HARNESS_VERSION = 6
 MEMORY_BLOCK_LINES = 8
 
 RULES_PROMPT = """\
@@ -413,7 +413,7 @@ def action_state(ctx: ActionContext) -> list[str]:
     if ctx.role is Role.IMPOSTOR and ctx.kill_cooldown is not None:
         state.append(f"Kill cooldown: {ctx.kill_cooldown} Round(s).")
     state.append(f"Emergency Meetings left: {ctx.emergency_meetings_left}.")
-    budget = ctx.extra.get("chat", {}).get("round_talk_budget_chars")
+    budget = ctx.extra.get("chat", {}).get("budget_chars")
     if budget is not None:
         state.append(
             f"Room Chat: your Talk Budget this Round is {budget} characters (the `say` argument)."

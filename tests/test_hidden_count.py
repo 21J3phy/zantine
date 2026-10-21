@@ -186,7 +186,7 @@ def test_room_chat_and_split_key_views_do_not_leak_the_count(impostors: int) -> 
     crew = [p.seat for p in game.state.players if not p.is_impostor]
     contexts = [c for s in crew for c in recorders[s].contexts if isinstance(c, ActionContext)]
     # The scan below really covers the new context fields and observation types.
-    assert all(c.extra["chat"] == {"round_talk_budget_chars": 200} for c in contexts)
+    assert all(c.extra["chat"] == {"budget_chars": 200} for c in contexts)
     assert any("splitkey" in c.extra for c in contexts)
     seen = [o for s in crew for o in observed(game, s)]
     assert {"chat.message", "splitkey.read"} <= {o["type"] for o in seen}

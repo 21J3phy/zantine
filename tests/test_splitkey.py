@@ -377,7 +377,8 @@ def test_generation_is_seeded_and_places_three_crewmates_near_the_entry_room() -
         game.start()
         graph = board(game.state).graph
         keys = [t for t in graph if t.kind == "split_key"]
-        assert len(keys) == 1 and len(graph) == 16 + 2 + 1
+        work = [t for t in graph if t.kind != "audit"]
+        assert len(keys) == 1 and len(work) == 16 + 2 + 1
         [task] = keys
         assert len(set(task.assignees)) == 3
         assert all(not game.state.player(s).is_impostor for s in task.assignees)

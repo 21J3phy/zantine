@@ -53,7 +53,7 @@ class ChatModule(GameModule):
         )
 
     def context_extra(self, game: Game, seat: int) -> dict[str, Any] | None:
-        return {"round_talk_budget_chars": game.config.room_chat_budget(seat)}
+        return {"budget_chars": game.config.room_chat_budget(seat)}
 
     def result_extra(self, game: Game) -> dict[str, Any] | None:
         log: ChatLog = game.state.ext[NAME]
