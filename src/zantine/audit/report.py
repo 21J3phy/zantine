@@ -152,7 +152,7 @@ def run_audit(
         "roles": {role: metrics(_of_role(claims, rec, role)) for role in ("crewmate", "impostor")},
         "totals": metrics(claims),
         "cost": _cost(ledger),
-        "disclosure": disclosure_report(records, rec, claims),
+        "disclosure": disclosure_report(records, rec, claims, statements),
     }
 
 

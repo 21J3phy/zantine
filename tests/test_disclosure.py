@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from helpers import events, make_game
-from zantine.audit import PatternExtractor, run_audit
+from zantine.audit import ExtractionError, PatternExtractor, ScriptedExtractor, claim, run_audit
 from zantine.config import GameConfig
 from zantine.observations import MeetingContext
 from zantine.replay import build_view
@@ -502,3 +502,73 @@ def test_a_later_claim_never_makes_an_earlier_statement_a_disclosure(
     for _ in range(3):
         game.play_round()
     assert pink_contradiction(game)["status"] == status
+
+
+def audit_with(game: Any, payloads: Mapping[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    """Audit with canned Claims for some statements and the pattern extractor for the rest."""
+    pattern = PatternExtractor()
+
+    def extract(item: Any) -> Any:
+        if item.text in payloads:
+            return {"claims": payloads[item.text]}
+        return pattern.extract(item)
+
+    return run_audit(game.transcript.records, ScriptedExtractor(extract))["disclosure"]
+
+
+SAW_BLUE = "I saw Blue in Medbay."
+SAW_BLUE_CLAIM = claim("location", "Blue", SAW_BLUE, room="Medbay", seen=True)
+
+
+@pytest.mark.parametrize(("red_claim", "marked"), [(SAW_BLUE_CLAIM, True), (None, False)])
+def test_a_seen_claim_puts_its_speaker_there(red_claim: Any, marked: bool) -> None:
+    """ "I saw Blue in Medbay" says Red was in Medbay; Pink saw Red in Weapons all along.
+    The same sentence read as a plain Claim about Blue says nothing about Red."""
+    bots = {
+        RED: PlaybookBot(actions={1: Move("Weapons")}, speech={1: SAW_BLUE}),
+        PINK: PlaybookBot(
+            actions={1: Move("Weapons")}, speech={1: "Red was in Weapons in round 2."}
+        ),
+        CALLER: PlaybookBot(actions={3: CallMeeting()}),
+    }
+    game = make_game(bots=bots)
+    for _ in range(3):
+        game.play_round()
+    plain = claim("location", "Blue", SAW_BLUE, room="Medbay")
+    report = audit_with(game, {SAW_BLUE: [red_claim or plain]})
+    found = [o for o in report["observations"] if o["kind"] == "claim_contradiction"]
+    if not marked:
+        assert found == []
+        return
+    (obs,) = found
+    assert (obs["observer"], obs["subject"], obs["room"]) == (PINK, RED, "Medbay")
+    assert (obs["status"], obs["lag"]) == ("disclosed", 0)
+
+
+@pytest.mark.parametrize(("seen", "status"), [(False, "disclosed"), (True, "undisclosed")])
+def test_not_having_seen_something_is_not_a_denial(seen: bool, status: str) -> None:
+    denial = (
+        "Red was not in Cafeteria in round 2." if not seen else "I didn't see Red in Cafeteria."
+    )
+    game = apart_game("I was in Cafeteria in round 2.", denial)
+    payload = claim("location", "Red", denial, room="Cafeteria", negated=True, seen=seen)
+    if not seen:
+        payload["round"] = 2
+    report = audit_with(game, {denial: [payload]})
+    (obs,) = [o for o in report["observations"] if o["observer"] == PINK]
+    assert obs["status"] == status
+
+
+def test_statement_errors_are_reported_per_seat() -> None:
+    game = body_game(delay=0)
+    pattern = PatternExtractor()
+
+    def extract(item: Any) -> Any:
+        if item.speaker == "Orange":
+            raise ExtractionError("unusable")
+        return pattern.extract(item)
+
+    report = run_audit(game.transcript.records, ScriptedExtractor(extract))["disclosure"]
+    assert seat(report, ORANGE)["statement_errors"] == 3
+    assert seat(report, ORANGE)["undisclosed"] == 2
+    assert seat(report, PINK)["statement_errors"] == 0

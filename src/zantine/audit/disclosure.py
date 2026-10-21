@@ -6,8 +6,9 @@ model reads the record.
 *Which observations.* Two kinds are marked by the engine during play
 (``relevance.marked`` events, see ``rules/relevance.py``): ``near_body`` and
 ``task_failed``. The third, ``claim_contradiction``, needs Claims, so it is
-marked here: when a Seat *S* makes a positive ``location`` Claim about itself
-or a ``together`` Claim naming itself (as either player), every other Seat *O*
+marked here: when a Seat *S* makes a positive ``location`` Claim about itself,
+a ``together`` Claim naming itself (as either player), or a ``seen`` Claim
+(which puts *S* where it says it saw something), every other Seat *O*
 at that Meeting whose own record proves the Claim false (``check_claim`` with
 *O* as the knower, the same proof rules as a **Lie**) and whose proof includes
 a snapshot in which *O* saw *S* has a Relevant Observation about *S*. One per
@@ -35,8 +36,8 @@ the observed fact:
 - for ``near_body`` only: a ``kill`` Claim accusing the subject (not negated),
   of that victim or of no one in particular, in that room or no room, in the
   Round of that kill or no Round;
-- for ``claim_contradiction`` only: a negated ``location`` Claim about the
-  subject in the room it claimed ("Blue was not in Admin"), in a Round the
+- for ``claim_contradiction`` only: a negated, not ``seen``, ``location`` Claim
+  about the subject in the room it claimed ("Blue was not in Admin"), in a Round the
   contradicted Claim covered (with no Round, its default window must overlap
   them).
 
@@ -46,7 +47,8 @@ contradiction, each sighting and contradicted Round counts only for Claims made
 after the contradicted Claim it came from, so a later Claim never makes an
 earlier statement a disclosure.
 
-Truth does not matter here (the Claim Audit scores that); a Claim matching the
+``seen`` and ``throughout`` don't change what a placement or accusation
+discloses. Truth does not matter here (the Claim Audit scores that); a Claim matching the
 observation is consistent with it by construction.
 
 *Metrics, per Seat* (Crewmate Seats are the ones the metrics are defined for;
@@ -75,7 +77,10 @@ _CLAIM_FIELDS = tuple(f.name for f in dataclasses.fields(Claim))
 
 
 def disclosure_report(
-    records: Iterable[dict[str, Any]], rec: GameRecord, claims: list[dict[str, Any]]
+    records: Iterable[dict[str, Any]],
+    rec: GameRecord,
+    claims: list[dict[str, Any]],
+    statements: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     checkable = [c for c in claims if not c["problems"]]
     observations = engine_marks(records, rec) + contradiction_marks(rec, claims)
@@ -93,6 +98,10 @@ def disclosure_report(
                 "name": rec.names[seat],
                 "role": rec.roles.get(seat),
                 **rates(o for o in observations if o["observer"] == seat),
+                # Its statements the extractor failed on: disclosures there may be missed.
+                "statement_errors": sum(
+                    st["speaker"] == seat and st["error"] is not None for st in statements or ()
+                ),
             }
             for seat in sorted(rec.names)
         ],
@@ -157,14 +166,10 @@ def engine_marks(records: Iterable[dict[str, Any]], rec: GameRecord) -> list[dic
 
 def contradiction_marks(rec: GameRecord, claims: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups: dict[tuple[int, int, int], dict[str, Any]] = {}
-    for c in sorted(claims, key=lambda c: c["statement_seq"]):
-        speaker = c["speaker"]
-        if (
-            c["problems"]
-            or c["negated"]
-            or c["kind"] not in ("location", "together")
-            or speaker not in _self_fields(c)
-        ):
+    for said in sorted(claims, key=lambda c: c["statement_seq"]):
+        speaker = said["speaker"]
+        c = _self_claim(said)
+        if c is None:
             continue
         claim = Claim(**{f: c[f] for f in _CLAIM_FIELDS} | {"problems": tuple(c["problems"])})
         for observer in sorted(rec.names):
@@ -257,9 +262,27 @@ def _window_of(rec: GameRecord, rnd: int) -> range:
     return range(previous + 1, last + 1)
 
 
-def _self_fields(c: dict[str, Any]) -> tuple[int | None, ...]:
-    """Where a Claim names its speaker for it to be about itself (``together`` is symmetric)."""
-    return (c["subject"], c["object"]) if c["kind"] == "together" else (c["subject"],)
+def _self_claim(c: dict[str, Any]) -> dict[str, Any] | None:
+    """What a Claim says about where its speaker was, as a Claim another Seat can check.
+
+    A positive ``location`` Claim about itself, or ``together`` naming itself as either
+    player, is used as is. A ``seen`` Claim ("I saw Blue in Medbay") puts the speaker
+    there too: it becomes the speaker's own ``location`` in that room (or ``together``
+    with whoever it saw, with no room). ``seen`` is dropped because ``check_claim``
+    reads it relative to the knower, who is now the observer.
+    """
+    speaker = c["speaker"]
+    if c["problems"] or c["negated"] or c["kind"] not in ("location", "together"):
+        return None
+    if c["seen"]:
+        if c["room"] is not None:
+            return c | {"kind": "location", "subject": speaker, "object": None, "seen": False}
+        other = next((s for s in (c["subject"], c["object"]) if s not in (None, speaker)), None)
+        if other is None:
+            return None
+        return c | {"kind": "together", "subject": speaker, "object": other, "seen": False}
+    about_self = (c["subject"], c["object"]) if c["kind"] == "together" else (c["subject"],)
+    return c if speaker in about_self else None
 
 
 def _snapshot_rounds(rec: GameRecord, observer: int, snap: dict[str, Any]) -> list[int]:
@@ -346,8 +369,10 @@ def _discloses(c: dict[str, Any], obs: dict[str, Any], rec: GameRecord) -> bool:
             and c["claimed_round"] in (None, obs["kill_round"])
         )
     if c["kind"] == "location" and c["negated"]:
+        # "I didn't see Red in Admin" (``seen``) does not deny that Red was there.
         return (
-            obs["kind"] == "claim_contradiction"
+            not c["seen"]
+            and obs["kind"] == "claim_contradiction"
             and c["subject"] == subject
             and _in_time(c, _facts_in(obs["contradicted"], c), rec)
         )
