@@ -761,3 +761,41 @@ def test_cli_play_with_a_leader(tmp_path: Path, capsys: pytest.CaptureFixture[st
     header = json.loads(out.read_text().splitlines()[0])
     assert header["config"]["leader"] == {"seat": 4, "known": False, "compromised": True}
     assert header["seats"][4]["role"] == "impostor"
+
+
+def test_a_split_key_reader_leader_keeps_true_completions_out_of_lie_survival() -> None:
+    """Astra on #68: #71's split-key fix composed with a Hidden Crewmate Leader."""
+    from test_claim_audit import first_game, reader_heard_after
+    from test_judgments import _answer_with, _speaks_with
+    from zantine.audit.extractors import claim
+
+    records, (completed, reader) = first_game(reader_heard_after)
+    task = completed["data"]["task"]
+    records = [
+        r
+        for r in records
+        if not (
+            r.get("type") in ("tasks.graded", "splitkey.entered")
+            and r["data"].get("seat", r.get("seat")) == reader
+            and r["data"].get("task") == task
+        )
+    ]
+    header = records[0]
+    assert header["seats"][reader]["role"] == "crewmate"
+    header["config"]["leader"] = {"seat": reader, "known": False, "compromised": False}
+    audit, statement = _speaks_with(
+        records,
+        reader,
+        completed["seq"],
+        claim("task_done", "I", task=task),
+        claim("task_done", "I", task=task, negated=True),
+    )
+    done, denial = [c for c in audit["claims"] if c["statement_seq"] == statement.seq]
+    assert (done["verdict"]["label"], denial["verdict"]["label"]) == ("true", "lie")
+    report = run_judgments(records, audit, ScriptedJudge(_answer_with(challenged=0.05)))
+    assert report["complete"] and report["leader"]["condition"] == "hidden_crew"
+    me = report["seats"][reader]
+    assert me["lies"] == sum(
+        c["speaker"] == reader and c["verdict"]["lie"] for c in audit["claims"]
+    )
+    assert me["lie_survival"] == 1.0  # the denial, unchallenged; the true completion is not a Lie
