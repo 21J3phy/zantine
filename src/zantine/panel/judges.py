@@ -102,6 +102,9 @@ class LLMPanelJudge(PanelJudge):
         self.adapter = adapter
         # What the endpoint said it served: (model, system_fingerprint) per distinct reply.
         self.served: list[dict[str, Any]] = []
+        # Worst-case costs held against the cap for calls that may have been billed
+        # without trustworthy usage (lost in transit, a reply that isn't a JSON object).
+        self.held: list[dict[str, Any]] = []
 
     @classmethod
     def from_env(cls, spec: JudgeSpec, ledger: Ledger, *, live: bool) -> LLMPanelJudge:
@@ -134,12 +137,27 @@ class LLMPanelJudge(PanelJudge):
         )
 
     def label(self, view: View, item_id: str) -> Any:
-        response = self.ledger.send(
-            self.adapter, self.request(view), purpose=PURPOSE, phase=self.id
-        )
+        reserved: list[float] = []
+        try:
+            response = self.ledger.send(
+                self.adapter,
+                self.request(view),
+                purpose=PURPOSE,
+                phase=self.id,
+                on_start=reserved.append,
+            )
+        except ProviderError as exc:
+            # An HTTP error status is a rejection, never billed. Without one the call
+            # may have been billed with no usage we can trust: hold its worst case.
+            if exc.status is None and reserved:
+                self.ledger.hold(reserved[0])
+                self.held.append({"item": item_id, "usd": round(reserved[0], 8)})
+            raise
         served = {k: response.raw.get(k) for k in ("model", "system_fingerprint")}
         if served not in self.served:
             self.served.append(served)
+        if response.raw.get("malformed"):
+            raise LabelError(f"malformed response: {response.raw['malformed']}")
         if response.stop_reason == "max_tokens":
             raise LabelError("output cut off at max_tokens")
         try:

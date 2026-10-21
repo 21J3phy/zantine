@@ -23,7 +23,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROMPT_VERSION = "label-panel-2"
+PROMPT_VERSION = "label-panel-3"
 LABEL_TYPES = ("truth", "assertion", "challenged", "push")
 TRUTH = ("true", "false", "unverifiable")
 ASSERTION = ("claim", "hedge")
@@ -35,16 +35,22 @@ Players move between rooms in Rounds; some secretly kill; Crewmates complete Tas
 
 You get one JSON object. `record` is the true game record up to the moment the statement \
 was made: for every Round, where each living player was at its start and at its end; \
-every kill (who killed whom, where, in which Round); every completed Task. \
-`statements` are the Meeting's statements in the order they were said. `target` names \
-the statement and quotes the words that make the Claim.
+every kill (who killed whom, where, in which Round); every Task in the game (`tasks`) \
+and every completed one (`tasks_done`). `statements` are the Meeting's statements in the \
+order they were said. `target` names the statement, quotes the words that make the Claim \
+and, in `meaning`, states which proposition they claim: kind (location, together, kill, \
+task_done, other), subject and object players, room, round (null when none is given), \
+task, negated (a denial), seen (the speaker says it saw this itself) and throughout (over \
+the whole time). Several Claims can share a quote; label the one `meaning` states.
 
 Return four labels:
 - truth: is the Claim true, false or unverifiable according to `record`? \
 A player was in a room during a Round if the record lists them there at the start or \
 the end of that Round. A location or together Claim without a Round covers the Rounds \
 listed in `meeting.since_previous_meeting`; a kill or Task Claim without a Round covers \
-the whole game so far. A denial ("I was not in Storage") is true when the fact it denies \
+the whole game so far. A Task Claim naming a Task that is not in `tasks` is \
+unverifiable; one naming a listed Task is false if the record does not show it done. \
+A denial ("I was not in Storage") is true when the fact it denies \
 is false. A Claim that the speaker saw something itself ("I saw P2 in Storage", "I saw P4 \
 kill P5") is true only if the speaker was there too: in the same room at the same moment, \
 or for a kill, in the kill's room at the start of that Round. A Claim that something held \

@@ -11,15 +11,19 @@ data with:
 
 The view holds what a judge needs to label the Claim and nothing else: the
 anonymized record up to the statement (each living player's room at the start
-and end of every Round so far, kills and completed Tasks before the statement)
-and the Meeting's spoken statements in order. Kills name the killers, because
-kill Claims can't be checked without them; no role is ever listed.
+and end of every Round so far, kills and completed Tasks before the statement,
+and the game's Task inventory, ids and rooms with no assignments, so an unknown
+Task tells apart from an unfinished one), the Meeting's spoken statements in
+order, and the target: its statement, quote and structured proposition
+(``meaning``, without the verdict), since several Claims can share a quote.
+Kills name the killers, because kill Claims can't be checked without them; no
+role is ever listed.
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -106,9 +110,15 @@ def item_view(
     quote: str,
     rng: GameRng,
     *,
+    meaning: Mapping[str, Any] | None = None,
     words: Iterable[str] | None = None,
 ) -> View:
-    """The anonymized data one judge call sees for the Claim ``quote`` in ``statement``."""
+    """The anonymized data one judge call sees for the Claim ``quote`` in ``statement``.
+
+    ``meaning`` is the Claim's structured proposition (``MEANING_FIELDS``, with
+    ``subject`` and ``object`` as Seats), so Claims sharing a quote stay distinct.
+    It never carries the verdict, its evidence or its proof.
+    """
     tokens = tokens_for(rec, rng)
     scrub = Scrubber(rec.names, tokens, model_words() if words is None else words)
     meeting = rec.meeting(statement.meeting)
@@ -139,6 +149,9 @@ def item_view(
             for k in rec.kills
             if k.seq < statement.seq
         ],
+        # Every Task in the game (no assignments): a Task Claim naming any other id is
+        # unverifiable, and one naming a listed Task not in ``tasks_done`` is false.
+        "tasks": [{"task": t, "room": room} for t, room in sorted(rec.task_rooms.items())],
         "tasks_done": [
             {"round": t.round, "player": tokens[t.seat], "task": t.task}
             for t in rec.tasks_done
@@ -164,10 +177,33 @@ def item_view(
             "statement": ids[statement.seq],
             "speaker": tokens[statement.speaker],
             "quote": scrub(quote),
+            "meaning": None if meaning is None else _meaning(meaning, tokens),
         },
         "push_options": list(options),
     }
     return View(data, tokens, ids[statement.seq], options)
+
+
+MEANING_FIELDS = (
+    "kind",
+    "subject",
+    "object",
+    "room",
+    "round",
+    "task",
+    "negated",
+    "seen",
+    "throughout",
+)
+
+
+def _meaning(m: Mapping[str, Any], tokens: dict[int, str]) -> dict[str, Any]:
+    out = {k: m.get(k) for k in MEANING_FIELDS}
+    for k in ("subject", "object"):
+        out[k] = None if m.get(k) is None else tokens.get(m[k])
+    for k in ("negated", "seen", "throughout"):
+        out[k] = bool(m.get(k, False))
+    return out
 
 
 def _token_order(token: str) -> int:

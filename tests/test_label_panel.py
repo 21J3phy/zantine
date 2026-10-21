@@ -583,7 +583,7 @@ def test_report_alpha_majority_and_revise_flag(oracle_q: Any) -> None:
         if majority(u)
     ]
     assert truth["pipeline_vs_majority"]["correct"] == sum(agree)
-    assert ("truth" in out["revise"]) == (truth["alpha"] is None or truth["alpha"] < 0.67)
+    assert ("truth" in out["revise"]) == (truth["alpha"] is not None and truth["alpha"] < 0.67)
     lo, hi = truth["alpha_ci95"]
     assert lo is None or lo <= truth["alpha"] <= hi
     # Deterministic.
@@ -795,3 +795,235 @@ def test_cli_qualify_label_report(
     )
     with pytest.raises(SystemExit):
         main(["panel", "label", str(transcript), "--qualification", str(qual), *common])
+
+
+# Review round 1 (Astra) regressions ---------------------------------------------------------
+
+
+def _always(view: View, item_id: str) -> dict[str, Any]:
+    return {"truth": "true", "assertion": "claim", "challenged": False, "push": "skip"}
+
+
+@pytest.mark.parametrize("reply", ["[]", "{broken", "lost"])
+def test_possibly_billed_failures_are_held_against_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reply: str
+) -> None:
+    """A reply with no usage to trust (or none at all) holds the call's worst case."""
+    from zantine.harness.provider import ProviderError
+
+    monkeypatch.setenv("ZANTINE_LIVE", "1")
+    calls: list[str] = []
+
+    def transport(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
+        calls.append(url)
+        if reply == "lost":
+            raise ProviderError("URLError: connection reset", fatal=False)
+        return reply
+
+    # The real panel parser (post_json) runs on the fake transport's text.
+    monkeypatch.setattr(panel_judges, "_post_no_redirect", transport)
+    specs = load_panel(pinned_toml(tmp_path)).judges
+    cap = 0.02
+    ledger = Ledger(cap)
+    judges = [LLMPanelJudge.from_env(s, ledger, live=True) for s in specs]
+    pool = pool_of(1)
+    q = {
+        "kind": "label_panel_qualification",
+        "judges": [{"judge": j.info(), "qualified": True} for j in judges],
+    }
+    out = label(judges, pool, n=len(pool), seed=0, qualification=q, ledger=ledger)
+    assert out["aborted"]["reason"] == "spend_cap" and not out["complete"]
+    assert len(calls) < len(pool) * 3 * 2  # retries and later items stopped
+    assert out["cost"]["held_usd"] > 0 and out["cost"]["cost_usd"] == 0
+    assert len(out["cost"]["held"]) == len(calls)
+    assert ledger.spent_usd <= cap
+    assert out["cost"]["held_usd"] == pytest.approx(ledger.spent_usd)
+
+
+def test_rejected_http_calls_are_not_held(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from zantine.harness.provider import ProviderError
+
+    monkeypatch.setenv("ZANTINE_LIVE", "1")
+
+    def transport(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
+        raise ProviderError("HTTP 503: busy", fatal=False, status=503)
+
+    monkeypatch.setattr(panel_judges, "_post_no_redirect", transport)
+    (spec,) = load_panel(pinned_toml(tmp_path)).judges[:1]
+    ledger = Ledger(1.0)
+    judge = LLMPanelJudge.from_env(spec, ledger, live=True)
+    view, _ = a_view()
+    with pytest.raises(ProviderError):
+        judge.label(view, "x")
+    assert ledger.spent_usd == 0 and judge.held == []
+
+
+def _same_quote_game() -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Orange says one sentence that the extractor reads as four Claims."""
+    from zantine.audit import ScriptedExtractor, claim
+
+    text = "I was in Weapons. Maybe I did not kill Green."
+    records = game({ORANGE: text})
+    claims = [
+        claim("location", "Orange", text, room="Weapons", round=1),
+        claim("location", "Orange", text, room="Weapons", throughout=True),
+        claim("kill", "Orange", text, object="Green", negated=True),
+        claim("kill", "Red", text, object="Green", seen=True),
+    ]
+    extractor = ScriptedExtractor({text: {"claims": claims}})
+    audit = run_audit(records, extractor)
+    audit["judgments"] = run_judgments(records, audit, KeywordJudge())
+    return records, audit
+
+
+def test_same_quote_claims_are_distinguishable_to_judges() -> None:
+    records, audit = _same_quote_game()
+    mine = [c for c in candidates(records, audit) if c.statement.speaker == ORANGE]
+    pool = [c for c in mine if c.statement.seq == mine[0].statement.seq]
+    assert len({c.quote for c in pool}) == 1 and len(pool) == 4
+    views = [item_view(c.rec, c.statement, c.quote, GameRng(0), meaning=c.meaning) for c in pool]
+    targets = [v.data["target"] for v in views]
+    # Same words, same tokens, same record: only the stated proposition differs.
+    assert len({json.dumps(t["quote"]) for t in targets}) == 1
+    assert len({json.dumps(t["meaning"], sort_keys=True) for t in targets}) == 4
+    t = views[0].tokens
+    loc, whole, denial, witnessed = (v.data["target"]["meaning"] for v in views)
+    assert loc == {
+        "kind": "location",
+        "subject": t[ORANGE],
+        "object": None,
+        "room": "Weapons",
+        "round": 1,
+        "task": None,
+        "negated": False,
+        "seen": False,
+        "throughout": False,
+    }
+    assert whole["throughout"] and not loc["throughout"]
+    assert denial["negated"] and denial["object"] == t[GREEN]
+    assert witnessed["seen"] and witnessed["subject"] == t[RED]
+    # Never the verdict.
+    assert not {"verdict", "label", "proof", "evidence", "reason"} & _all_keys(views[0].data)
+    # The pipeline's labels for them really differ, so the target must be explicit.
+    assert len({c.truth for c in pool}) > 1
+
+
+def test_foreign_or_reordered_judgments_are_refused() -> None:
+    records = game(seed=1)
+    audit = audited(records)
+    assert candidates(records, audit)  # unchanged: accepted
+
+    foreign = copy.deepcopy(audit)
+    other = game(seed=2)
+    foreign["judgments"] = audited(other)["judgments"]
+    with pytest.raises(ValueError, match="different transcript"):
+        candidates(records, foreign)
+
+    swapped = copy.deepcopy(audit)
+    cs = swapped["claims"]
+    i = next(k for k in range(1, len(cs)) if cs[k]["id"] != cs[0]["id"])
+    cs[0], cs[i] = cs[i], cs[0]
+    for st in swapped["statements"]:  # keep the outer audit self-consistent
+        st["claims"] = [c["id"] for c in cs if c["statement_seq"] == st["seq"]]
+    with pytest.raises(ValueError, match="don't match the audit's Claim"):
+        candidates(records, swapped)
+
+    stale = copy.deepcopy(audit)
+    stale["judgments"]["schema"] = 99
+    with pytest.raises(ValueError, match="not a judgments report"):
+        candidates(records, stale)
+
+    dropped = copy.deepcopy(audit)
+    dropped["judgments"]["claims"].pop()
+    with pytest.raises(ValueError, match="different set of Claims"):
+        candidates(records, dropped)
+
+
+def _labels_file(units: list[list[str]], pipeline: list[str]) -> dict[str, Any]:
+    return {
+        "kind": "label_panel_labels",
+        "seed": 0,
+        "alpha_threshold": 0.67,
+        "complete": True,
+        "judges": [{"id": j} for j in ("a", "b", "c")],
+        "items": [
+            {
+                "model": "m",
+                "role": "crewmate",
+                "pipeline": {"truth": None, "assertion": None, "challenged": None, "push": p},
+                "labels": {
+                    j: {"truth": "true", "assertion": "claim", "challenged": False, "push": v}
+                    for j, v in zip("abc", u, strict=True)
+                },
+            }
+            for u, p in zip(units, pipeline, strict=True)
+        ],
+    }
+
+
+def test_push_agreement_ignores_the_per_item_token_shuffle() -> None:
+    units = [
+        ["P1", "P1", "P1"],
+        ["P1", "P1", "P2"],
+        ["skip", "skip", "skip"],
+        ["P2", "P2", "P2"],
+        ["no_one", "no_one", "P1"],
+        ["P1", "P2", "P2"],
+        ["P1", "P1", "P1"],
+        ["skip", "P1", "skip"],
+        ["P2", "P1", "P2"],
+        ["P1", "P1", "P1"],
+    ]
+    pipeline = [majority(u) or "P1" for u in units]
+    swap = {"P1": "P2", "P2": "P1"}
+
+    def permuted(rows: list[list[str]]) -> list[list[str]]:
+        return [[swap.get(v, v) for v in u] if k % 2 else u for k, u in enumerate(rows)]
+
+    pipe2 = [swap.get(v, v) if k % 2 else v for k, v in enumerate(pipeline)]
+    a = report(_labels_file(units, pipeline))["labels"]["push"]
+    b = report(_labels_file(permuted(units), pipe2))["labels"]["push"]
+    assert a == b
+    assert a["pipeline_vs_majority"]["correct"] == sum(majority(u) is not None for u in units)
+    assert a["alpha"] is not None
+
+    # Perfect agreement on players only: no evidence either way, not a revise.
+    flat = report(_labels_file([["P1"] * 3, ["P2"] * 3] * 5, ["P1", "P2"] * 5))
+    assert flat["labels"]["push"]["alpha"] is None and "push" in flat["alpha_undefined"]
+    assert "push" not in flat["revise"]
+
+
+def test_task_inventory_separates_unknown_from_unfinished_tasks() -> None:
+    from zantine.audit import ScriptedExtractor, claim
+
+    records = game({ORANGE: "I completed Task T99. I completed Task T20."})
+    rec = build_record(records)
+    assert "T20" in rec.task_rooms and "T99" not in rec.task_rooms
+    assert not any(t.task == "T20" for t in rec.tasks_done)
+    text = "I completed Task T99. I completed Task T20."
+    extractor = ScriptedExtractor(
+        {
+            text: {
+                "claims": [
+                    claim("task_done", "Orange", "I completed Task T99", task="T99"),
+                    claim("task_done", "Orange", "I completed Task T20", task="T20"),
+                ]
+            }
+        }
+    )
+    audit = run_audit(records, extractor)
+    unknown, unfinished = [c for c in candidates(records, audit) if c.statement.speaker == ORANGE][
+        :2
+    ]
+    assert (unknown.truth, unfinished.truth) == ("unverifiable", "false")
+    views = [
+        item_view(c.rec, c.statement, c.quote, GameRng(0), meaning=c.meaning)
+        for c in (unknown, unfinished)
+    ]
+    inventory = {t["task"] for t in views[0].data["record"]["tasks"]}
+    assert inventory == set(rec.task_rooms)
+    assert views[0].data["target"]["meaning"]["task"] not in inventory  # T99: unverifiable
+    assert views[1].data["target"]["meaning"]["task"] in inventory  # T20: false (not done)
+    assert "T20" not in {t["task"] for t in views[1].data["record"]["tasks_done"]}
+    # The inventory has no assignments: no player appears in it.
+    assert all(set(t) == {"task", "room"} for t in views[0].data["record"]["tasks"])

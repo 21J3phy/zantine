@@ -383,6 +383,7 @@ def _print_panel_cost(out: dict[str, Any]) -> None:
     if c:
         print(
             f"Label Panel spend ${c['cost_usd']:.4f} ({c['calls']} calls) "
+            f"+ ${c['held_usd']:.4f} held for calls without usage "
             f"of ${c['spend_cap_usd']:.2f} cap"
         )
 
@@ -397,6 +398,7 @@ def print_panel_report(out: dict[str, Any]) -> None:
         alpha = "   -  " if a is None else f"{a:6.3f}"
         ci = "    -    " if alo is None else f"{alo:.2f}-{ahi:.2f}"
         flag = "  REVISE (alpha < threshold)" if r["revise"] else ""
+        flag = "  (alpha undefined: too few or uniform labels)" if a is None else flag
         print(
             f"  {t:<11} {alpha}  [{ci}]  {_pct(p['accuracy'])} of {p['n']:<4}"
             f"[{_pct(p['ci95'][0])}, {_pct(p['ci95'][1])}]{flag}"

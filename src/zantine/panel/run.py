@@ -39,8 +39,11 @@ MIN_PLANTED = 0.95
 ALPHA_THRESHOLD = 0.67
 
 
-def view_for(item_id: str, rec: Any, statement: Any, quote: str, seed: int) -> View:
-    return item_view(rec, statement, quote, GameRng(seed).fork(f"panel/view/{item_id}"))
+def view_for(
+    item_id: str, rec: Any, statement: Any, quote: str, seed: int, meaning: Any = None
+) -> View:
+    rng = GameRng(seed).fork(f"panel/view/{item_id}")
+    return item_view(rec, statement, quote, rng, meaning=meaning)
 
 
 def _label_one(judge: PanelJudge, view: View, item_id: str, attempts: int) -> dict[str, Any]:
@@ -88,9 +91,18 @@ def cost(ledger: Ledger | None, judges: Sequence[PanelJudge]) -> dict[str, Any] 
     if ledger is None:
         return None
     mine = [r for r in ledger.records if r.purpose == PURPOSE]
+    held = {j.id: list(getattr(j, "held", [])) for j in judges}
+    held_usd = {jid: round(sum(h["usd"] for h in hs), 8) for jid, hs in held.items()}
+    by_judge = {
+        j.id: {**summarize(r for r in mine if r.phase == j.id), "held_usd": held_usd[j.id]}
+        for j in judges
+    }
     return {
         **summarize(mine),
-        "by_judge": {j.id: summarize(r for r in mine if r.phase == j.id) for j in judges},
+        # Worst cases held for calls that may have been billed without usage.
+        "held_usd": round(sum(held_usd.values()), 8),
+        "held": [{"judge": jid, **h} for jid, hs in held.items() for h in hs],
+        "by_judge": by_judge,
         "spend_cap_usd": ledger.spend_cap_usd,
         "run_spent_usd": ledger.spent_usd,
     }
@@ -115,7 +127,7 @@ def qualify(
     rows: dict[str, list[dict[str, Any]]] = {j.id: [] for j in judges}
     for p in items:
         rec, st = p.placed()
-        view = view_for(p.id, rec, st, p.quote, seed)
+        view = view_for(p.id, rec, st, p.quote, seed, p.meaning)
         want = "true" if p.truth else "false"
         for j in judges:
             labels, error = runner.run(j, view, p.id)
@@ -226,7 +238,7 @@ def label(
     runner = _Runner(attempts)
     items = []
     for c in sample:
-        view = view_for(c.id, c.rec, c.statement, c.quote, seed)
+        view = view_for(c.id, c.rec, c.statement, c.quote, seed, c.meaning)
         row: dict[str, Any] = {
             "id": c.id,
             "game": c.game,
@@ -279,6 +291,26 @@ def majority(values: Iterable[Any]) -> Any:
     return value if k >= 2 else None
 
 
+def canonical_push(unit: Sequence[Any]) -> list[Any]:
+    """One item's push labels with player tokens renamed by first appearance in judge order.
+
+    ``skip`` and ``no_one`` keep their meaning; the first player any judge names
+    becomes ``player_1``, the next distinct one ``player_2``, and so on. Agreement
+    within the item is unchanged, and any consistent renaming of the item's tokens
+    gives the same result, so alpha no longer pools display tokens across items.
+    """
+    seen: dict[Any, str] = {}
+    out: list[Any] = []
+    for v in unit:
+        if v is None or v in (SKIP, NO_ONE):
+            out.append(v)
+            continue
+        if v not in seen:
+            seen[v] = f"player_{len(seen) + 1}"
+        out.append(seen[v])
+    return out
+
+
 def report(labels: Mapping[str, Any], *, seed: int | None = None) -> dict[str, Any]:
     if labels.get("kind") != "label_panel_labels":
         raise ValueError("not a Label Panel labels file")
@@ -289,8 +321,11 @@ def report(labels: Mapping[str, Any], *, seed: int | None = None) -> dict[str, A
     out: dict[str, Any] = {}
     for t in LABEL_TYPES:
         units = [[(r["labels"].get(j) or {}).get(t) for j in judges] for r in items]
-        alpha = krippendorff_alpha(units)
-        lo, hi = bootstrap_alpha(units, GameRng(seed).fork(f"panel/alpha/{t}"))
+        # Push tokens name different players in every item, so alpha is computed on
+        # a canonical form that doesn't depend on the token shuffle.
+        alpha_units = [canonical_push(u) for u in units] if t == "push" else units
+        alpha = krippendorff_alpha(alpha_units)
+        lo, hi = bootstrap_alpha(alpha_units, GameRng(seed).fork(f"panel/alpha/{t}"))
         hits = defaultdict(list)
         no_majority = 0
         for r, unit in zip(items, units, strict=True):
@@ -308,7 +343,9 @@ def report(labels: Mapping[str, Any], *, seed: int | None = None) -> dict[str, A
             "alpha": None if alpha is None else round(alpha, 6),
             "alpha_ci95": [lo, hi],
             "units": sum(sum(v is not None for v in u) >= 2 for u in units),
-            "revise": alpha is None or alpha < threshold,
+            # Undefined alpha (fewer than two pairable values, or a single value used
+            # throughout) is listed under ``alpha_undefined``, not as a reason to revise.
+            "revise": alpha is not None and alpha < threshold,
             "pipeline_vs_majority": proportion(sum(overall), len(overall)),
             "by_stratum": {k: proportion(sum(v), len(v)) for k, v in sorted(hits.items())},
             "no_majority": no_majority,
@@ -324,5 +361,6 @@ def report(labels: Mapping[str, Any], *, seed: int | None = None) -> dict[str, A
         "strata": labels.get("strata"),
         "labels": out,
         "revise": [t for t in LABEL_TYPES if out[t]["revise"]],
+        "alpha_undefined": [t for t in LABEL_TYPES if out[t]["alpha"] is None],
         "cost": labels.get("cost"),
     }

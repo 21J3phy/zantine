@@ -23,7 +23,11 @@ from typing import Any, Protocol
 
 from zantine.audit.record import GameRecord, StatementRecord, build_record
 from zantine.judge.batches import NO_ONE, SKIP
-from zantine.judge.report import check_audit_matches, transcript_digest
+from zantine.judge.report import (
+    JUDGMENTS_SCHEMA_VERSION,
+    check_audit_matches,
+    transcript_digest,
+)
 from zantine.rng import GameRng
 
 Record = dict[str, Any]
@@ -40,6 +44,8 @@ class Candidate:
     rec: GameRecord
     statement: StatementRecord
     quote: str
+    # The Claim's structured proposition (no verdict): ``anonymize.MEANING_FIELDS``.
+    meaning: Mapping[str, Any]
     # The pipeline's labels. ``push`` is ("seat", n), "skip", "no_one" or None.
     truth: str
     assertion: str | None
@@ -65,15 +71,13 @@ def candidates(records: Sequence[Record], audit: Mapping[str, Any]) -> list[Cand
     game = transcript_digest(records)[:12]
     models = {s["seat"]: seat_model(s.get("controller")) for s in rec.header.get("seats", [])}
     by_seq = {st.seq: st for st in rec.statements}
-    judgments = audit.get("judgments") or {}
-    rows = {r["index"]: r for r in judgments.get("claims", [])}
-    pushes = {s["seq"]: s for s in judgments.get("statements", [])}
+    rows, pushes = _judgments(audit, records, rec)
     out = []
     for i, c in enumerate(audit["claims"]):
         st = by_seq[c["statement_seq"]]
         if not st.text.strip():
             continue
-        row = rows.get(i, {})
+        row = rows[i] if rows else {}
         asserted = row.get("asserted")
         assertion = None if asserted is None else ("claim" if asserted["value"] >= 0.5 else "hedge")
         out.append(
@@ -86,6 +90,7 @@ def candidates(records: Sequence[Record], audit: Mapping[str, Any]) -> list[Cand
                 rec=rec,
                 statement=st,
                 quote=c["quote"],
+                meaning=claim_meaning(c),
                 truth=TRUTH_OF[c["verdict"]["label"]],
                 assertion=assertion,
                 challenged=row.get("challenged"),
@@ -93,6 +98,53 @@ def candidates(records: Sequence[Record], audit: Mapping[str, Any]) -> list[Cand
             )
         )
     return out
+
+
+def claim_meaning(c: Mapping[str, Any]) -> dict[str, Any]:
+    """An audit Claim's proposition, with Seats; never its verdict, evidence or proof."""
+    return {
+        "kind": c["kind"],
+        "subject": c["subject"],
+        "object": c["object"],
+        "room": c["room"],
+        "round": c["claimed_round"],
+        "task": c["task"],
+        "negated": c["negated"],
+        "seen": c.get("seen", False),
+        "throughout": c.get("throughout", False),
+    }
+
+
+def _judgments(
+    audit: Mapping[str, Any], records: Sequence[Record], rec: GameRecord
+) -> tuple[list[Mapping[str, Any]], dict[int, Mapping[str, Any]]]:
+    """The judgments' Claim rows (in audit order) and push rows, after checking they were
+    made from this transcript and this audit; refuses anything else. Empty if none."""
+    j = audit.get("judgments")
+    if not j:
+        return [], {}
+    if j.get("kind") != "judgments" or j.get("schema") != JUDGMENTS_SCHEMA_VERSION:
+        raise ValueError("the audit's judgments are not a judgments report this code reads")
+    if j.get("transcript_sha256") != transcript_digest(records):
+        raise ValueError("the audit's judgments were made from a different transcript")
+    claims = audit["claims"]
+    rows = list(j.get("claims", []))
+    if len(rows) != len(claims):
+        raise ValueError("the audit's judgments cover a different set of Claims")
+    by_seq = {st.seq: st for st in rec.statements}
+    for i, (row, c) in enumerate(zip(rows, claims, strict=True)):
+        st = by_seq[c["statement_seq"]]
+        own_id = c["id"].rsplit(".c", 1)[0] == f"m{st.meeting}.p{st.pass_index}.o{st.order}"
+        bound = (row.get("index"), row.get("id"), row.get("speaker"), row.get("label"))
+        if not own_id or bound != (i, c["id"], c["speaker"], c["verdict"]["label"]):
+            raise ValueError(f"judgments for Claim {c['id']!r} don't match the audit's Claim {i}")
+    pushes: dict[int, Mapping[str, Any]] = {}
+    for row in j.get("statements", []):
+        st = by_seq.get(row.get("seq"))
+        if st is None or (row.get("speaker"), row.get("meeting")) != (st.speaker, st.meeting):
+            raise ValueError(f"judged statement {row.get('seq')!r} is not in the transcript")
+        pushes[st.seq] = row
+    return rows, pushes
 
 
 def _push(row: Mapping[str, Any] | None) -> Any:
@@ -153,6 +205,8 @@ class PlantedItem:
     text: str  # the whole statement
     quote: str  # the planted sentence
     truth: bool
+    # The planted proposition (``anonymize.MEANING_FIELDS``, Seats), if the source has it.
+    meaning: Mapping[str, Any] | None = None
 
     def placed(self) -> tuple[GameRecord, StatementRecord]:
         """The game record with the planted statement in place of the real one."""
@@ -201,6 +255,7 @@ class PlantedReport:
                     text=d["text"],
                     quote=d["sentence"],
                     truth=bool(d["truth"]),
+                    meaning=d.get("expected"),
                 )
             )
         return out
