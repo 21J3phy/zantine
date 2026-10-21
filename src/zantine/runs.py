@@ -54,6 +54,7 @@ from zantine.scenario import build_scenario
 from zantine.schedule import (
     EFFORT,
     EFFORT_PER_LEVEL,
+    MINORITY,
     VERIFICATION,
     VERIFICATION_BLOCKS,
     VERIFICATION_NEW_PROTOCOLS,
@@ -61,6 +62,7 @@ from zantine.schedule import (
     load_pool,
     make_effort_manifest,
     make_manifest,
+    make_minority_manifest,
     make_verification_manifest,
     seat_lineup,
     summary,
@@ -93,7 +95,14 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     entries, impostor_positions = seat_lineup(game)
-    config = GameConfig(seed=game["seed"], **{**manifest.get("config", {}), **game["config"]})
+    overrides = {**manifest.get("config", {}), **game["config"]}
+    if overrides.get("style_mask") and not hasattr(GameConfig, "style_mask"):
+        # Never play a mask-on game without the mask: it would silently become mask-off.
+        raise ValueError(
+            f"{game['id']} is a Style Mask game, but this engine has no Style Mask "
+            "(GameConfig.style_mask arrives with #66)"
+        )
+    config = GameConfig(seed=game["seed"], **overrides)
     if impostor_positions or game.get("talk"):
         scenario = build_scenario(config, GameRng(config.seed).fork("scenario"))
         seats = tuple(s for s, pos in enumerate(scenario.seat_order) if pos in impostor_positions)
@@ -117,6 +126,31 @@ def check_seating(game: dict[str, Any], header: dict[str, Any]) -> None:
     effort = game.get("effort")
     if effort is not None and any(s["controller"].get("effort") != effort for s in seats):
         raise RuntimeError(f"{game['id']}: Seats did not play at effort {effort!r}")
+
+
+def planned_setup(manifest: dict[str, Any], game: dict[str, Any]) -> dict[str, Any]:
+    """What the header of the planned game must say, rebuilt on this engine.
+
+    ``config``: the full ``GameConfig`` as the header records it (JSON-normalized);
+    ``seats``: each Seat's ``(model, role)`` in Seat order, from the seeded seat
+    order. Only meaningful while the engine still matches the manifest
+    (``engine_matches``); raises ``ValueError`` if the game cannot be set up here.
+    """
+    config, _ = game_setup(manifest, game, "dry")
+    scenario = build_scenario(config, GameRng(config.seed).fork("scenario"))
+    entries, _ = seat_lineup(game)
+    impostors = set(config.impostor_seats or ())
+    seats = [
+        (model, "impostor" if seat in impostors else "crewmate")
+        for seat, model in enumerate(scenario.seat(entries))
+    ]
+    return {"config": json.loads(json.dumps(config.to_dict())), "seats": seats}
+
+
+def engine_matches(manifest: dict[str, Any]) -> bool:
+    """The scenario and transcript versions are still the ones the run was scheduled with."""
+    planned, current = manifest["engine"], engine_versions()
+    return all(planned.get(k) == current[k] for k in ("scenario_version", "transcript_schema"))
 
 
 # Run directory ----------------------------------------------------------------------
@@ -265,10 +299,22 @@ def execute(
     """
     manifest = load_manifest(run_dir)
     _check_versions(manifest, mode)
+    masked = [g["id"] for g in manifest["games"] if g["config"].get("style_mask")]
+    if masked and not hasattr(GameConfig, "style_mask"):
+        raise ValueError(
+            f"{len(masked)} games need the Style Mask, which this engine lacks "
+            "(GameConfig.style_mask arrives with #66); nothing was played"
+        )
     if mode == "live":
         speed.check_live(manifest)
         if spend_cap_usd is None:
             raise ValueError("live runs need an explicit --spend-cap (USD for the whole run)")
+        if any(g["config"].get("style_mask") for g in manifest["games"]):
+            # play_live falls back to the free dry-run mask, which is not the pinned masker.
+            raise ValueError(
+                "live Style Mask games need the pinned masker, which `zantine run` cannot "
+                "build yet; play them with the masker wired in (#66)"
+            )
         if adapter_factory is None:
             require_live(live)
         cap = spend_cap_usd
@@ -520,17 +566,19 @@ def add_commands(sub: Any) -> None:
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
     s.add_argument(
         "--experiment",
-        choices=("v1", speed.EXPERIMENT, EFFORT, VERIFICATION),
+        choices=("v1", speed.EXPERIMENT, EFFORT, MINORITY, VERIFICATION),
         default="v1",
         help="v1 (default); speed: random per-Seat Talk Budget tiers plus a realism check; "
         "effort: the v1.6 effort sweep, Mirror Matches at low and high effort; "
-        f"{VERIFICATION}: the v1.1 Verification Protocol experiment (docs/sample-size.md)",
+        "minority: v1.3 Lopsided Lobbies, 42 ordered pairs x 2 games x Style Mask off/on "
+        f"(168 games); {VERIFICATION}: the v1.1 Verification Protocol experiment "
+        "(docs/sample-size.md)",
     )
     s.add_argument(
         "--blocks",
         type=int,
         help=f"blocks of 28 games (default 12; {speed.TIER_BLOCKS} for --experiment speed; "
-        f"{VERIFICATION_BLOCKS} per protocol for --experiment {VERIFICATION})",
+        f"{VERIFICATION_BLOCKS} per protocol for --experiment {VERIFICATION}; not for minority)",
     )
     s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model (v1)")
     s.add_argument(
@@ -593,6 +641,11 @@ def _schedule(args: argparse.Namespace) -> int:
         manifest = make_effort_manifest(
             load_pool(), master_seed, per_level=per_level, config=config
         )
+        text = summary(manifest)
+    elif args.experiment == MINORITY:
+        if args.blocks is not None or args.mirror:
+            raise ValueError("--blocks and --mirror do not apply to --experiment minority")
+        manifest = make_minority_manifest(load_pool(), master_seed, config=config)
         text = summary(manifest)
     elif args.experiment == speed.EXPERIMENT:
         if args.mirror:
