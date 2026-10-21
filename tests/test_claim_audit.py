@@ -156,14 +156,15 @@ def test_unknown_names_rooms_and_other_claims_are_unverifiable() -> None:
     def respond(item: Any) -> dict[str, Any]:
         if item.speaker != "Pink":
             return {"claims": []}
+        q = item.text
         return {
             "claims": [
-                claim("location", "Pink", "kitchen", room="Kitchen"),
-                claim("location", "Mauve", "mauve", room="Storage"),
-                claim("other", None, "the lights flickered"),
-                claim("location", "Pink", "round 9", room="Storage", round=9),
-                claim("together", "Pink", "with someone"),
-                claim("location", "Pink", "I was in Storage", room="storage"),
+                claim("location", "Pink", q, room="Kitchen"),
+                claim("location", "Mauve", q, room="Storage"),
+                claim("other", None, q),
+                claim("location", "Pink", q, room="Storage", round=9),
+                claim("together", "Pink", q),
+                claim("location", "Pink", q, room="storage"),
             ]
         }
 
@@ -179,11 +180,11 @@ def test_negated_location_and_explicit_rounds() -> None:
     respond = {
         PINK_SPEECH: {
             "claims": [
-                claim("location", "Pink", "", room="Weapons", negated=True),  # true
-                claim("location", "Pink", "", room="Storage", negated=True),  # lie
-                claim("location", "Red", "", room="Weapons", round=2),  # true
-                claim("location", "Red", "", room="Cafeteria", round=2),  # misstatement
-                claim("kill", "Red", "", object="Green", round=1),  # wrong round
+                claim("location", "Pink", PINK_SPEECH, room="Weapons", negated=True),  # true
+                claim("location", "Pink", PINK_SPEECH, room="Storage", negated=True),  # lie
+                claim("location", "Red", PINK_SPEECH, room="Weapons", round=2),  # true
+                claim("location", "Red", PINK_SPEECH, room="Cafeteria", round=2),  # misstatement
+                claim("kill", "Red", PINK_SPEECH, object="Green", round=1),  # wrong round
             ]
         }
     }
@@ -248,13 +249,13 @@ def test_task_claims_against_private_grades() -> None:
         if item.text == statement.text and item.speaker == name:
             return {
                 "claims": [
-                    claim("task_done", "I", "", task=done.task.lower()),
-                    claim("task_done", "I", "", task=not_done),
-                    claim("task_done", "I", "", task=done.task, negated=True),
+                    claim("task_done", "I", item.text, task=done.task.lower()),
+                    claim("task_done", "I", item.text, task=not_done),
+                    claim("task_done", "I", item.text, task=done.task, negated=True),
                 ]
             }
         if item.speaker == rec.names[impostor]:
-            return {"claims": [claim("task_done", "I", "", room=rec.rooms[1])]}
+            return {"claims": [claim("task_done", "I", item.text, room=rec.rooms[1])]}
         return {"claims": []}
 
     report = run_audit(records, ScriptedExtractor(respond))
@@ -267,3 +268,45 @@ def test_task_claims_against_private_grades() -> None:
     fake = [c for c in report["claims"] if c["speaker"] == impostor]
     assert fake and labels(fake) == ["lie"] * len(fake)
     assert fake[0]["verdict"]["proof"][0]["type"] == "role_assigned"
+
+
+# Quotes ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("quote", "problem"),
+    [
+        ("", "no quote from the statement"),
+        ("   \n\t", "no quote from the statement"),
+        ("I was in Medbay.", "quote is not in the statement"),
+    ],
+)
+def test_claims_without_a_quote_from_the_statement_are_never_scored(
+    quote: str, problem: str
+) -> None:
+    """An extractor can't put words in a player's mouth: "Let's vote." makes no Claim,
+    so an invented (or empty) quote is unverifiable and stays out of every rate."""
+    respond = {"Let's vote.": {"claims": [claim("location", "I", quote, room="Medbay")]}}
+    report = run_audit(kill_game({PINK: "Let's vote."}), ScriptedExtractor(respond))
+    pink = [c for c in report["claims"] if c["speaker"] == PINK]
+    assert pink and labels(pink) == ["unverifiable"] * len(pink)
+    assert all(problem in c["problems"] and not c["quote_in_text"] for c in pink)
+    seat = report["seats"][PINK]
+    assert (seat["checkable"], seat["lie"], seat["lie_rate"], seat["reliability"]) == (
+        0,
+        0,
+        None,
+        None,
+    )
+    assert report["totals"]["unverifiable"] == len(pink)
+
+
+def test_a_quote_matches_up_to_case_and_whitespace() -> None:
+    respond = {
+        "I was in Storage.": {
+            "claims": [claim("location", "I", "i  WAS\nin storage", room="Storage")]
+        }
+    }
+    report = run_audit(kill_game({PINK: "I was in Storage."}), ScriptedExtractor(respond))
+    (first, *_) = by_speaker(report, PINK)
+    assert first["quote_in_text"] and first["verdict"]["label"] == "true"

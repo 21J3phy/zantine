@@ -181,7 +181,9 @@ class Claim:
     """A Claim tied to its statement, with names resolved to Seats.
 
     ``problems`` lists why the Claim can't be checked (unknown player, room or
-    Task, missing subject, ...); such a Claim is unverifiable.
+    Task, missing subject, a quote that is empty or not in the statement, ...);
+    such a Claim is unverifiable, so it never counts towards Reliability or the
+    Lie Rate.
     """
 
     id: str
@@ -253,6 +255,13 @@ def resolve(
         problems.append(f"Round {draft.round} is not between 1 and {statement.round}")
     if draft.kind == "other":
         problems.append("kind 'other' is not checked in v0")
+    # Only words the player actually said can be scored as its Claim.
+    quote = _squash(draft.quote)
+    quote_in_text = bool(quote) and quote in _squash(statement.text)
+    if not quote:
+        problems.append("no quote from the statement")
+    elif not quote_in_text:
+        problems.append("quote is not in the statement")
     return Claim(
         id=claim_id,
         statement_seq=statement.seq,
@@ -269,7 +278,7 @@ def resolve(
         task=task,
         negated=draft.negated,
         quote=draft.quote,
-        quote_in_text=_squash(draft.quote) in _squash(statement.text),
+        quote_in_text=quote_in_text,
         problems=tuple(problems),
     )
 
