@@ -90,6 +90,18 @@ class TaskBoard:
         self.views[seat][task.id] = view
         return view
 
+    def open_load(self, seat: int) -> int:
+        """``seat``'s unfinished work, as reassignment weighs it: required Tasks not yet
+        done or closed. Optional work (audits) is left out and closed work counts as
+        finished, because whether it was graded correct or passed its checks is private
+        (a tampered relay, a mandatory check), so who is handed a Task never depends
+        on it."""
+        return sum(
+            not (t.done or t.closed)
+            for t in self.graph.of(seat)
+            if task_kind(t.kind).required_for_completion
+        )
+
     def summary(self) -> dict[str, Any]:
         counted = self.graph.counted()
         done = sum(t.done for t in counted)
@@ -196,7 +208,7 @@ class TasksModule(GameModule):
                 options = [s for s in living_crew if s not in task.assignees]
                 if state.player(seat).alive or not options:
                     continue
-                load = {s: sum(not t.done for t in b.graph.of(s)) for s in options}
+                load = {s: b.open_load(s) for s in options}
                 least = min(load.values())
                 new = rng.choice([s for s in options if load[s] == least])
                 task.assignees[slot] = new

@@ -116,6 +116,10 @@ def build(
             f"games were played with different round caps {caps}; completion times "
             "are not comparable"
         )
+    check_conditions(
+        [(run, g) for g in games if source[id(g)] == "experiment"]
+        + ([(baseline, g) for g in games if source[id(g)] == "baseline"] if baseline else [])
+    )
     present = {g.protocol for g in games}
     protocols = [p for p in ORDER if p in present] + sorted(present - set(ORDER))
     weights = resample_weights([f"{g.protocol}/{g.kind}" for g in games], replicates, seed)
@@ -214,12 +218,49 @@ def run_mode(data: RunData) -> str | None:
     return json.loads(path.read_text("utf-8")).get("mode") if path.is_file() else None
 
 
+# Game settings that may differ between the games compared: each game's seed and
+# Impostor setup (the design) and its Verification Protocol (the treatment).
+DESIGN_KEYS = frozenset({"seed", "impostor_seats", "num_impostors", "verification_protocol"})
+
+
+def conditions(data: RunData, game_id: str) -> dict[str, Any]:
+    """Everything else about how a game was played: its transcript header's config
+    (the effective ``GameConfig``, including per-game Talk Budgets and workload)."""
+    path = data.run_dir / "games" / f"{game_id}.jsonl"
+    with path.open(encoding="utf-8") as f:
+        header = json.loads(f.readline())
+    return {k: v for k, v in header["config"].items() if k not in DESIGN_KEYS}
+
+
+def check_conditions(games: Sequence[tuple[RunData, GameRow]]) -> None:
+    """Every game compared must have been played under the same conditions apart from
+    the design and the protocol, or the differences are not protocol effects."""
+    seen: dict[str, tuple[Any, str]] = {}
+    for data, g in games:
+        for key, value in conditions(data, g.id).items():
+            if key not in seen:
+                seen[key] = (value, g.id)
+            elif seen[key][0] != value:
+                first, where = seen[key]
+                raise ValueError(
+                    f"games were played under different conditions: {key} is {first!r} in "
+                    f"{where} but {value!r} in {g.id} ({data.run_dir}); only the "
+                    "Verification Protocol may differ"
+                )
+
+
 def check_baseline(run: RunData, baseline: RunData) -> None:
     """Refuse a baseline that is not comparable with the experiment, or not separate
     from it: games played in another mode (scripted dry-run stand-ins vs live
     Models) or on another engine, another Model Pool, or any game the experiment
     run already holds (the same directory, an alias or a copy of it), which the
     bootstrap would count twice as independent evidence."""
+    kind = baseline.manifest.get("experiment")
+    if kind not in (None, "verification"):
+        raise ValueError(
+            f"the baseline is a {kind} experiment run, which changes other conditions; "
+            "pass the v1 run (or a verification run) as the baseline"
+        )
     if tuple(run.pool) != tuple(baseline.pool):
         raise ValueError("the runs have different Model Pools; lineups would not match")
     modes = run_mode(run), run_mode(baseline)

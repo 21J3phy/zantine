@@ -19,6 +19,7 @@ from zantine.analysis.verification import build, write
 from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.engine import Game
+from zantine.meeting import run_meeting
 from zantine.rules.audit import (
     AUDITOR,
     SPEC_HOLDER,
@@ -29,6 +30,7 @@ from zantine.rules.audit import (
     audits,
     place_audit,
 )
+from zantine.rules.registry import MeetingRequest
 from zantine.rules.tasks import WorkOnTask, board
 from zantine.rules.verification import CHECKS, checkers, verification_board
 from zantine.runner import play
@@ -328,12 +330,10 @@ def holder_view(game: Game, seat: int, since: int) -> list[Any]:
     ]
 
 
-@pytest.mark.parametrize("then_dies", [False, True])
-def test_a_spec_holder_never_learns_whether_its_partners_check_passed(then_dies: bool) -> None:
-    """A holds the auditor's seat of check 1 and B holds its spec. Play the same game
-    twice, with A approving correct work or doing nothing. Afterwards B's whole view
-    (observations, context, the answer to a repeated share) must be identical, also
-    when A then dies and a Meeting reassigns duties."""
+def holder_runs(dies: str, victim: int | None = None) -> tuple[list[Any], list[Any], str]:
+    """B's view after the same game played twice, with A approving correct work for
+    check 1 (which B holds the spec of) or doing nothing; then ``dies`` ("nobody",
+    "partner" = A, or "unrelated" = ``victim``) dies and a full Meeting runs."""
 
     def run(approve: bool) -> list[Any]:
         game = mandatory()
@@ -351,23 +351,47 @@ def test_a_spec_holder_never_learns_whether_its_partners_check_passed(then_dies:
         act(game, b, ShareSpec(task=first.id))  # B probes with a repeated share
         game.play_round()
         assert first.done is approve and not second.done
-        if then_dies:
-            game.state.player(a).alive = False
-            AuditModule().on_meeting_end(game, 1)
-            if not approve:
-                # The replacement auditor inherits B's delivered half.
-                new = first.assignees[AUDITOR]
-                assert new != a and (first.id, new) in audit_board(game.state).received
+        dead = {"nobody": None, "partner": a, "unrelated": victim}[dies]
+        if dead is not None:
+            game.state.player(dead).alive = False
+        # The whole Meeting lifecycle: every module's reassignment, then catch-up.
+        run_meeting(game, MeetingRequest("emergency", b))
+        if dies == "partner" and not approve:
+            # The replacement auditor inherits B's delivered half.
+            new = first.assignees[AUDITOR]
+            assert new != a and (first.id, new) in audit_board(game.state).received
         assert first.assignees[SPEC_HOLDER] == b
-        return holder_view(game, b, since)
+        return [*holder_view(game, b, since), first.id]
 
-    passed_view, open_view = run(approve=True), run(approve=False)
+    passed, still_open = run(approve=True), run(approve=False)
+    return passed[:2], still_open[:2], passed[2]
+
+
+def unrelated_crewmates() -> list[int]:
+    game = mandatory()
+    target = board(game.state).graph.counted()[0]
+    a, b = checks_of(game, target)[0].assignees
+    return [p.seat for p in game.state.players if not p.is_impostor and p.seat not in (a, b)]
+
+
+@pytest.mark.parametrize(
+    ("dies", "victim"),
+    [("nobody", None), ("partner", None)] + [("unrelated", seat) for seat in unrelated_crewmates()],
+)
+def test_a_spec_holder_never_learns_whether_its_partners_check_passed(
+    dies: str, victim: int | None
+) -> None:
+    """B's whole view (observations, context, the answer to a repeated share) is the
+    same whether or not A's check passed, through a full Meeting in which nobody, A,
+    or any other Crewmate has died and every module reassigns work."""
+    passed_view, open_view, check = holder_runs(dies, victim)
     assert passed_view == open_view
     reasons = [d["reason"] for t, d in passed_view[0] if t == "invalid_action"]
     assert reasons and all("already shared" in r for r in reasons)
-    # No closure notice, and partner notices only about B's own check (as its auditor).
+    # No closure notice, and no partner notice about check 1 (B's other duties may
+    # legitimately change partners).
     assert not [t for t, _ in passed_view[0] if t == "audit.closed"]
-    assert all(d["duty"] == "auditor" for t, d in passed_view[0] if t == "audit.partner")
+    assert not [d for t, d in passed_view[0] if t == "audit.partner" and d["task"] == check]
 
 
 def test_a_worker_gets_the_same_answer_before_and_after_its_work_is_verified() -> None:
@@ -665,3 +689,31 @@ def test_a_live_baseline_is_not_pooled_with_a_dry_experiment(
         "experiment run, dry (scripted stand-ins, not Models)"
         in (out / "verification_protocols.svg").read_text()
     )
+
+
+@pytest.mark.parametrize("baseline_kind", ["speed", "workload"])
+def test_a_baseline_played_under_other_conditions_is_refused(
+    experiment: Path, tmp_path: Path, baseline_kind: str
+) -> None:
+    """Same mode and round cap are not enough: a speed run (per-Seat Talk Budgets) or
+    a v1 run with a different workload would confound the protocol with that change."""
+    from zantine.schedule import make_manifest
+    from zantine.speed import make_speed_manifest
+
+    base = tmp_path / "base"
+    if baseline_kind == "speed":
+        manifest = make_speed_manifest(
+            POOL, 38, blocks=1, realism_games=0, config={"round_cap": 100}
+        )
+        match = "speed experiment run"
+    else:
+        manifest = make_manifest(
+            POOL, 39, blocks=1, config={"round_cap": 100, "tasks_per_crewmate": 1}
+        )
+        match = "different conditions: tasks_per_crewmate"
+    create_run(base, manifest)
+    execute(base, mode="dry", max_games=6)
+    with pytest.raises(ValueError, match=match):
+        build(load_run(experiment), load_run(base), replicates=20)
+    with pytest.raises(SystemExit):
+        main(["report", str(experiment), "--baseline", str(base), "--out", str(tmp_path / "out")])

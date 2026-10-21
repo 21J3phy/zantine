@@ -285,7 +285,7 @@ class AuditModule(GameModule):
                         options
                     )
                 else:
-                    load = {s: sum(not t.done for t in tb.graph.of(s)) for s in options}
+                    load = {s: tb.open_load(s) for s in options}
                     new = rng.choice([s for s in options if load[s] == min(load.values())])
                 task.assignees[slot] = new
                 ab.received.pop((task.id, new), None)
