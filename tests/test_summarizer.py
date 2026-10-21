@@ -181,7 +181,9 @@ def test_private_and_unknown_plugin_types_are_private() -> None:
 def test_private_lines_interleaved_in_meetings_are_retained_exactly() -> None:
     log = stress_log(6)
     private = [
-        Observation(1, 5, "chat.message", {"meeting": 1, "text": 'private\n"secret"'}),
+        Observation(
+            1, 5, "chat.message", {"speaker": 4, "room": "Weapons", "text": 'private\n"secret"'}
+        ),
         Observation(1, 5, "kill_witnessed", {"room": "Weapons", "killers": [0], "victim": 2}),
         Observation(1, 5, "tasks.assigned", {"tasks": [{"id": "T42", "input": [1, 2]}]}),
         Observation(1, 5, "future.plugin", {"meeting": 1, "answer": "private answer"}),

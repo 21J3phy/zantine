@@ -31,7 +31,7 @@ from zantine.tasks.steps import SortList
 
 def started(**config: Any) -> Game:
     """A started game of idle PlaybookBots; seats 0 and 1 are Impostors. Solo steps only."""
-    game = make_game(**{"relay_tasks": 0, "audit_tasks": 0, **config})
+    game = make_game(**{"relay_tasks": 0, "audit_tasks": 0, "splitkey_tasks": 0, **config})
     game.start()
     return game
 

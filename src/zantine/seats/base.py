@@ -33,6 +33,15 @@ class SeatController(ABC):
     def choose_action(self, ctx: ActionContext) -> Action:
         """Pick this Round's action."""
 
+    def say(self, ctx: ActionContext) -> str:
+        """Room Chat to go with the action just chosen from ``ctx`` ("" = silent).
+
+        Called once per Round, right after ``choose_action`` returned an accepted
+        action (never after a forfeit), with the same context. Speech longer than
+        the Seat's Talk Budget is truncated.
+        """
+        return ""
+
     @abstractmethod
     def speak(self, ctx: MeetingContext) -> str:
         """Say something in the current Meeting pass (truncated to the Talk Budget)."""
