@@ -1,0 +1,74 @@
+# The Label Panel: three AI judges that label real-game Claims to validate the Claim Audit.
+#
+# PLACEHOLDERS: which three models sit on the panel is chosen in #19 (the human
+# decision issue), together with the scoring extractor. Until then every judge
+# is `status = "placeholder"` with no pinned revision, so live calls are refused.
+#
+# Rules (checked by `panel.config.validate_panel` on every load):
+#   - three judges, from three different families and three different labs;
+#   - no judge's lab is a Model Pool lab (`lab` in harness/models.toml);
+#   - no judge shares a family with the extractor named in [panel] or a lab with
+#     the judgment model (Jev, TypeSafe), so no lab grades its own pipeline.
+#
+# [panel]
+#   extractor           id in audit/extractors.toml of the extractor being validated
+#   pipeline_judge_lab  lab of the judgment model whose labels are also validated
+#   min_planted         accuracy each judge needs on plain Planted Claims (0.95)
+#   alpha_threshold     Krippendorff's alpha below which a label type is revised (0.67)
+#
+# [judges.<id>] (an OpenAI-compatible endpoint: vLLM, Together, OpenRouter, ...)
+#   family, lab         model family and the lab that makes it
+#   base_url            OpenAI-compatible API root (…/v1)
+#   model               model name sent to the endpoint
+#   revision            weights revision the endpoint serves (e.g. a Hugging Face commit).
+#                       Required for live calls.
+#   api_key_env         env var holding the key ("" for a local server without auth)
+#   input, output       USD per 1M tokens (placeholders until #19 prices the chosen hosts)
+#   max_output_tokens   per-call output cap
+#   status              "placeholder" until #19; then "chosen"
+#   price_valid_until   optional; after this date the price is refused until re-checked
+
+[panel]
+extractor = "qwen3-235b-vllm"
+pipeline_judge_lab = "TypeSafe"
+min_planted = 0.95
+alpha_threshold = 0.67
+
+# Placeholder: chosen in #19.
+[judges."deepseek-placeholder"]
+family = "DeepSeek"
+lab = "DeepSeek"
+base_url = "http://localhost:8001/v1"
+model = "deepseek-ai/DeepSeek-V3.1"
+revision = ""
+api_key_env = ""
+input = 1.0
+output = 4.0
+max_output_tokens = 400
+status = "placeholder"
+
+# Placeholder: chosen in #19.
+[judges."mistral-placeholder"]
+family = "Mistral"
+lab = "Mistral AI"
+base_url = "http://localhost:8002/v1"
+model = "mistralai/Mistral-Large-Instruct-2411"
+revision = ""
+api_key_env = ""
+input = 2.0
+output = 6.0
+max_output_tokens = 400
+status = "placeholder"
+
+# Placeholder: chosen in #19.
+[judges."glm-placeholder"]
+family = "GLM"
+lab = "Zhipu AI"
+base_url = "http://localhost:8003/v1"
+model = "zai-org/GLM-4.5"
+revision = ""
+api_key_env = ""
+input = 1.0
+output = 4.0
+max_output_tokens = 400
+status = "placeholder"
