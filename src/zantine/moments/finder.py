@@ -195,7 +195,8 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines.append("No Moments found.")
     for i, m in enumerate(report["moments"], 1):
         p = m["score_parts"]
-        flag = " *Provisional: rests on a dry-run or incomplete Claim Audit.*" if m["provisional"] else ""
+        provisional = " *Provisional: rests on a dry-run or incomplete Claim Audit.*"
+        flag = provisional if m["provisional"] else ""
         lines.append(
             f"{i}. **{m['title']}**: {m['caption']} [Replay]({m['link']})"
             f" (score {m['score']:.2f} = {p['weight']:g} + {p['edge']:.2f}"
