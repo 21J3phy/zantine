@@ -198,16 +198,7 @@ class OpenAICompatAdapter(ProviderAdapter):
             text = choice["message"].get("content") or ""
         except (KeyError, IndexError, TypeError, AttributeError) as exc:
             raise ProviderError(f"malformed response: {exc!r}", fatal=False) from exc
-        u = body.get("usage") or {}
-        cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens") or 0
-        reasoning = (u.get("completion_tokens_details") or {}).get("reasoning_tokens")
-        usage = Usage(
-            # OpenAI-style APIs count cached tokens inside prompt_tokens.
-            input_tokens=(u.get("prompt_tokens") or 0) - cached,
-            cached_input_tokens=cached,
-            output_tokens=u.get("completion_tokens") or 0,
-            thinking_tokens=reasoning,
-        )
+        usage = parse_usage(body.get("usage"))
         finish = choice.get("finish_reason")
         stop = {"stop": "end_turn", "length": "max_tokens"}.get(finish, finish)
         return ProviderResponse(
@@ -257,6 +248,56 @@ class _SameOriginRedirects(urllib.request.HTTPRedirectHandler):
 def make_opener(*handlers: urllib.request.BaseHandler) -> urllib.request.OpenerDirector:
     """The opener for extractor calls: same-origin redirects only (extra handlers for tests)."""
     return urllib.request.build_opener(_SameOriginRedirects, *handlers)
+
+
+def parse_usage(u: Any) -> Usage:
+    """The call's token counts, or a fatal ``ProviderError`` when they can't be trusted.
+
+    The spend cap is only as good as the counts it is fed: a reply that omits
+    usage, or reports negative or inconsistent counts, would otherwise be priced
+    at zero (or less) and let calls continue past the cap. Such a reply stops the
+    audit instead; ``LLMExtractor`` holds the call's worst-case cost against the cap.
+    """
+
+    def count(
+        parent: dict[str, Any], key: str, *, required: bool, at_most: int | None = None
+    ) -> int | None:
+        value = parent.get(key)
+        if value is None and not required:
+            return None
+        if type(value) is not int or value < 0:
+            raise ProviderError(
+                f"unreliable usage: {key}={value!r} is not a nonnegative integer", fatal=True
+            )
+        if at_most is not None and value > at_most:
+            raise ProviderError(f"unreliable usage: {key}={value} exceeds {at_most}", fatal=True)
+        return value
+
+    def details(key: str) -> dict[str, Any]:
+        value = u.get(key)
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ProviderError(f"unreliable usage: {key} is not an object", fatal=True)
+        return value
+
+    if not isinstance(u, dict):
+        raise ProviderError("unreliable usage: the reply reports no token usage", fatal=True)
+    prompt = count(u, "prompt_tokens", required=True)
+    completion = count(u, "completion_tokens", required=True)
+    cached = count(
+        details("prompt_tokens_details"), "cached_tokens", required=False, at_most=prompt
+    )
+    reasoning = count(
+        details("completion_tokens_details"), "reasoning_tokens", required=False, at_most=completion
+    )
+    return Usage(
+        # OpenAI-style APIs count cached tokens inside prompt_tokens.
+        input_tokens=prompt - (cached or 0),
+        cached_input_tokens=cached or 0,
+        output_tokens=completion,
+        thinking_tokens=reasoning,
+    )
 
 
 def http_post(
@@ -325,9 +366,23 @@ class LLMExtractor(ClaimExtractor):
         )
 
     def extract(self, item: ExtractionInput) -> Any:
-        response = self.ledger.send(
-            self.adapter, self.request(item), purpose="extractor", phase="claims", round=item.round
-        )
+        reserved: list[float] = []
+        try:
+            response = self.ledger.send(
+                self.adapter,
+                self.request(item),
+                purpose="extractor",
+                phase="claims",
+                round=item.round,
+                on_start=reserved.append,
+            )
+        except ProviderError as exc:
+            # An HTTP error status is a rejection, never billed. Without one the call
+            # may have been billed (lost in transit, or a reply without trustworthy
+            # usage): hold its worst case against the cap.
+            if exc.status is None and reserved:
+                self.ledger.hold(reserved[0])
+            raise
         served = {k: response.raw.get(k) for k in ("model", "system_fingerprint")}
         if served not in self.served:
             self.served.append(served)

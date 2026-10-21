@@ -60,11 +60,20 @@ def statement_of(payload: dict[str, Any]) -> dict[str, Any]:
     return json.loads(block.group(1))
 
 
+USAGE = {
+    "prompt_tokens": 900,
+    "completion_tokens": 100,
+    "prompt_tokens_details": {"cached_tokens": 400},
+}
+NO_USAGE = object()  # the reply has no "usage" key at all
+
+
 class FakeEndpoint:
     """An OpenAI-compatible server that answers with the pattern extractor's reading."""
 
-    def __init__(self, reply: Any = None) -> None:
+    def __init__(self, reply: Any = None, usage: Any = None) -> None:
         self.reply = reply
+        self.usage = USAGE if usage is None else usage
         self.calls: list[tuple[str, dict[str, str], dict[str, Any]]] = []
 
     def __call__(self, url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
@@ -86,17 +95,16 @@ class FakeEndpoint:
             if isinstance(reply, str)
             else json.dumps(reply if reply is not None else PatternExtractor().extract(item))
         )
-        return {
+        body = {
             "id": "chatcmpl-1",
             "model": "test/open-weights-7b",
             "system_fingerprint": "fp_test",
             "choices": [{"message": {"content": content}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 900,
-                "completion_tokens": 100,
-                "prompt_tokens_details": {"cached_tokens": 400},
-            },
+            "usage": self.usage,
         }
+        if self.usage is NO_USAGE:
+            del body["usage"]
+        return body
 
 
 def llm_extractor(endpoint: FakeEndpoint, cap: float = 5.0) -> tuple[LLMExtractor, Ledger]:
@@ -175,6 +183,76 @@ def test_bad_output_is_retried_once_then_reported() -> None:
     errors = [s for s in report["statements"] if s["error"]]
     assert errors and all("not JSON" in s["error"] for s in errors)
     assert report["statement_errors"] == len(errors) and not report["complete"]
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        NO_USAGE,
+        {},
+        {"prompt_tokens": 900},
+        {"completion_tokens": 100},
+        {"prompt_tokens": None, "completion_tokens": 100},
+        {"prompt_tokens": 900, "completion_tokens": None},
+        {"prompt_tokens": -900, "completion_tokens": -100},
+        {"prompt_tokens": 900, "completion_tokens": -1},
+        {"prompt_tokens": "900", "completion_tokens": 100},
+        {"prompt_tokens": 900.0, "completion_tokens": 100},
+        {"prompt_tokens": True, "completion_tokens": 100},
+        {"prompt_tokens": 900, "completion_tokens": 100, "prompt_tokens_details": "x"},
+        {
+            "prompt_tokens": 900,
+            "completion_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": 901},
+        },
+        {
+            "prompt_tokens": 900,
+            "completion_tokens": 100,
+            "prompt_tokens_details": {"cached_tokens": -5},
+        },
+        {
+            "prompt_tokens": 900,
+            "completion_tokens": 100,
+            "completion_tokens_details": {"reasoning_tokens": 101},
+        },
+    ],
+)
+def test_missing_or_invalid_usage_stops_the_audit_and_holds_the_worst_case(usage: Any) -> None:
+    """A reply without trustworthy token counts could make calls look free (or refund
+    spend), so it never lets the next call through: the audit stops after one call and
+    the call's worst-case cost stays counted against the cap."""
+    endpoint = FakeEndpoint(usage=usage)
+    extractor, ledger = llm_extractor(endpoint, cap=0.01)
+    report = run_audit(kill_game(), extractor, ledger=ledger)
+    assert report["aborted"]["reason"] == "provider_error"
+    assert "unreliable usage" in report["aborted"]["detail"]
+    assert not report["complete"]
+    assert len(endpoint.calls) == 1
+    assert all(r.cost_usd >= 0 for r in ledger.records)
+    assert ledger.spent_usd > 0  # the worst case is held, not refunded or zeroed
+    assert ledger.spent_usd <= 0.01
+
+
+def test_valid_usage_with_null_details_is_accepted() -> None:
+    usage = {
+        "prompt_tokens": 900,
+        "completion_tokens": 100,
+        "prompt_tokens_details": None,
+        "completion_tokens_details": {"reasoning_tokens": None},
+    }
+    extractor, ledger = llm_extractor(FakeEndpoint(usage=usage))
+    report = run_audit(kill_game(), extractor, ledger=ledger)
+    assert report["complete"]
+    assert (ledger.records[0].input_tokens, ledger.records[0].cached_input_tokens) == (900, 0)
+
+
+def test_transport_failure_holds_the_worst_case() -> None:
+    """No HTTP status: the request may have been billed, so its worst case stays held."""
+    lost = ProviderError("URLError: timed out", fatal=False)
+    extractor, ledger = llm_extractor(FakeEndpoint(lambda item: lost), cap=0.05)
+    report = run_audit(kill_game(), extractor, ledger=ledger)
+    assert ledger.spent_usd > 0 and ledger.spent_usd <= 0.05
+    assert report["aborted"]["reason"] == "spend_cap"  # held costs exhaust the cap
 
 
 def test_fatal_provider_error_aborts() -> None:
