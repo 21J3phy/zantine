@@ -895,3 +895,87 @@ def test_eval_reads_transcripts_and_the_cli_writes_a_report(
     assert main(["stylemask", "eval", str(tmp_path), "--out", str(out)]) == 0
     printed = capsys.readouterr().out
     assert "folds by game" in printed and json.loads(out.read_text())["masked_games"] == 2
+
+
+# zantine run: live Style Mask games ------------------------------------------------------
+
+
+def one_masked_game_run(tmp_path: Path, name: str = "run") -> Path:
+    import copy
+
+    from zantine.runs import create_run
+    from zantine.schedule import load_pool, make_minority_manifest
+
+    plan = copy.deepcopy(make_minority_manifest(load_pool(), 20261020))
+    plan["games"] = [next(g for g in plan["games"] if g["style_mask"])]
+    plan["games"][0]["config"] = {**plan["games"][0]["config"], "round_cap": 4}
+    run_dir = tmp_path / name
+    create_run(run_dir, plan)
+    return run_dir
+
+
+def masker_factory(endpoint: FakeRewriter, masker_id: str = "test-masker") -> Any:
+    spec = dataclasses.replace(SPEC, id=masker_id)
+
+    def build(ledger: Ledger) -> StyleMask:
+        masker = LLMMasker(spec, ledger, OpenAICompatAdapter(spec, endpoint, "sk"))
+        return StyleMask(masker, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
+
+    return build
+
+
+def test_a_live_run_plays_mask_on_games_with_the_pinned_masker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fake_providers
+    from fake_providers import fake_adapter
+    from zantine.harness.pricing import load_models
+    from zantine.runs import execute, read_jsonl
+
+    # The fake pool Models wait politely; the first action anyone takes calls a Meeting.
+    polite, called = fake_providers.polite_call, []
+
+    def meeting_first(tail: str) -> Any:
+        name, args = polite(tail)
+        if name == "wait" and not called:
+            called.append(True)
+            return ("call_meeting", {})
+        return name, args
+
+    monkeypatch.setattr(fake_providers, "polite_call", meeting_first)
+
+    models = {k: dataclasses.replace(v, price_valid_until=None) for k, v in load_models().items()}
+    run_dir = one_masked_game_run(tmp_path)
+    live = {"mode": "live", "spend_cap_usd": 50.0, "adapter_factory": fake_adapter}
+    with pytest.raises(ValueError, match="pinned masker"):
+        execute(run_dir, models=models, **live)
+    endpoint = FakeRewriter()
+    report = execute(run_dir, models=models, style_mask=masker_factory(endpoint), **live)
+    assert report.finished and endpoint.calls
+    (path,) = sorted((run_dir / "games").glob("*.jsonl"))
+    records = read_jsonl(path)
+    assert records[0]["config"]["style_mask"] is True
+    stmts = [
+        r["data"]
+        for r in records
+        if r["kind"] == "event" and r["type"] == "statement" and r["data"]["text"]
+    ]
+    assert stmts and all(s["masker"] == "test-masker" for s in stmts)
+    spend = [r for r in read_jsonl(run_dir / "spend.jsonl") if r["kind"] == "call"]
+    assert sum(r["purpose"] == "style_mask" for r in spend) == len(endpoint.calls)
+    pin = json.loads((run_dir / "run.json").read_text())["style_mask"]
+    assert pin["masker"]["id"] == "test-masker" and "served" not in pin["masker"]
+
+
+def test_a_run_refuses_to_switch_maskers_or_use_one_dry(tmp_path: Path) -> None:
+    from zantine.runs import _claim_style_mask, execute
+
+    run_dir = one_masked_game_run(tmp_path)
+    (run_dir / "run.json").write_text('{"mode": "live"}\n')
+    _claim_style_mask(run_dir, masker_factory(FakeRewriter())(Ledger(1.0)).info())
+    with pytest.raises(ValueError, match="different Style Mask"):
+        other = masker_factory(FakeRewriter(), masker_id="another-masker")
+        _claim_style_mask(run_dir, other(Ledger(1.0)).info())
+    dry_dir = one_masked_game_run(tmp_path, "dry")
+    with pytest.raises(ValueError, match="--style-mask is for --live"):
+        execute(dry_dir, mode="dry", style_mask=masker_factory(FakeRewriter()))
