@@ -7,6 +7,7 @@
     "dev": "node scripts/fonts.mjs && vite",
     "build": "node scripts/fonts.mjs && tsc -b && vite build && node scripts/agent-seo.mjs",
     "lint": "oxlint",
+    "test": "node --test scripts/*.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
