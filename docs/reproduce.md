@@ -1,6 +1,6 @@
 # Reproduce
 
-> Source for the website's **Reproduce** page. This repository has no website yet, so this file is the page until there is one.
+> The full guide behind the website's **Reproduce** page (`#reproduce`, `Reproduce` in `web/src/components/blocks.tsx`), which summarizes the three layers and the commands and points here.
 
 Zantine keeps its official game seeds private, so future Models can't memorize the games (see [`adr/0001`](adr/0001-layered-reproducibility-with-private-official-seeds.md)). You can still check the results in three ways:
 
