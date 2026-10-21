@@ -38,7 +38,7 @@ class Moment:
     caption: str
     edge: float = 0.0
     evidence: dict[str, Any] = field(default_factory=dict)
-    # Rests on a Claim Audit made by an extractor not used for scoring.
+    # Rests on a Claim Audit that is a dry run or incomplete.
     provisional: bool = False
 
 
@@ -107,7 +107,10 @@ def missing(det: Detector, caps: set[str], facts: GameFacts) -> str | None:
 
 
 def _provisional(facts: GameFacts) -> bool:
-    return not (facts.audit or {}).get("extractor", {}).get("scoring", False)
+    """The audit was a dry run (not a scoring extractor) or is incomplete
+    (aborted, or some statements failed extraction)."""
+    audit = facts.audit or {}
+    return not (audit.get("extractor", {}).get("scoring", False) and audit.get("complete", False))
 
 
 def _names_in(text: str, name: str) -> bool:

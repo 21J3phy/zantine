@@ -19,6 +19,7 @@ from zantine.config import GameConfig
 from zantine.moments import (
     DETECTORS,
     PREFIX,
+    build_facts,
     detector,
     find_moments,
     generalizing_words,
@@ -175,6 +176,8 @@ def test_surviving_lie_needs_a_scoring_audit_to_be_final() -> None:
     audit = audit_of(records)
     audit["extractor"]["scoring"] = True
     assert not only(find_moments(records, audit), "surviving_lie")["provisional"]
+    audit["complete"] = False  # e.g. a statement failed extraction
+    assert only(find_moments(records, audit), "surviving_lie")["provisional"]
 
 
 def test_lies_with_invented_quotes_or_an_ejected_liar_are_not_moments() -> None:
@@ -254,10 +257,23 @@ def test_framing_ignores_claims_without_a_real_quote(quote: str) -> None:
         return {"claims": [claim("location", "Pink", quote, room="Medbay", round=1)]}
 
     audit = run_audit(records, ScriptedExtractor(respond))
-    assert any(c["speaker"] == RED and c["verdict"]["truth"] == "false" for c in audit["claims"])
     m = only(find_moments(records, audit), "framing")
     assert " named Crewmate Pink " in m["caption"]
     assert m["evidence"]["false_claims"] == []
+
+
+@pytest.mark.parametrize(
+    ("quote", "quoted"),
+    [("", False), ("   ", False), ("Medbay!", False), ("pink  WAS acting", True)],
+)
+def test_a_claim_counts_only_with_a_real_quote_from_its_speaker(quote: str, quoted: bool) -> None:
+    """Checked here too, not only by the audit, so a hand-edited report can't add one."""
+    records = framing_game()
+    facts = build_facts(records)
+    seq = next(s for s, st in facts.statements.items() if st[3] == RED)
+    c = {"quote": quote, "quote_in_text": True, "statement_seq": seq, "speaker": RED}
+    assert facts.quoted(c) is quoted
+    assert not facts.quoted({**c, "speaker": BLUE})
 
 
 def test_containment_by_one_vote() -> None:

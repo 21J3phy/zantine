@@ -13,7 +13,8 @@ never by a model's judgment:
 - ``lateness``: the Moment's Round divided by the game's last Round, so a
   Moment near the end of its game ranks above the same Moment early on.
 
-Ties break on transcript, Round, Meeting and type, so the order is stable.
+Ties break on transcript, seed, Round, Meeting, type and caption, so the order
+is total.
 Every Moment links into the replay viewer at its Meeting (``#meeting=M&round=N``,
 so viewers older than Meeting links still open the right Round) or, for
 action-phase Moments, its Round (``#round=N``).
@@ -86,9 +87,11 @@ def rank(moments: Iterable[dict[str, Any]], top: int | None = None) -> list[dict
         key=lambda m: (
             -m["score"],
             m["transcript"] or "",
+            m["seed"] if m["seed"] is not None else -1,
             m["round"],
             m["meeting"] if m["meeting"] is not None else 0,
             m["type"],
+            m["caption"],
         ),
     )
     return ordered if top is None else ordered[:top]
@@ -192,7 +195,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         lines.append("No Moments found.")
     for i, m in enumerate(report["moments"], 1):
         p = m["score_parts"]
-        flag = " *Provisional: rests on a dry-run Claim Audit.*" if m["provisional"] else ""
+        flag = " *Provisional: rests on a dry-run or incomplete Claim Audit.*" if m["provisional"] else ""
         lines.append(
             f"{i}. **{m['title']}**: {m['caption']} [Replay]({m['link']})"
             f" (score {m['score']:.2f} = {p['weight']:g} + {p['edge']:.2f}"
