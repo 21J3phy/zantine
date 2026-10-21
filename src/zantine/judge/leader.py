@@ -28,8 +28,10 @@ judge. Per Meeting, a target's latest assignment of each kind counts once
 - ``go``: the target stands in that room at the end of any of the
   ``WINDOW_ROUNDS`` (3) Rounds after the Meeting, by ground-truth positions.
 - ``task``: the target submits a valid ``tasks.work`` in one of those Rounds.
-  A target with no unfinished Task at the Meeting (every Impostor, or a
-  Crewmate whose Tasks are all done) is ``censored``: it could not comply.
+  A target with no unfinished Task that ``tasks.work`` can work at the Meeting
+  (every Impostor, a Crewmate whose solo Tasks are done, or one holding only
+  chain-relay legs or audits, which have their own actions) is ``censored``: it
+  could not comply in the way that is credited.
 
 A ``go`` or ``task`` assignment not carried out is ``censored`` when the window
 was cut short (the target was killed or ejected, or the game ended before the
@@ -55,8 +57,11 @@ from zantine.audit.record import GameRecord
 from zantine.config import condition_name
 from zantine.judge.batches import INSTRUCTION, NOTE, TASK_CRITERIA, _split, sid, spoken
 from zantine.judge.questions import CHOICE, NOUL, Answer, Batch, Question
+from zantine.tasks import task_kind
 
 WINDOW_ROUNDS = 3
+# The action a ``task`` assignment is checked against.
+WORK = "tasks.work"
 NONE, TASK, VOTE_SKIP = "none", "task", "vote_skip"
 KINDS = ("vote", "go", "task")
 
@@ -229,7 +234,7 @@ def _check(
         if kind == "go" and rec.room_at(target, r, "end") == row["room"]:
             return "carried_out", window
         if kind == TASK and any(
-            a["round"] == r and a["data"]["value"].get("kind") == "tasks.work"
+            a["round"] == r and a["data"]["value"].get("kind") == WORK
             for a in rec.own_actions.get(target, [])
         ):
             return "carried_out", window
@@ -239,7 +244,14 @@ def _check(
 
 
 def _has_open_task(records: Sequence[dict[str, Any]], seat: int, before_seq: int) -> bool:
-    holder: dict[str, int] = {}
+    """Does ``seat`` hold an unfinished Task it could work with ``tasks.work`` (``WORK``)?
+
+    Eligibility and credit must match: only Task kinds whose ``work_actions``
+    include ``tasks.work`` count, so a player holding only relay legs or audits
+    (worked with ``relay.*`` / ``audit.check``) is censored, not non-compliant.
+    Every assignee of such a Task counts, not just the first.
+    """
+    holders: dict[str, set[int]] = {}
     done: set[str] = set()
     for r in records:
         if r.get("kind") != "event" or r["seq"] >= before_seq:
@@ -247,12 +259,17 @@ def _has_open_task(records: Sequence[dict[str, Any]], seat: int, before_seq: int
         d = r["data"]
         match r["type"]:
             case "tasks.generated":
-                holder = {t["id"]: t["assignees"][0] for t in d["tasks"] if t["assignees"]}
-            case "tasks.reassigned":
-                holder[d["task"]] = d["to_seat"]
+                holders = {
+                    t["id"]: set(t["assignees"])
+                    for t in d["tasks"]
+                    if WORK in task_kind(t["kind"]).work_actions
+                }
+            case "tasks.reassigned" if d["task"] in holders:
+                holders[d["task"]].discard(d["from_seat"])
+                holders[d["task"]].add(d["to_seat"])
             case "tasks.graded" if d["correct"]:
                 done.add(d["task"])
-    return any(s == seat and t not in done for t, s in holder.items())
+    return any(seat in who and t not in done for t, who in holders.items())
 
 
 # The Leader section ---------------------------------------------------------------------

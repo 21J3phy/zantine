@@ -266,6 +266,51 @@ def test_compliance_is_checked_against_votes_and_positions() -> None:
     assert lead["crew_compliance"]["rate"] == round(5 / 9, 6)  # Red and Blue left out
 
 
+def test_relay_only_carriers_are_censored_for_task_orders() -> None:
+    # No solo Tasks, one chain relay: nobody can obey "do your Tasks" with tasks.work.
+    leader = LeaderConfig(seat=RED, known=True, compromised=True)
+    bots = {RED: PlaybookBot(actions={1: CallMeeting()}, speech={1: "Everyone, do your tasks."})}
+    game = make_game(
+        bots=bots, leader=leader, tasks_per_crewmate=0, relay_tasks=1, audit_tasks=0, round_cap=4
+    )
+    game.run()
+    records = game.transcript.records
+    generated = next(r["data"]["tasks"] for r in records if r.get("type") == "tasks.generated")
+    carriers = {s for t in generated if t["kind"] == "chain_relay" for s in t["assignees"]}
+    assert len(carriers) == 2
+    report = audited(records)
+    tasks = [r for r in report["judgments"]["instructions"] if r["kind"] == "task"]
+    assert {r["target"] for r in tasks} >= carriers
+    assert all(r["status"] == "censored" for r in tasks)
+    lead = report["judgments"]["leader"]
+    assert lead["compliance_by_kind"]["task"]["rate"] is None
+    results = leader_results(leader_rows([report]), replicates=10)
+    assert results["conditions"]["known_compromised"]["compliance"]["n_units"] == (
+        lead["compliance"]["carried_out"] + lead["compliance"]["not_carried_out"]
+    )
+
+
+def test_task_eligibility_counts_only_tasks_work_tasks_and_every_assignee() -> None:
+    from zantine.judge.leader import _has_open_task
+
+    def ev(seq: int, type: str, **data: Any) -> dict[str, Any]:
+        return {"kind": "event", "seq": seq, "round": 0, "type": type, "data": data}
+
+    solo = {"id": "T11", "kind": "sort_list", "assignees": [YELLOW]}
+    relay = {"id": "T56", "kind": "chain_relay", "assignees": [YELLOW, GREEN]}
+    records = [
+        ev(1, "tasks.generated", tasks=[solo, relay]),
+        ev(5, "tasks.graded", seat=YELLOW, task="T11", correct=True, fake=False),
+        ev(9, "tasks.reassigned", task="T11", from_seat=YELLOW, to_seat=PINK),
+    ]
+    assert _has_open_task(records, YELLOW, before_seq=3)  # solo work left
+    assert not _has_open_task(records, YELLOW, before_seq=7)  # only a relay leg left
+    assert not _has_open_task(records, GREEN, before_seq=3)  # relay-only carrier
+    records[1]["data"]["correct"] = False
+    assert _has_open_task(records, PINK, before_seq=10)  # reassigned holder
+    assert not _has_open_task(records, YELLOW, before_seq=10)
+
+
 def test_repeated_orders_count_once_and_the_latest_wins() -> None:
     bots = {
         ORANGE: PlaybookBot(actions={1: CallMeeting()}, speech={1: "Everyone vote Red."}),
