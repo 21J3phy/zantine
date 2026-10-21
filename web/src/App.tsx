@@ -3,7 +3,7 @@ import { ActionsContext, type Actions } from './components/actions';
 import { Block } from './components/blocks';
 import { FigureCard } from './components/FigureCard';
 import { FigureView } from './components/FigureView';
-import { IconDoc, Mark } from './components/icons';
+import { Mark } from './components/icons';
 import { Reader } from './components/Reader';
 import { PAPER_BY_SLUG } from './content/papers';
 import { FIGURE_BY_ID } from './figures';
@@ -86,7 +86,7 @@ function ItemView({ it, narrow }: { it: Item; narrow: boolean }) {
       }
       return (
         <div className="item" id={`fig-${it.id}`}>
-          <FigureCard fig={f} w={COLUMN_W} h={(it.featured ? 14 : 13) + (f.legend && !f.highlight ? 1 : 0)} featured={it.featured} />
+          <FigureCard fig={f} w={COLUMN_W} h={13} featured={it.featured} />
         </div>
       );
     }
@@ -111,50 +111,39 @@ function ItemView({ it, narrow }: { it: Item; narrow: boolean }) {
   );
 }
 
-function FolderBar({ sheet, current, goTo, openPaper }: { sheet: Sheet; current: string; goTo: (id: string) => void; openPaper: (slug: string) => void }) {
+function TopBar({ sheet, current, goTo }: { sheet: Sheet; current: string; goTo: (id: string) => void }) {
   const width = (sheet.narrow ? COLUMN_W : SHEET_W) * CM * sheet.z;
-  // On a phone the tabs scroll sideways; keep the page in view on its tab.
-  const tabsRef = useRef<HTMLElement>(null);
+  // On a phone the links scroll sideways; keep the current page's link in view.
+  const navRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    const nav = tabsRef.current;
-    const tab = nav?.querySelector<HTMLElement>('.folder-tab.active');
-    if (nav && tab) nav.scrollLeft = tab.offsetLeft - (nav.clientWidth - tab.offsetWidth) / 2;
+    const nav = navRef.current;
+    const link = nav?.querySelector<HTMLElement>('.nav-link.active');
+    if (nav && link) nav.scrollLeft = link.offsetLeft - (nav.clientWidth - link.offsetWidth) / 2;
   }, [current, sheet.narrow]);
   return (
-    <header className={sheet.narrow ? 'folder-bar narrow' : 'folder-bar'}>
-      <div className="folder-inner" style={{ width, marginLeft: sheet.left * CM * sheet.z }}>
+    <header className={sheet.narrow ? 'topbar narrow' : 'topbar'}>
+      <div className="topbar-inner" style={{ width, marginLeft: sheet.left * CM * sheet.z }}>
         <button className="brand" onClick={() => goTo(HOME)} aria-label="Zantine Labs, results">
-          <Mark />
+          <Mark size={20} />
           <span className="brand-name">Zantine Labs</span>
         </button>
-        <nav className="folder-tabs" aria-label="Pages" ref={tabsRef}>
-          {PAGES.map((p, i) => (
+        <nav className="nav" aria-label="Pages" ref={navRef}>
+          {PAGES.map((p) => (
             <a
               key={p.id}
               href={`#${p.id}`}
-              className={current === p.id ? 'folder-tab active' : 'folder-tab'}
+              className={current === p.id ? 'nav-link active' : 'nav-link'}
               aria-current={current === p.id ? 'page' : undefined}
-              style={{ zIndex: current === p.id ? 3 : 1 }}
               onClick={(e) => {
                 e.preventDefault();
                 goTo(p.id);
               }}
             >
-              <span className="tab-no">{String(i + 1).padStart(2, '0')}</span>
               {p.title}
             </a>
           ))}
         </nav>
-        <div className="nav-right">
-          <span className="pill">
-            <span className="pill-dot" /> Results pending
-          </span>
-          <button className="btn small primary" onClick={() => openPaper('zantine-1-protocol')}>
-            <IconDoc /> Read the protocol
-          </button>
-        </div>
       </div>
-      <div className="folder-edge" />
     </header>
   );
 }
@@ -210,7 +199,7 @@ export default function App() {
 
   return (
     <ActionsContext.Provider value={actions}>
-      <FolderBar sheet={sheet} current={page.id} goTo={actions.goTo} openPaper={actions.openPaper} />
+      <TopBar sheet={sheet} current={page.id} goTo={actions.goTo} />
       <main className="page" style={{ zoom: sheet.z, width: vw / sheet.z }} aria-label={page.title}>
         <div key={page.id} className={sheet.narrow ? 'board narrow' : 'board'} style={boardStyle}>
           {page.items.map((it, i) => (
