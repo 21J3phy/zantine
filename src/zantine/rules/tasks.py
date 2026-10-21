@@ -133,10 +133,12 @@ class WorkOnTask(Action):
         actions = task_kind(task.kind).work_actions
         if self.kind not in actions:
             return f"{task.id} is worked with {', '.join(actions)}, not {self.kind}"
+        if task.closed and task.checks_required:
+            # Before ``done``: the same answer before and after the checks pass, so
+            # the worker cannot probe whether its work has been verified.
+            return f"{task.id} was submitted correctly: no more work can be done on it"
         if task.done:
             return f"{task.id} is already done"
-        if task.closed and task.checks_required:
-            return f"{task.id} was submitted correctly and is waiting for its checks"
         if task.closed:
             return f"{task.id} is closed: no more work can be done on it"
         if actor.room != task.room:

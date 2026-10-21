@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import shutil
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -13,7 +15,7 @@ import pytest
 from helpers import events, make_game, obs_of
 from test_hidden_count import as_dicts, leaks, observed, recorded
 from zantine.analysis.metrics import load_run
-from zantine.analysis.verification import build
+from zantine.analysis.verification import build, write
 from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.engine import Game
@@ -242,7 +244,7 @@ def test_work_counts_unlocks_dependents_and_wins_only_after_two_passing_checks()
     submit(game, dependent)
     assert obs_of(game, dependent.assignees[0], "tasks.blocked")[-1]["waiting_on"] == [target.id]
     # ... the worker cannot redo it ...
-    assert "waiting for its checks" in WorkOnTask(target.id, target.content.answer).validate(
+    assert "no more work" in WorkOnTask(target.id, target.content.answer).validate(
         game.state, game.state.player(target.assignees[0])
     )
     # ... and one passing check is not enough.
@@ -315,6 +317,85 @@ def test_only_checkers_learn_check_results_and_nobody_is_told_of_verification() 
         assert not any(k.startswith("verification") for k in kinds)
         if seat == target.assignees[0]:
             assert set(kinds) <= {"room_snapshot"}
+
+
+def holder_view(game: Game, seat: int, since: int) -> list[Any]:
+    """Everything ``seat`` was told after observation ``since``, and its context now."""
+    ctx = game.action_context(game.state.player(seat))
+    return [
+        [(o.type, o.data) for o in game.observations_of(seat)[since:]],
+        dataclasses.asdict(ctx)["extra"],
+    ]
+
+
+@pytest.mark.parametrize("then_dies", [False, True])
+def test_a_spec_holder_never_learns_whether_its_partners_check_passed(then_dies: bool) -> None:
+    """A holds the auditor's seat of check 1 and B holds its spec. Play the same game
+    twice, with A approving correct work or doing nothing. Afterwards B's whole view
+    (observations, context, the answer to a repeated share) must be identical, also
+    when A then dies and a Meeting reassigns duties."""
+
+    def run(approve: bool) -> list[Any]:
+        game = mandatory()
+        target = board(game.state).graph.counted()[0]
+        first, second = checks_of(game, target)
+        a, b = first.assignees
+        submit(game, target)
+        for seat in (a, b):
+            game.state.player(seat).room = first.room
+        act(game, b, ShareSpec(task=first.id))  # B shares only its half for check 1
+        game.play_round()
+        since = len(game.observations_of(b))
+        if approve:
+            act(game, a, CheckAudit(task=first.id, verdict=APPROVE))
+        act(game, b, ShareSpec(task=first.id))  # B probes with a repeated share
+        game.play_round()
+        assert first.done is approve and not second.done
+        if then_dies:
+            game.state.player(a).alive = False
+            AuditModule().on_meeting_end(game, 1)
+            if not approve:
+                # The replacement auditor inherits B's delivered half.
+                new = first.assignees[AUDITOR]
+                assert new != a and (first.id, new) in audit_board(game.state).received
+        assert first.assignees[SPEC_HOLDER] == b
+        return holder_view(game, b, since)
+
+    passed_view, open_view = run(approve=True), run(approve=False)
+    assert passed_view == open_view
+    reasons = [d["reason"] for t, d in passed_view[0] if t == "invalid_action"]
+    assert reasons and all("already shared" in r for r in reasons)
+    # No closure notice, and partner notices only about B's own check (as its auditor).
+    assert not [t for t, _ in passed_view[0] if t == "audit.closed"]
+    assert all(d["duty"] == "auditor" for t, d in passed_view[0] if t == "audit.partner")
+
+
+def test_a_worker_gets_the_same_answer_before_and_after_its_work_is_verified() -> None:
+    """Through real Rounds: resubmitting verified and unverified work gives the same
+    Invalid Action reasons, so the worker cannot probe the hidden gate."""
+    game = mandatory()
+    target = board(game.state).graph.counted()[0]
+    worker = target.assignees[0]
+    submit(game, target)
+
+    def probe() -> list[Any]:
+        game.state.player(worker).room = target.room
+        since = len(game.observations_of(worker))
+        retry = WorkOnTask(task=target.id, answer=target.content.answer)
+        act(game, worker, retry)
+        game.play_round()
+        return [
+            (o.type, {k: v for k, v in o.data.items()})
+            for o in game.observations_of(worker)[since:]
+            if o.type != "room_snapshot"
+        ]
+
+    before = probe()
+    cross_check(game, target)
+    assert target.done
+    after = probe()
+    assert before == after and [t for t, _ in before] == ["invalid_action", "invalid_action"]
+    assert "no more work" in before[0][1]["reason"]
 
 
 # Scripted bots, determinism, hidden information -----------------------------------------
@@ -531,3 +612,56 @@ def test_cli_schedules_the_experiment(tmp_path: Path, capsys: pytest.CaptureFixt
         main(["schedule", "--protocols", "none"])
     with pytest.raises(SystemExit):
         main(["schedule", "--experiment", "verification", "--mirror"])
+
+
+def test_a_baseline_that_repeats_the_experiments_games_is_refused(
+    experiment: Path, tmp_path: Path
+) -> None:
+    """The same run, a symlink alias or a copy as --baseline would count its optional
+    games twice as independent evidence; each fails clearly."""
+    alias = tmp_path / "alias"
+    alias.symlink_to(experiment, target_is_directory=True)
+    copy = tmp_path / "copy"
+    shutil.copytree(experiment, copy)
+    data = load_run(experiment)
+    alone = build(data, replicates=50, seed=17)
+    for baseline in (experiment, alias, copy):
+        with pytest.raises(ValueError, match="games of the experiment run itself"):
+            build(data, load_run(baseline), replicates=50, seed=17)
+        with pytest.raises(SystemExit):
+            main(["report", str(experiment), "--baseline", str(baseline), "--out", str(tmp_path)])
+    assert alone["protocols"]["optional"]["games"] == {"lobby": 21, "benign": 7}
+    assert all(r["role"] == "experiment" and r["mode"] == "dry" for r in alone["runs"])
+
+
+def test_a_live_baseline_is_not_pooled_with_a_dry_experiment(
+    experiment: Path, tmp_path: Path
+) -> None:
+    """Scripted dry-run stand-ins and (fake) live Models are not comparable play."""
+    from fake_provider import FakeClient, fake_factory
+    from test_runs import MODELS
+
+    live = tmp_path / "live"
+    create_run(
+        live,
+        make_verification_manifest(
+            POOL, 8, blocks=1, protocols=("optional",), config={"round_cap": 100}
+        ),
+    )
+    execute(
+        live,
+        mode="live",
+        spend_cap_usd=5.0,
+        adapter_factory=fake_factory(FakeClient()),
+        models=MODELS,
+        max_games=2,
+    )
+    with pytest.raises(ValueError, match="only runs played in the same mode"):
+        build(load_run(experiment), load_run(live), replicates=20)
+    # Each source's mode is kept in the report and named in the graph's caption.
+    out, report = write(experiment, out_dir=tmp_path / "out", replicates=20)
+    assert [(r["role"], r["mode"]) for r in report["runs"]] == [("experiment", "dry")]
+    assert (
+        "experiment run, dry (scripted stand-ins, not Models)"
+        in (out / "verification_protocols.svg").read_text()
+    )

@@ -539,6 +539,11 @@ def verification_protocols(report: dict[str, Any]) -> Figure:
         f"{p}: {v['games']['lobby']} lobbies + {v['games']['benign']} Benign"
         for p, v in report["protocols"].items()
     )
+    sources = "; ".join(
+        f"{r['role']} run, {r['mode'] or 'unplayed'}"
+        + (" (scripted stand-ins, not Models)" if r["mode"] == "dry" else "")
+        for r in report["runs"]
+    )
     finished = ", ".join(
         f"{p} {v['benign_finished']['estimate']:.0%}"
         for p, v in report["protocols"].items()
@@ -549,7 +554,7 @@ def verification_protocols(report: dict[str, Any]) -> Figure:
         "Protocols in fixed order. Each protocol's damage is measured against its own "
         "Benign Matches; unfinished games count as the round cap, which compresses damage "
         f"when work rarely finishes (Benign Matches finished: {finished or 'n/a'}). "
-        f"Games: {counts}."
+        f"Games: {counts}. Sources: {sources}."
     )
     fig.text(0.01, 0.005, text, fontsize=7, color=BAR, ha="left", va="bottom", wrap=True)
     return fig

@@ -37,6 +37,7 @@ from typing import Any
 
 import numpy as np
 
+from zantine import runs
 from zantine.analysis.bootstrap import (
     DEFAULT_REPLICATES,
     DEFAULT_SEED,
@@ -99,13 +100,16 @@ def build(
     ``baseline`` (the v1 run) contributes only its optional-protocol Balanced
     Lobbies and Benign Matches."""
     runs = [run] if baseline is None else [run, baseline]
-    if len({tuple(r.pool) for r in runs}) != 1:
-        raise ValueError("the runs have different Model Pools; lineups would not match")
-    games = [g for g in run.games if g.kind in ("lobby", "benign")]
     if baseline is not None:
-        games += [
+        check_baseline(run, baseline)
+    games = [g for g in run.games if g.kind in ("lobby", "benign")]
+    source = {id(g): "experiment" for g in games}
+    if baseline is not None:
+        extra = [
             g for g in baseline.games if g.kind in ("lobby", "benign") and g.protocol == BASELINE
         ]
+        source |= {id(g): "baseline" for g in extra}
+        games += extra
     caps = sorted({g.round_cap for g in games})
     if len(caps) > 1:
         raise ValueError(
@@ -146,7 +150,9 @@ def build(
         "baseline_present": BASELINE in point,
         "protocols": out,
         "order": protocols,
-        "runs": [_run_summary(r) for r in runs],
+        "runs": [
+            _run_summary(r, role) for r, role in zip(runs, ("experiment", "baseline"), strict=False)
+        ],
         "round_cap": caps[0] if caps else None,
         "method": {
             "intervals": CI_NOTE,
@@ -175,6 +181,7 @@ def build(
         "games": [
             {
                 "id": g.id,
+                "source": source[id(g)],
                 "protocol": g.protocol,
                 "kind": g.kind,
                 "block": g.block,
@@ -201,7 +208,42 @@ def _estimate(point: float, boot: np.ndarray, n_games: int) -> Estimate:
     )
 
 
-def _run_summary(data: RunData) -> dict[str, Any]:
+def run_mode(data: RunData) -> str | None:
+    """``dry`` or ``live`` from the run's ``run.json``; None before its first game."""
+    path = data.run_dir / runs.RUN
+    return json.loads(path.read_text("utf-8")).get("mode") if path.is_file() else None
+
+
+def check_baseline(run: RunData, baseline: RunData) -> None:
+    """Refuse a baseline that is not comparable with the experiment, or not separate
+    from it: games played in another mode (scripted dry-run stand-ins vs live
+    Models) or on another engine, another Model Pool, or any game the experiment
+    run already holds (the same directory, an alias or a copy of it), which the
+    bootstrap would count twice as independent evidence."""
+    if tuple(run.pool) != tuple(baseline.pool):
+        raise ValueError("the runs have different Model Pools; lineups would not match")
+    modes = run_mode(run), run_mode(baseline)
+    if modes[0] != modes[1]:
+        raise ValueError(
+            f"the experiment run is {modes[0] or 'unplayed'} but the baseline is "
+            f"{modes[1] or 'unplayed'}; only runs played in the same mode are comparable"
+        )
+    engine = {
+        k: v for k, v in run.manifest["engine"].items() if modes[0] == "live" or k != "harness"
+    }
+    other = {k: baseline.manifest["engine"].get(k) for k in engine}
+    if engine != other:
+        raise ValueError(f"the runs were scheduled on different engines: {engine} vs {other}")
+    same_dir = run.run_dir.resolve() == baseline.run_dir.resolve()
+    shared = {g.seed for g in run.games} & {g.seed for g in baseline.games}
+    if same_dir or shared:
+        raise ValueError(
+            "the baseline holds games of the experiment run itself (the same run, an alias "
+            "or a copy); pass a separate v1 run, or no baseline if the run schedules optional"
+        )
+
+
+def _run_summary(data: RunData, role: str) -> dict[str, Any]:
     manifest = data.manifest
     planned = manifest["games"]
     done = {g.id for g in data.games}
@@ -212,6 +254,9 @@ def _run_summary(data: RunData) -> dict[str, Any]:
         entry["planned"] += 1
         entry["complete"] += g["id"] in done
     return {
+        "role": role,
+        "mode": run_mode(data),
+        "engine": manifest.get("engine"),
         "experiment": manifest.get("experiment"),
         "games_planned": len(planned),
         "games_complete": len(done),
