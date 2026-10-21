@@ -1,7 +1,7 @@
 import { useTip } from '../components/Tooltip';
 import type { ProtocolResult } from '../data/sim';
 import { CM } from '../lib/units';
-import { AxisTitle, Grid, MarkDot, Svg, Watermark, XTicks, YTicks, localPoint, type ChartProps } from './kit';
+import { AxisTitle, Grid, MarkDot, Svg, XTicks, YTicks, localPoint, type ChartProps } from './kit';
 import { cmAxis, fmt } from './scale';
 import { INK_RAMP } from '../data/models';
 
@@ -44,8 +44,7 @@ export function TradeOff(p: ChartProps & { label: string; pts: ProtocolResult[];
 
   return (
     <Svg w={p.w} h={p.h} label={p.label}>
-      <Grid x={x0} y={y0} nx={nx} ny={ny} />
-      {p.simulated && <Watermark x={x0} y={y0} w={nx * CM} h={ny * CM} />}
+      <Grid x={x0} y={y0} nx={nx} ny={ny} v vEvery={ax.labelEvery} />
       <line className="refline" x1={X(0)} y1={Y(0)} x2={X(Math.min(ax.d1, ay.d1))} y2={Y(Math.min(ax.d1, ay.d1))} />
       <text className="ref-label" x={X(Math.min(ax.d1, ay.d1) * 0.62) + 6} y={Y(Math.min(ax.d1, ay.d1) * 0.62) + 14}>
         Break-even

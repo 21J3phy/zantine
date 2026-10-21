@@ -87,25 +87,3 @@ export const Mark = ({ size = 24 }: { size?: number }) => (
     ))}
   </svg>
 );
-
-/** The mark at display size: a blue gradient Z with a hairline echo offset behind it. */
-export const MarkEmblem = ({ size = 200 }: { size?: number }) => (
-  <svg width={size} height={size} viewBox="0 0 26 26" aria-hidden className="mark-emblem">
-    <defs>
-      <linearGradient id="z-grad" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stopColor="#0d3a73" />
-        <stop offset="1" stopColor="#4f7fbf" />
-      </linearGradient>
-    </defs>
-    <g transform="translate(2.2 2.2)" fill="none" stroke="#0d3a73" strokeWidth="0.08" opacity="0.55">
-      {Z_PATHS.map((d) => (
-        <path key={d} d={d} />
-      ))}
-    </g>
-    <g fill="url(#z-grad)">
-      {Z_PATHS.map((d) => (
-        <path key={d} d={d} />
-      ))}
-    </g>
-  </svg>
-);

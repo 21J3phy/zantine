@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { FIGURES, FIGURE_BY_ID, STATUS_LABEL, type DataTable } from '../figures';
-import { EFFORTS, EFFORT_LABEL, LABS, MODELS } from '../data/models';
+import { EFFORTS, EFFORT_LABEL, MODELS, dotStyle } from '../data/models';
 import { CM } from '../lib/units';
-import { ParetoToggle, figLabel } from './FigureCard';
+import { figLabel } from './FigureCard';
+import { ParetoToggle } from './ParetoToggle';
 import { useFilter } from './Filter';
 import { IconClose, IconDownload, IconLink, IconNext, IconPrev, IconWarning } from './icons';
 
@@ -118,7 +119,7 @@ export function FigureView({ id, onClose, onNavigate }: { id: string; onClose: (
         </div>
       </header>
       <div className={wide ? 'fv-body wide' : 'fv-body'}>
-        <div className="fv-chart-wrap" style={wide ? { width: (cols - side - 2) * CM } : undefined}>
+        <div className="fv-chart-wrap" style={wide ? { width: (cols - side - 3) * CM } : undefined}>
           <div className={`fv-chart status-${fig.status}`} style={{ width: cw * CM, height: ch * CM, zoom: fit }}>
             {fig.render({ w: cw, h: ch, models: active, expanded: true, pareto: paretoOn(fig.id) })}
           </div>
@@ -167,7 +168,7 @@ export function FigureView({ id, onClose, onNavigate }: { id: string; onClose: (
               <div className="filter compact">
                 {MODELS.map((m) => (
                   <button key={m.id} className={isActive(fig.id, m.id) ? 'chip on' : 'chip'} aria-pressed={isActive(fig.id, m.id)} onClick={() => toggle(fig.id, m.id)}>
-                    <span className="dot" style={m.tier === 'sibling' ? { borderColor: LABS[m.lab].color } : { background: LABS[m.lab].color, borderColor: LABS[m.lab].color }} aria-hidden />
+                    <span className="dot" style={dotStyle(m.id)} aria-hidden />
                     {m.short}
                   </button>
                 ))}

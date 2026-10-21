@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
+import { tint } from '../data/models';
 
 export interface TipRow {
   value: string;
@@ -51,7 +52,7 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
               {r.color && (
                 <span
                   className="tooltip-key"
-                  style={r.hollow ? { borderColor: r.color } : { background: r.color, borderColor: r.color }}
+                  style={r.hollow ? { borderColor: r.color, background: tint(r.color) } : { background: r.color, borderColor: r.color }}
                 />
               )}
               <span className="tooltip-value">{r.value}</span>

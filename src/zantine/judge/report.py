@@ -48,6 +48,7 @@ from zantine.judge.batches import (
     SKIP,
     challenge_batch,
     cid,
+    claim_data,
     later_statements,
     meeting_batches,
     sid,
@@ -283,6 +284,16 @@ def _canonical(value: Any) -> Any:
     return json.loads(json.dumps(value, sort_keys=True))
 
 
+def claim_fingerprint(rec: GameRecord, c: dict[str, Any]) -> str:
+    """SHA-256 of a Claim's statement, quote and structured meaning (``claim_data``)."""
+    blob = json.dumps(
+        {"statement_seq": c["statement_seq"], **claim_data(rec, c)},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
 def _claims(
     rec: GameRecord, claims: list[tuple[int, dict[str, Any]]], answers: dict[str, Answer]
 ) -> list[dict[str, Any]]:
@@ -295,6 +306,9 @@ def _claims(
             "index": i,
             "speaker": c["speaker"],
             "label": c["verdict"]["label"],  # copied from the audit, for reading only
+            # What the judge was asked about (quote and meaning), so a reader can check
+            # these answers belong to this audit's Claim and not a re-extracted one.
+            "claim_sha256": claim_fingerprint(rec, c),
             "asserted": None if asserted is None else asserted.to_dict(),
             "challenge": None,
             "challenged": None,

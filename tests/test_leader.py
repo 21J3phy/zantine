@@ -114,8 +114,16 @@ def split(request: HarnessRequest) -> tuple[list[str], list[str]]:
 
 
 def gameplay(game: Any) -> list[tuple[Any, ...]]:
+    """Every ground-truth event, without pointers to transcript positions (``*_seq``):
+    the Leader's own ``leader_assigned`` records shift those, nothing else."""
+
+    def strip(data: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in data.items() if not k.endswith("_seq")}
+
     return [
-        (r["round"], r["type"], r["data"]) for r in game.transcript.records if r["kind"] == "event"
+        (r["round"], r["type"], strip(r["data"]))
+        for r in game.transcript.records
+        if r["kind"] == "event"
     ]
 
 

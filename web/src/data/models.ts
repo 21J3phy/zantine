@@ -171,6 +171,22 @@ export const ENTRY_BY_ID: Record<string, Entry> = Object.fromEntries(ENTRIES.map
 export const modelOf = (id: string) => MODEL_BY_ID[id.split(':')[0]];
 /** The effort level of an entry id, or undefined for a plain model id. */
 export const effortOf = (id: string) => ENTRY_BY_ID[id]?.effort;
+/** For each model among `ids`, its entry at the highest reasoning effort present. A card shows only these. */
+export const topEntries = (ids: string[]) => {
+  const rank = (id: string) => EFFORTS.indexOf(effortOf(id) ?? 'medium');
+  const best = new Map<string, string>();
+  for (const id of ids) {
+    const cur = best.get(modelOf(id).id);
+    if (!cur || rank(id) > rank(cur)) best.set(modelOf(id).id, id);
+  }
+  return [...best.values()];
+};
+/** "Claude Fable 5.1 (high)": a model at one effort level, as a card names it. */
+export const entryLabel = (id: string, short = false) => {
+  const e = effortOf(id);
+  const name = short ? modelOf(id).short : modelOf(id).name;
+  return e ? `${name} (${EFFORT_LABEL[e].toLowerCase()})` : name;
+};
 /** "Claude Fable 5.1, High effort" for tooltips and tables. */
 export const entryName = (id: string) => {
   const e = effortOf(id);
@@ -178,6 +194,26 @@ export const entryName = (id: string) => {
 };
 
 export const colorOf = (id: string) => LABS[modelOf(id).lab].color;
+
+/** A color mixed toward white by `k`. */
+export const tint = (hex: string, k = 0.4) =>
+  `#${[1, 3, 5]
+    .map((i) => parseInt(hex.slice(i, i + 2), 16))
+    .map((c) => Math.round(c + (255 - c) * k).toString(16).padStart(2, '0'))
+    .join('')}`;
+
+/** Fill for a model's bars and dots: its lab color for a Flagship, the same color lightened for a Sibling. */
+export const fillOf = (id: string) => {
+  const m = modelOf(id);
+  return m.tier === 'sibling' ? tint(LABS[m.lab].color) : LABS[m.lab].color;
+};
+
+/** Style for a legend or table dot: solid for a Flagship, a light fill in a colored ring for a Sibling. */
+export const dotStyle = (id: string) => {
+  const m = modelOf(id);
+  const c = LABS[m.lab].color;
+  return { background: m.tier === 'sibling' ? tint(c) : c, borderColor: c };
+};
 
 /**
  * Ordinal ink ramp for non-identity categories: one hue, strongest first (dark→light on the white page).
