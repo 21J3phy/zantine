@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from zantine.rules.actions import Action
 from zantine.rules.registry import GameModule, RoundContext, Rules
 from zantine.rules.tasks import NAME as TASKS
-from zantine.rules.tasks import TaskBoard, board, route
+from zantine.rules.tasks import TaskBoard, board, route, shared_task_pool
 from zantine.tasks import Task, TaskGraph, task_kind
 from zantine.tasks.graph import task_ids
 from zantine.tasks.relay import ChainRelay
@@ -210,7 +210,8 @@ class RelayModule(GameModule):
     def place_tasks(self, game: Game, graph: TaskGraph) -> None:
         """Called by the Tasks module at setup: add ``relay_tasks`` relays to the graph."""
         state, count = game.state, game.config.relay_tasks
-        crew = [p.seat for p in state.players if not p.is_impostor]
+        # Crewmates, or every Seat under Sabotage (an Impostor carrier may tamper).
+        crew = shared_task_pool(game)
         if count <= 0 or len(crew) < 2:
             return
         rooms = [r for r in state.map.rooms if r != state.map.meeting_room]

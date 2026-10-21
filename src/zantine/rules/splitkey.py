@@ -34,7 +34,7 @@ from zantine.map import GameMap
 from zantine.rules.actions import Action
 from zantine.rules.registry import GameModule, RoundContext, Rules
 from zantine.rules.tasks import NAME as TASKS
-from zantine.rules.tasks import TaskBoard, board, route
+from zantine.rules.tasks import TaskBoard, board, route, shared_task_pool
 from zantine.tasks import Task, TaskContent, TaskGraph, task_kind
 from zantine.tasks.graph import task_ids
 from zantine.tasks.splitkey import SplitKey, checks_part, normalize_code
@@ -177,8 +177,8 @@ class SplitKeyModule(GameModule):
         rules.add_resolver(460, "splitkey.resolve", resolve)
 
     def holder_pool(self, game: Game) -> list[int]:
-        """Seats that may hold fragments. Sabotage (#8) may widen this to Impostors."""
-        return [p.seat for p in game.state.players if not p.is_impostor]
+        """Seats that may hold fragments: Crewmates, or every Seat under Sabotage (#8)."""
+        return shared_task_pool(game)
 
     def place_tasks(self, game: Game, graph: TaskGraph) -> None:
         """Called by the Tasks module at setup: add ``splitkey_tasks`` split-key Tasks."""
