@@ -53,6 +53,7 @@ from zantine.analysis.bootstrap import (
     resample_weights,
 )
 from zantine.analysis.metrics import GAMES, game_row, is_complete, read_records, seat_model
+from zantine.config import with_historical_defaults
 
 EXPERIMENT = "minority"
 CONDITIONS = ("off", "mask")
@@ -125,7 +126,8 @@ def check_setup(planned: dict[str, Any], header: dict[str, Any], want: dict[str,
     ``want`` is ``runs.planned_setup``: the full config and seeded seating rebuilt
     from the manifest. Differing settings are named, never their values.
     """
-    gid, got = planned["id"], header["config"]
+    # A header from before a config field existed is compared as it was played.
+    gid, got = planned["id"], with_historical_defaults(header["config"])
     differ = sorted(
         k for k in set(want["config"]) | set(got) if want["config"].get(k) != got.get(k)
     )
@@ -140,7 +142,9 @@ def check_setup(planned: dict[str, Any], header: dict[str, Any], want: dict[str,
 
 def setup_signature(header: dict[str, Any]) -> str:
     """A setup as both twins must share it: everything but the Style Mask flag."""
-    config = {k: v for k, v in header["config"].items() if k != "style_mask"}
+    config = {
+        k: v for k, v in with_historical_defaults(header["config"]).items() if k != "style_mask"
+    }
     seats = [
         (s["seat"], s["name"], s["role"], seat_model(s["controller"]))
         for s in sorted(header["seats"], key=lambda s: s["seat"])

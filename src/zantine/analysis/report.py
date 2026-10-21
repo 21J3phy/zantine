@@ -707,6 +707,8 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     if args.medium:
         parser.error("--medium is only for effort sweeps (zantine schedule --experiment effort)")
     if experiment(args.run_dir) == "minority":
+        if args.baseline is not None:
+            parser.error("--baseline is only for a Verification Protocol experiment run")
         return minority_command(parser, args)
     try:
         out, report = write_report(

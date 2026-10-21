@@ -12,6 +12,17 @@ VERIFICATION_PROTOCOLS = ("none", "optional", "mandatory")
 # reassignment hooks). Recorded in a verification experiment's manifest; bump it
 # whenever those rules change, so a run is never resumed or reported across rules.
 VERIFICATION_RULES_VERSION = 1
+# Config fields added after earlier runs, with what a header without them meant:
+# before #37 every game was played under the optional Verification Protocol.
+HISTORICAL_CONFIG: dict[str, Any] = {"verification_protocol": "optional"}
+
+
+def with_historical_defaults(config: dict[str, Any]) -> dict[str, Any]:
+    """A transcript header's config with fields it predates filled as they were played.
+
+    Only absent fields are filled; a recorded value (e.g. ``"mandatory"``) is kept.
+    """
+    return {**HISTORICAL_CONFIG, **config}
 
 
 @dataclass(frozen=True)
