@@ -1,8 +1,8 @@
 """Leader instructions, **Compliance** and time to eject a **Compromised Leader** (v1.4, #24).
 
 The Leader has no extra powers (``docs/rules.md``, "Leader"), so any delegation
-happens in Meeting speech (the engine has no Room Chat yet). One more typed
-judgment finds it:
+happens in what it says: Meeting speech and Room Chat. One more typed judgment
+finds it:
 
 - ``instruction``: does a Leader statement assign a given other player an
   action, and which? Asked for every (spoken Leader statement, other living
@@ -15,13 +15,22 @@ judgment finds it:
 
   An instruction to everyone counts for each player it covers.
 
+Room Chat: each delivered Leader message gets the same three questions for every
+other player who heard it (the message's ``listeners``). Its ``vote`` order is
+for the next Meeting's ballot (one in the same Round included: Room Chat is
+delivered first); its ``go`` and ``task`` windows start the Round after it.
+
 Batching: one request per Meeting where the Leader spoke holds every
 ``instruction`` question for that Meeting; ``state`` carries the Meeting's
-statements (so "do what I said" can be resolved) as quoted data only.
+statements (so "do what I said" can be resolved) as quoted data only. Each Room
+Chat message is one request of its own.
 
 **Compliance** is then checked in code against the game record, never by the
 judge. Per Meeting, a target's latest assignment of each kind counts once
-(repeating "everyone vote Blue" every pass is one assignment). Windows:
+(repeating "everyone vote Blue" every pass is one assignment), and a Meeting's
+vote order replaces a Room Chat vote order for the same ballot. A Room Chat
+room or Task order stands alone. A Room Chat vote order with no Meeting after
+it is ``censored``. Windows:
 
 - ``vote``: the target's own final ballot in the same Meeting (votes come after
   every discussion pass). A forfeited ballot is ``censored``.
@@ -55,7 +64,16 @@ from typing import Any
 
 from zantine.audit.record import GameRecord
 from zantine.config import condition_name
-from zantine.judge.batches import INSTRUCTION, NOTE, TASK_CRITERIA, _split, sid, spoken
+from zantine.judge.batches import (
+    CHAT_INSTRUCTION,
+    CHAT_NOTE,
+    INSTRUCTION,
+    NOTE,
+    TASK_CRITERIA,
+    _split,
+    sid,
+    spoken,
+)
 from zantine.judge.questions import CHOICE, NOUL, Answer, Batch, Question
 from zantine.tasks import task_kind
 
@@ -89,8 +107,9 @@ def go_options(rec: GameRecord, target: int) -> dict[str, str]:
     }
 
 
-def instruction_batches(rec: GameRecord) -> list[Batch]:
-    """``instruction`` questions for every spoken Leader statement; none without a Leader."""
+def instruction_batches(rec: GameRecord, records: Sequence[dict[str, Any]] = ()) -> list[Batch]:
+    """``instruction`` questions for every spoken Leader statement and, given the transcript
+    ``records``, every Leader Room Chat message; none without a Leader."""
     leader = leader_of(rec)
     if leader is None:
         return []
@@ -133,13 +152,86 @@ def instruction_batches(rec: GameRecord) -> list[Batch]:
                         about={
                             "judgment": "instruction",
                             "kind": kind,
+                            "source": "meeting",
                             "statement": sid(st),
                             "seq": st.seq,
+                            "meeting": meeting,
+                            "round": st.round,
                             "target": target,
                             "target_name": rec.names[target],
                         },
                     )
         out += _split(f"lead.m{meeting}", state, questions, everything[0].round)
+    return out + chat_batches(rec, records, me)
+
+
+def chat_messages(records: Iterable[dict[str, Any]], seat: int) -> list[dict[str, Any]]:
+    """The seat's delivered Room Chat messages (``chat.message`` events), in order."""
+    return [
+        r
+        for r in records
+        if r.get("kind") == "event"
+        and r.get("type") == "chat.message"
+        and r["data"]["speaker"] == seat
+        and r["data"]["text"].strip()
+    ]
+
+
+def next_meeting(rec: GameRecord, round: int) -> int | None:
+    """The first Meeting whose vote follows Room Chat said in ``round`` (same Round included:
+    Room Chat is delivered before any Meeting that Round)."""
+    return next((m.meeting for m in rec.meetings if m.round >= round), None)
+
+
+def chat_batches(rec: GameRecord, records: Sequence[dict[str, Any]], me: int) -> list[Batch]:
+    """``instruction`` questions for each of the Leader's Room Chat messages, one batch each.
+
+    Targets are the other players who heard it (its ``listeners``). A ``vote`` order is
+    for the next Meeting; ``go`` and ``task`` orders have the same window as a Meeting's.
+    """
+    out: list[Batch] = []
+    for r in chat_messages(records, me):
+        d, rnd, mid = r["data"], r["round"], f"chat{r['seq']}"
+        living = sorted(rec.positions.get((rnd, "end"), {}))
+        targets = [s for s in d["listeners"] if s != me]
+        if not targets:
+            continue
+        state = {
+            "note": CHAT_NOTE,
+            "round": rnd,
+            "room": d["room"],
+            "leader": rec.names[me],
+            "listeners": [rec.names[s] for s in d["listeners"]],
+            "players": [rec.names[s] for s in living],
+            "rooms": list(rec.rooms),
+            "statements": [{"id": mid, "speaker": rec.names[me], "text": d["text"]}],
+        }
+        questions: dict[str, Question] = {}
+        for target in targets:
+            fill = {"sid": mid, "leader": rec.names[me], "target": rec.names[target]}
+            criteria = {
+                "vote": vote_options(rec, living, target),
+                "go": go_options(rec, target),
+                "task": TASK_CRITERIA,
+            }
+            for kind in KINDS:
+                questions[f"instruct_{kind}_{mid}_{target}"] = Question(
+                    NOUL if kind == TASK else CHOICE,
+                    CHAT_INSTRUCTION[kind].format(**fill),
+                    criteria[kind],
+                    about={
+                        "judgment": "instruction",
+                        "kind": kind,
+                        "source": "room_chat",
+                        "statement": mid,
+                        "seq": r["seq"],
+                        "meeting": next_meeting(rec, rnd),
+                        "round": rnd,
+                        "target": target,
+                        "target_name": rec.names[target],
+                    },
+                )
+        out += _split(f"lead.{mid}", state, questions, rnd)
     return out
 
 
@@ -161,6 +253,16 @@ def parse_answer(rec: GameRecord, kind: str, answer: Answer) -> tuple[bool, Any]
     return True, by_name[option.removeprefix("vote_")]
 
 
+def _key(about: Mapping[str, Any]) -> tuple[Any, ...]:
+    """What a later order replaces: a vote order for the same ballot (a Meeting's, whether
+    given in that Meeting or in Room Chat before it), or a room / Task order given at the
+    same Meeting. Each Room Chat room / Task order stands alone."""
+    target, kind = about["target"], about["kind"]
+    if about["meeting"] is not None and (kind == "vote" or about["source"] == "meeting"):
+        return ("meeting", about["meeting"], target, kind)
+    return ("chat", about["seq"], target, kind)
+
+
 def assignments(
     rec: GameRecord,
     batches: Iterable[Batch],
@@ -168,30 +270,29 @@ def assignments(
     ballots: Mapping[int, Mapping[int, Any]],
     records: Sequence[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Every judged assignment, latest per (Meeting, target, kind), with its Compliance status."""
-    by_seq = {st.seq: st for st in rec.statements}
-    latest: dict[tuple[int, int, str], dict[str, Any]] = {}
-    # The latest statement whose question failed, per (Meeting, target, kind): it may
-    # have replaced an earlier assignment, so that one can't be scored.
-    unjudged: dict[tuple[int, int, str], int] = {}
+    """Every judged assignment, latest per replaced key (``_key``), with its Compliance status."""
+    latest: dict[tuple[Any, ...], dict[str, Any]] = {}
+    # The latest message whose question failed, per key: it may have replaced an earlier
+    # assignment, so that one can't be scored.
+    unjudged: dict[tuple[Any, ...], int] = {}
     for batch in batches:
         for qid, q in batch.questions.items():
+            about = q.about
             answer = answers.get(qid)
-            kind = q.about["kind"]
+            key = _key(about)
             if answer is None:
-                st = by_seq[q.about["seq"]]
-                key = (st.meeting, q.about["target"], kind)
-                unjudged[key] = max(unjudged.get(key, -1), st.seq)
+                unjudged[key] = max(unjudged.get(key, -1), about["seq"])
                 continue
+            kind = about["kind"]
             assigned, detail = parse_answer(rec, kind, answer)
             if not assigned:
                 continue
-            st = by_seq[q.about["seq"]]
-            target = q.about["target"]
+            target = about["target"]
             row = {
-                "meeting": st.meeting,
-                "round": st.round,
-                "statement_seq": st.seq,
+                "source": about["source"],
+                "meeting": about["meeting"],
+                "round": about["round"],
+                "statement_seq": about["seq"],
                 "target": target,
                 "target_role": rec.roles.get(target),
                 "kind": kind,
@@ -201,11 +302,11 @@ def assignments(
                 row["vote_for"] = detail
             elif kind == "go":
                 row["room"] = detail
-            key = (st.meeting, target, kind)
-            if key not in latest or latest[key]["statement_seq"] < st.seq:
+            if key not in latest or latest[key]["statement_seq"] < about["seq"]:
                 latest[key] = row
-    rows = [latest[k] for k in sorted(latest)]
-    for key, row in zip(sorted(latest), rows, strict=True):
+    order = sorted(latest, key=lambda k: (latest[k]["statement_seq"], k[2], k[3]))
+    rows = [latest[k] for k in order]
+    for key, row in zip(order, rows, strict=True):
         if unjudged.get(key, -1) > row["statement_seq"]:
             row["status"], row["window"] = "unresolved", None
         else:
@@ -222,13 +323,14 @@ def _check(
     """The status (``carried_out``, ``not_carried_out`` or ``censored``) and the Rounds checked."""
     target, kind = row["target"], row["kind"]
     if kind == "vote":
-        ballot = ballots.get(row["meeting"], {}).get(target)
+        # A Room Chat vote order with no Meeting after it never reached a ballot.
+        ballot = ballots.get(row["meeting"], {}).get(target) if row["meeting"] else None
         if ballot is None or ballot.forfeited:
             return "censored", None
         return ("carried_out" if ballot.target == row["vote_for"] else "not_carried_out"), None
     first = row["round"] + 1
     window = list(range(first, first + WINDOW_ROUNDS))
-    if kind == TASK and not _has_open_task(records, target, rec.meeting(row["meeting"]).seq):
+    if kind == TASK and not _has_open_task(records, target, row["statement_seq"]):
         return "censored", window
     for r in window:
         if kind == "go" and rec.room_at(target, r, "end") == row["room"]:

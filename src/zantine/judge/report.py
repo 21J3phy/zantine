@@ -127,7 +127,7 @@ def run_judgments(
             lies_by_statement[c["statement_seq"]].append((i, c))
     for st in rec.statements:
         batches += challenge_batch(rec, st, lies_by_statement.get(st.seq, []))
-    lead = instruction_batches(rec)
+    lead = instruction_batches(rec, records)
     batches += lead
 
     answers: dict[str, Answer] = {}

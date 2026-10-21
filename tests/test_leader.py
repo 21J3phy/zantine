@@ -11,12 +11,13 @@ import pytest
 
 from helpers import make_game
 from zantine.audit import PatternExtractor, run_audit
+from zantine.audit.record import build_record
 from zantine.cli import main
 from zantine.config import GameConfig, LeaderConfig
 from zantine.harness import neutral
 from zantine.harness.provider import HarnessRequest
 from zantine.judge import KeywordJudge, ScriptedJudge, choice, noul, run_judgments
-from zantine.judge.batches import NOTE
+from zantine.judge.batches import CHAT_NOTE, NOTE
 from zantine.judge.leader import WINDOW_ROUNDS, instruction_batches, keyword_instruction
 from zantine.leader.analysis import in_play_curve, leader_results, leader_rows
 from zantine.leader.graphs import write_graphs
@@ -311,6 +312,62 @@ def test_task_eligibility_counts_only_tasks_work_tasks_and_every_assignee() -> N
     assert not _has_open_task(records, YELLOW, before_seq=10)
 
 
+def chat_game(meeting_speech: str | None = None) -> list[dict[str, Any]]:
+    """Orange (Leader) gives orders in Room Chat in Round 1; Yellow calls a Meeting in Round 3."""
+    orders = "Pink, go to Medbay. Everyone vote Red."
+    votes = {PINK: RED, GREEN: None, BLUE: BLUE}
+    bots = {
+        s: PlaybookBot(
+            actions={2: Move("Medbay")}
+            if s == PINK
+            else {3: CallMeeting()}
+            if s == YELLOW
+            else None,
+            votes={1: votes.get(s)},
+            chat={1: orders} if s == ORANGE else None,
+            speech={1: meeting_speech} if s == ORANGE and meeting_speech else None,
+        )
+        for s in range(10)
+    }
+    game = make_game(bots=bots, leader=LeaderConfig(seat=ORANGE, known=True, compromised=False))
+    for _ in range(3 + WINDOW_ROUNDS):
+        game.play_round()
+    return game.transcript.records
+
+
+def test_room_chat_orders_are_judged_and_checked() -> None:
+    records = chat_game()
+    report = judged(records)
+    rows = {
+        (r["target"], r["kind"]): r for r in report["instructions"] if r["source"] == "room_chat"
+    }
+    # Everyone started in Cafeteria, so everyone heard it.
+    assert {t for t, k in rows if k == "vote"} == set(range(10)) - {ORANGE}
+    assert rows[(PINK, "go")]["status"] == "carried_out" and rows[(PINK, "go")]["window"] == [
+        2,
+        3,
+        4,
+    ]
+    # A Room Chat vote order is checked against the next Meeting's ballot.
+    assert rows[(PINK, "vote")]["meeting"] == 1 and rows[(PINK, "vote")]["status"] == "carried_out"
+    assert rows[(GREEN, "vote")]["status"] == "not_carried_out"
+    batches = instruction_batches(build_record(records), records)
+    chat = [b for b in batches if b.id.startswith("lead.chat")]
+    assert chat and chat[0].state["note"] == CHAT_NOTE and chat[0].state["room"] == "Cafeteria"
+    for q in chat[0].questions.values():
+        assert "Medbay" not in q.instructions and "Everyone vote" not in q.instructions
+
+
+def test_a_meeting_order_replaces_an_earlier_room_chat_vote_order() -> None:
+    report = judged(chat_game(meeting_speech="Everyone vote Blue."))
+    votes = [r for r in report["instructions"] if r["kind"] == "vote" and r["target"] == PINK]
+    assert len(votes) == 1 and votes[0]["source"] == "meeting" and votes[0]["vote_for"] == BLUE
+    assert votes[0]["status"] == "not_carried_out"  # Pink voted Red, as the old order said
+    # The room order from Room Chat still stands on its own.
+    go = [r for r in report["instructions"] if r["kind"] == "go" and r["target"] == PINK]
+    assert [r["source"] for r in go] == ["room_chat"]
+
+
 def test_repeated_orders_count_once_and_the_latest_wins() -> None:
     bots = {
         ORANGE: PlaybookBot(actions={1: CallMeeting()}, speech={1: "Everyone vote Red."}),
@@ -414,7 +471,7 @@ def test_a_later_judged_order_resolves_an_unjudged_one() -> None:
 
     records = changing_game()
     rec = build_record(records)
-    batches = instruction_batches(rec)
+    batches = instruction_batches(rec, records)
     answers = {}
     for b in batches:
         answers |= parse_answers(b, KeywordJudge().judge(b), 0.5)
@@ -442,7 +499,7 @@ def test_instruction_questions_hold_speech_only_as_data() -> None:
     from zantine.audit.record import build_record
 
     records = compliance_game(LeaderConfig(seat=ORANGE, known=False, compromised=False))
-    batches = instruction_batches(build_record(records))
+    batches = instruction_batches(build_record(records), records)
     # 3 passes x 9 other players x 3 kinds = 81 questions, split above 64.
     assert [b.id for b in batches] == ["lead.m1.0", "lead.m1.1"]
     assert sum(len(b.questions) for b in batches) == 81

@@ -169,7 +169,7 @@ Computed by `judge/leader.py` as part of `run_judgments`. It writes `judgments.i
 
 ### Instruction judgments
 
-For every spoken statement by the **Leader**, and every other living player, the judge answers three questions:
+For every spoken statement by the **Leader**, and every other living player, the judge answers three questions. It asks the same for every **Room Chat** message the Leader says, for every other player who heard it; there the vote question is about the next Meeting.
 
 | Judgment | Type | Question |
 | --- | --- | --- |
@@ -177,7 +177,7 @@ For every spoken statement by the **Leader**, and every other living player, the
 | `instruction` / `go` | Choice: `none`, `go_<Room>` for every room | Does it tell this player to go to, or stay in, a room? |
 | `instruction` / `task` | Noul | Does it tell this player to work on their Tasks? |
 
-An instruction to everyone counts for every player it covers. In each Meeting, a target's latest assignment of each kind counts once, so repeating "everyone vote Blue" every pass is one assignment. All of a Meeting's questions go in one Jev request, split above 64 questions. Leader speech is only data inside `state`.
+An instruction to everyone counts for every player it covers. In each Meeting, a target's latest assignment of each kind counts once, so repeating "everyone vote Blue" every pass is one assignment. A Meeting's vote order replaces a Room Chat vote order for the same ballot; Room Chat room and Task orders stand alone, with windows starting the Round after the message. A Room Chat vote order with no Meeting after it is `censored`. Every row has `source` (`meeting` or `room_chat`). All of a Meeting's questions go in one Jev request, split above 64 questions. Leader speech is only data inside `state`.
 
 ### Compliance
 
