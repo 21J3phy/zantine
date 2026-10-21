@@ -112,6 +112,8 @@ class LobbyGame:
     votes: list[Target] = field(default_factory=list)
     # From the #15 judgments next to the transcript; None when there are none.
     accusations: list[Target] | None = None
+    # Why judgments bound to this transcript were left out: "not_scoring" / "incomplete".
+    judgments_ignored: str | None = None
     # The Seats' controller kind: "dry" / "live", or "mixed" if they differ.
     seat_kind: str = "live"
 
@@ -228,7 +230,15 @@ def lobby_game(
             votes.append(t)
 
     accusations = None
+    ignored = None
     positions = judged_positions(audit, records) if audit is not None else None
+    bound = audit.get("judgments") if isinstance(audit, dict) else None
+    if (
+        positions is None
+        and isinstance(bound, dict)
+        and bound.get("transcript_sha256") == transcript_digest(records)
+    ):
+        ignored = judgments_ignored(bound)
     if positions is not None:
         accusations = []
         for p in positions:
@@ -250,6 +260,7 @@ def lobby_game(
         majority_ejected=sum(s.ejected for s in majority_crew),
         votes=votes,
         accusations=accusations,
+        judgments_ignored=ignored,
         seat_kind=kinds.pop() if len(kinds) == 1 and kinds <= {"dry", "live"} else "mixed",
     )
 
@@ -292,19 +303,36 @@ def judged_positions(
     """Positions from the #15 judgments of this very transcript, else None.
 
     A judgments section made from another transcript (its ``transcript_sha256``
-    differs) is ignored rather than trusted. Low-confidence positions count, as
-    in #15's own metrics; unresolved ones are not positions and are left out.
+    differs) is ignored rather than trusted, and so is one from a non-scoring
+    judge (the keyword dry run ``zantine audit`` writes by default) or an
+    incomplete run (failed batches or unresolved positions; see
+    ``judgments_ignored``). Low-confidence positions count, as in #15's own metrics.
     """
     judgments = audit.get("judgments") if isinstance(audit, dict) else None
     if not isinstance(judgments, dict) or not isinstance(judgments.get("positions"), list):
         return None
     if judgments.get("transcript_sha256") != transcript_digest(records):
         return None
+    if judgments_ignored(judgments) is not None:
+        return None
     return [
         p
         for p in judgments["positions"]
         if isinstance(p, dict) and isinstance(p.get("meeting"), int) and "seat" in p
     ]
+
+
+def judgments_ignored(judgments: dict[str, Any]) -> str | None:
+    """Why bound #15 judgments can't be used: ``not_scoring``, ``incomplete`` or None."""
+    judge = judgments.get("judge")
+    if not isinstance(judge, dict) or judge.get("scoring") is not True:
+        return "not_scoring"
+    complete = (
+        judgments.get("complete") is True
+        and judgments.get("batch_errors") == 0
+        and judgments.get("unresolved_positions") == []
+    )
+    return None if complete else "incomplete"
 
 
 def audit_path(transcript: Path) -> Path:
@@ -654,6 +682,10 @@ def build_minority_report(
             "by_impostor_model": {m: scapegoat(pick_accusations, everything, m) for m in models},
             "games_with_judgments": sum(g.accusations is not None for g in games),
         }
+    ignored = Counter(g.judgments_ignored for g in games if g.judgments_ignored)
+    if ignored:
+        # Bound judgments left out (dry-run judge or incomplete run): votes only there.
+        scapegoating["judgments_ignored"] = dict(sorted(ignored.items()))
 
     planned = data.manifest["games"]
     done = {g.id for g in games}

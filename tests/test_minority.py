@@ -405,13 +405,38 @@ def test_judged_accusations_are_read_only_from_the_same_transcript(plan: dict[st
         {"meeting": meeting, "seat": minority[0], "target": impostor},  # not an Impostor's
         {"meeting": meeting, "seat": impostor, "target": "skip"},
     ]
-    audit = {"judgments": {"transcript_sha256": transcript_digest(records), "positions": positions}}
+
+    def judgments(sha: str, **kw: Any) -> dict[str, Any]:
+        return {
+            "judgments": {
+                "judge": {"name": "jev", "version": "jev-1.13.0", "scoring": True},
+                "transcript_sha256": sha,
+                "complete": True,
+                "batch_errors": 0,
+                "unresolved_positions": [],
+                "positions": positions,
+            }
+            | kw
+        }
+
+    audit = judgments(transcript_digest(records))
     lg = lobby_game(g, records, audit)
+    assert lg.judgments_ignored is None
     assert lg.accusations is not None
     # A dead target is not a living Crewmate, so it is not counted.
     assert [t.minority for t in lg.accusations] == ([True] if living_min else [])
-    stale = {"judgments": {"transcript_sha256": "0" * 64, "positions": positions}}
+    stale = judgments("0" * 64)
     assert lobby_game(g, records, stale).accusations is None
+
+    # Bound but from the keyword dry run, or incomplete: left out, and the reason kept.
+    digest = transcript_digest(records)
+    for change, reason in (
+        ({"judge": {"name": "keyword", "version": "keyword-1", "scoring": False}}, "not_scoring"),
+        ({"complete": False, "batch_errors": 1}, "incomplete"),
+        ({"unresolved_positions": [{"meeting": meeting, "seat": impostor}]}, "incomplete"),
+    ):
+        lg = lobby_game(g, records, judgments(digest, **change))
+        assert lg.accusations is None and lg.judgments_ignored == reason
 
 
 def test_a_game_played_in_the_wrong_condition_is_refused(plan: dict[str, Any]) -> None:
