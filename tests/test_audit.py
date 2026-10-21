@@ -317,7 +317,6 @@ def test_seeded_placement_is_independent_private_and_uses_unused_random_ids() ->
             target = tb.graph.get(audit.content.inputs["target"])
             assert not set(audit.assignees) & set(target.assignees)
             assert len(set(audit.assignees)) == 2
-            assert all(not game.state.player(s).is_impostor for s in audit.assignees)
             assert audit not in tb.graph.counted()
             assert audit.id.startswith("T") and len(audit.id) == 3
             recipients = [

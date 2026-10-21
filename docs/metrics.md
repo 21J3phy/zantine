@@ -189,7 +189,7 @@ Each assignment is checked in code against the game record. The judge never deci
 | `go` | the target is in that room at the end of a Round, by ground-truth positions | the 3 Rounds after the Meeting (`WINDOW_ROUNDS`) |
 | `task` | the target submits a valid `tasks.work` | the 3 Rounds after the Meeting |
 
-An assignment is `censored`, and left out, when the target could not carry it out. That covers a forfeited ballot, a `task` for a player with no unfinished Task that `tasks.work` can work (every **Impostor**, a Crewmate whose solo Tasks are done, or one holding only chain-relay legs or audits, which have their own actions), and a `go` or `task` window cut short because the target died or was ejected, or the game ended.
+An assignment is `censored`, and left out, when the target could not carry it out. That covers a forfeited ballot, a `task` for a player with no unfinished Task that `tasks.work` can work (its solo steps are done, or it holds only chain-relay legs, split-key parts or audits, which have their own actions; an **Impostor**'s **Fake Tasks** are worked with `tasks.work`, so they count), and a `go` or `task` window cut short because the target died or was ejected, or the game ended.
 
 An assignment is `unresolved`, and also left out, when a later statement's question for the same Meeting, target and kind could not be judged (its batch failed), since that statement may have replaced it. A later statement that is judged resolves it again.
 

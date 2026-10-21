@@ -452,11 +452,12 @@ def test_transcripts_without_room_chat_count_meeting_statements_only(tmp_path: P
 
 def test_report_survives_estimates_without_finite_replicates(tmp_path: Path) -> None:
     """A defined estimate whose every replicate is undefined has null bounds; the
-    report must still render (Astra's repro: seed 47, two lobbies, 1 replicate)."""
+    report must still render (Astra's repro: two lobbies, 1 replicate; the seeds are
+    re-picked whenever a rules change alters dry-run play)."""
     run_dir = tmp_path / "sparse"
-    create_run(run_dir, speed.make_speed_manifest(POOL, 47))
+    create_run(run_dir, speed.make_speed_manifest(POOL, 1))
     execute(run_dir, mode="dry")
-    keep = {"b01-lobby-00", "b01-lobby-01"}
+    keep = {"b01-lobby-00", "b01-lobby-03"}
     for path in (run_dir / "games").glob("*.jsonl"):
         if path.stem not in keep:
             path.unlink()

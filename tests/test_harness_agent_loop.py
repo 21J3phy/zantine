@@ -69,16 +69,16 @@ def test_an_agent_loop_seat_plays_a_full_game() -> None:
         "provider": "anthropic",
         "effort": "medium",
         "effort_setting": "medium",
-        "harness": "agent-loop-v3",
+        "harness": "agent-loop-v4",
     }
     calls = [r["data"] for r in game.transcript.events("harness.call")]
     assert len(calls) == len(client.messages.calls) > 0
-    assert all(c["harness"] == "agent-loop" and c["harness_version"] == 3 for c in calls)
+    assert all(c["harness"] == "agent-loop" and c["harness_version"] == 4 for c in calls)
     assert {c["phase"] for c in calls} >= {"action", "speak", "vote"}
     # The game ran on the agent-loop prompt and tools.
     assert all(c["system"][0]["text"] == agent_loop.SYSTEM_PROMPT for c in client.messages.calls)
     assert result.cost["harnesses"] == {
-        "agent-loop-v3": {"seats": [me], **{k: result.cost["game"][k] for k in result.cost["game"]}}
+        "agent-loop-v4": {"seats": [me], **{k: result.cost["game"][k] for k in result.cost["game"]}}
     }
 
 
@@ -99,9 +99,9 @@ def test_both_harnesses_log_the_same_fields_through_one_ledger() -> None:
     # One ledger prices both, and the cost record splits them by Harness.
     assert result.ledger.spent_usd == pytest.approx(sum(c["cost_usd"] for c in calls))
     harnesses = result.cost["harnesses"]
-    assert harnesses["neutral-v7"]["seats"] == [neutral_seat]
-    assert harnesses["agent-loop-v3"]["seats"] == [loop_seat]
-    for label, seat in (("neutral-v7", neutral_seat), ("agent-loop-v3", loop_seat)):
+    assert harnesses["neutral-v8"]["seats"] == [neutral_seat]
+    assert harnesses["agent-loop-v4"]["seats"] == [loop_seat]
+    for label, seat in (("neutral-v8", neutral_seat), ("agent-loop-v4", loop_seat)):
         assert harnesses[label]["calls"] == len(by_seat[seat])
         assert harnesses[label]["cost_usd"] == result.cost["seats"][seat]["cost_usd"]
     total = sum(h["cost_usd"] for h in harnesses.values())
@@ -312,8 +312,8 @@ def test_cli_records_the_harness_in_the_transcript_header(
     assert main([*argv, "--spend-cap", "20", "--out", str(out), "--quiet"]) == 0
     records = Transcript.read(out)
     live = [s["controller"] for s in records[0]["seats"] if s["controller"]["kind"] == "live"]
-    assert sorted(c["harness"] for c in live) == ["agent-loop-v3", "neutral-v7"]
-    assert set(records[-1]["harnesses"]) == {"agent-loop-v3", "neutral-v7"}
+    assert sorted(c["harness"] for c in live) == ["agent-loop-v4", "neutral-v8"]
+    assert set(records[-1]["harnesses"]) == {"agent-loop-v4", "neutral-v8"}
 
 
 def test_an_agent_loop_seat_talks_through_the_deciding_calls_say() -> None:

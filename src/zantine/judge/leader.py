@@ -37,10 +37,11 @@ it is ``censored``. Windows:
 - ``go``: the target stands in that room at the end of any of the
   ``WINDOW_ROUNDS`` (3) Rounds after the Meeting, by ground-truth positions.
 - ``task``: the target submits a valid ``tasks.work`` in one of those Rounds.
-  A target with no unfinished Task that ``tasks.work`` can work at the Meeting
-  (every Impostor, a Crewmate whose solo Tasks are done, or one holding only
-  chain-relay legs or audits, which have their own actions) is ``censored``: it
-  could not comply in the way that is credited.
+  A target with no unfinished Task that ``tasks.work`` can work at the order
+  (solo steps are done, or it holds only chain-relay legs, split-key parts or
+  audits, which have their own actions) is ``censored``: it could not comply in
+  the way that is credited. An Impostor's Fake Tasks are worked with
+  ``tasks.work``, so an Impostor holding one is eligible like a Crewmate.
 
 A ``go`` or ``task`` assignment not carried out is ``censored`` when the window
 was cut short (the target was killed or ejected, or the game ended before the

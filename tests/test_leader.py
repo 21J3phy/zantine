@@ -250,18 +250,18 @@ def test_compliance_is_checked_against_votes_and_positions() -> None:
     assert status[(PINK, "go")] == "carried_out" and rows[(PINK, "go")]["window"] == [2, 3, 4]
     assert status[(BLACK, "go")] == "not_carried_out"
     assert status[(WHITE, "go")] == "censored"  # killed in Round 2
-    # Tasks: Yellow never worked; Blue is an Impostor and has no Tasks.
+    # Tasks: Yellow never worked, and nor did Blue, an Impostor with Fake Tasks it could work.
     assert status[(YELLOW, "task")] == "not_carried_out"
-    assert status[(BLUE, "task")] == "censored"
+    assert status[(BLUE, "task")] == "not_carried_out"
     lead = report["leader"]
     assert lead["condition"] == "known_crew" and lead["window_rounds"] == WINDOW_ROUNDS
     assert lead["compliance"] == {
         "assignments": 14,
         "carried_out": 5,
-        "not_carried_out": 6,
-        "censored": 3,
+        "not_carried_out": 7,
+        "censored": 2,
         "unresolved": 0,
-        "rate": round(5 / 11, 6),
+        "rate": round(5 / 12, 6),
     }
     assert lead["compliance_by_kind"]["vote"]["rate"] == 0.5
     assert lead["crew_compliance"]["rate"] == round(5 / 9, 6)  # Red and Blue left out
@@ -281,7 +281,8 @@ def test_relay_only_carriers_are_censored_for_task_orders() -> None:
     assert len(carriers) == 2
     report = audited(records)
     tasks = [r for r in report["judgments"]["instructions"] if r["kind"] == "task"]
-    assert {r["target"] for r in tasks} >= carriers
+    # Carriers come from every Seat, so the Leader may hold a leg; it is never its own target.
+    assert {r["target"] for r in tasks} >= carriers - {RED}
     assert all(r["status"] == "censored" for r in tasks)
     lead = report["judgments"]["leader"]
     assert lead["compliance_by_kind"]["task"]["rate"] is None
