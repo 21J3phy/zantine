@@ -308,10 +308,18 @@ def test_double_kill() -> None:
     )
 
 
+def result_of(records: Records) -> dict[str, Any]:
+    return next(r for r in records if r["kind"] == "result")
+
+
 def test_impostor_survived_a_parity_win() -> None:
-    records = scripted(7)
-    result = next(r for r in records if r["kind"] == "result")
-    assert (result["winner"], result["reason"]) == ("impostors", "parity")
+    # The first scripted seed whose game ends in a parity win (seeds change with the scenario).
+    records = next(
+        g
+        for g in map(scripted, range(50))
+        if (result_of(g)["winner"], result_of(g)["reason"]) == ("impostors", "parity")
+    )
+    result = result_of(records)
     m = only(find_moments(records), "impostor_survived")
     assert m["round"] == result["rounds"]
     assert m["caption"].endswith(f"won by parity in Round {result['rounds']}.")
