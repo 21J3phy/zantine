@@ -1,6 +1,6 @@
 import { FIGURE_BY_ID } from './figures';
 
-// Each folder tab is its own page. Items are positioned in whole centimetres on a
+// Each page in the top bar is its own page. Items are positioned in whole centimetres on a
 // 38 cm board and pushed in reading order; phones stack them in that order.
 
 export type BlockKey =
@@ -58,8 +58,8 @@ const fig = (id: string, x: number, top: number, size?: { w: number; h: number; 
 const block = (key: BlockKey, x: number, top: number, w: number, h: number) => items.push({ kind: 'block', key, x, y: top, w, h });
 const heading = (key: string, title: string, top: number, sub?: string) =>
   items.push({ kind: 'heading', key, title, sub, x: 0, y: top, w: 38, h: sub ? 3 : 2 });
-/** A one-line section label above a row of figures. */
-const label = (key: string, title: string, top: number) => items.push({ kind: 'heading', key, title, small: true, x: 0, y: top, w: 38, h: 1 });
+/** A section title above a row of figures, with an optional short note beside it. */
+const label = (key: string, title: string, top: number, sub?: string) => items.push({ kind: 'heading', key, title, sub, small: true, x: 0, y: top, w: 38, h: 1 });
 
 const pages: Page[] = [];
 const page = (id: string, title: string, build: () => void) => {
@@ -73,7 +73,7 @@ const page = (id: string, title: string, build: () => void) => {
 // One emphasized figure beside two small ones; rows alternate sides.
 const BIG = { w: 25, h: 25, featured: true };
 const SMALL = { w: 12, h: 12 };
-const featuredRow = (big: string, small: [string, string], side: 'left' | 'right', gap = 2) => {
+const featuredRow = (big: string, small: [string, string], side: 'left' | 'right', gap = 2.5) => {
   const t = row(BIG.h, gap);
   if (side === 'left') {
     fig(big, 0, t, BIG);
@@ -88,30 +88,30 @@ const featuredRow = (big: string, small: [string, string], side: 'left' | 'right
 
 // Results: the figures, nothing else. Explanations live behind each figure's expand button and on the other tabs.
 page('results', 'Results', () => {
-  block('intro', 0, row(4, 1.5), 38, 4);
-  label('how', 'How the benchmark works', row(1, 0.6));
-  block('explainer', 0, row(7, 2), 38, 7);
-  // The three headline measures side by side, then each against cost, before the detail.
-  label('headline', 'Headline results', row(1, 0.6));
-  const hl = row(12, 1);
+  block('intro', 0, row(4, 1), 38, 4);
+  label('how', 'How a game works', row(1, 0.5));
+  block('explainer', 0, row(4.5, 2), 38, 4.5);
+  // The three headline Scores side by side, then each against cost, before the detail.
+  label('headline', 'Scores', row(1, 0.5), 'Each out of 100, where a Perfect Team scores 100.');
+  const hl = row(12, 1.5);
   fig('hl-productivity', 0, hl);
   fig('hl-communication', 13, hl);
   fig('hl-vigilance', 26, hl);
-  const vc = row(14, 2);
+  const vc = row(14, 2.5);
   fig('productivity-cost', 0, vc, { w: 18.5, h: 14 });
   fig('vigilance-cost', 19.5, vc, { w: 18.5, h: 14 });
-  label('team', 'Team performance', row(1, 0.6));
+  label('team', 'Team performance', row(1, 0.5));
   featuredRow('productivity-vigilance', ['rounds-distribution', 'outcomes'], 'left');
-  label('vigilance', 'Vigilance and sabotage', row(1, 0.6));
+  label('vigilance', 'Vigilance and sabotage', row(1, 0.5));
   featuredRow('correct-votes', ['sabotage-damage', 'impostor-survival'], 'right');
-  label('communication', 'Communication', row(1, 0.6));
+  label('communication', 'Communication', row(1, 0.5));
   featuredRow('reliability-disclosure', ['claims-truth', 'floor-pull'], 'left');
-  label('cost', 'Cost and reasoning', row(1, 0.6));
+  label('cost', 'Cost and reasoning', row(1, 0.5));
   featuredRow('cost', ['thinking', 'invalid-actions'], 'right');
-  label('all', 'Every metric', row(1, 0.6));
-  fig('all-metrics', 0, row(17, 2), { w: 38, h: 17 });
-  label('more', 'More', row(1, 0.6));
-  const t = row(13);
+  label('all', 'Every metric', row(1, 0.5));
+  fig('all-metrics', 0, row(12, 2.5), { w: 38, h: 12 });
+  label('more', 'More', row(1, 0.5));
+  const t = row(13, 1.5);
   fig('disclosure-lag', 0, t, { w: 25, h: 13 });
   fig('survival-curve', 26, t, { w: 12, h: 13 });
   fig('flagship-sibling', 0, row(11, 2), { w: 38, h: 11 });

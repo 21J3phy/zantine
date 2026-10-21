@@ -231,10 +231,10 @@ def test_judged_positions_are_used_when_bound_to_the_transcript(tmp_path: Path) 
         {"meeting": 1, "seat": 3, "target": 0, "low_confidence": False},
         {"meeting": 1, "seat": 6, "target": "skip", "low_confidence": False},
     ]
-    audit = {"judgments": {"transcript_sha256": digest(records), "positions": positions}}
+    audit = {"judgments": _judgments(digest(records), positions)}
     path.with_suffix(".audit.json").write_text(json.dumps(audit), encoding="utf-8")
     rows = {r.seat: r for r in speed_seats(PLANNED, records, path)}
-    assert rows[3].pull_source == "judged"
+    assert rows[3].pull_source == "judged" and rows[3].pull_judge == "jev jev-1.13.0"
     # Seat 3 pushed Impostor 0; only Seat 5 voted 0 (the target's own ballot is left out).
     assert (rows[3].pull_matches, rows[3].pull_ballots) == (1, 8)
     # Seat 6 pushed skip; nobody skipped. Seats without a judged position have none.
@@ -243,7 +243,8 @@ def test_judged_positions_are_used_when_bound_to_the_transcript(tmp_path: Path) 
 
     # Made from another transcript, or not bound to any: the own-vote proxy is used.
     for bound in ("0" * 64, None, "", "missing"):
-        judgments = {"positions": positions}
+        judgments = _judgments(None, positions)
+        del judgments["transcript_sha256"]
         if bound != "missing":
             judgments["transcript_sha256"] = bound
         path.with_suffix(".audit.json").write_text(
@@ -256,6 +257,79 @@ def test_judged_positions_are_used_when_bound_to_the_transcript(tmp_path: Path) 
 
 
 SPEED_TIERS = ("fast", "normal", "slow", "fast", "normal", "slow", "fast", "normal", "slow", "fast")
+
+
+def _judgments(sha: str | None, positions: list[dict], **kw: object) -> dict:
+    """A complete scoring ``judgments`` section, as ``zantine audit --judge jev`` writes it."""
+    return {
+        "judge": {"name": "jev", "version": "jev-1.13.0", "scoring": True},
+        "transcript_sha256": sha,
+        "complete": True,
+        "batch_errors": 0,
+        "unresolved_positions": [],
+        "positions": positions,
+    } | kw
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        ({"judge": {"name": "keyword", "version": "keyword-1", "scoring": False}}, "not_scoring"),
+        ({"judge": None}, "not_scoring"),
+        ({"complete": False, "batch_errors": 1}, "incomplete"),
+        ({"unresolved_positions": [{"meeting": 1, "seat": 3}]}, "incomplete"),
+        ({"complete": None}, "incomplete"),
+    ],
+)
+def test_dry_run_or_incomplete_judgments_fall_back_to_the_labelled_proxy(
+    tmp_path: Path, change: dict, reason: str
+) -> None:
+    game, _ = _meeting_game(tiers=SPEED_TIERS)
+    records = game.transcript.records
+    path = tmp_path / "g1.jsonl"
+    positions = [{"meeting": 1, "seat": 3, "target": 0, "low_confidence": False}]
+    audit = {"judgments": _judgments(digest(records), positions, **change)}
+    path.with_suffix(".audit.json").write_text(json.dumps(audit), encoding="utf-8")
+    rows = {r.seat: r for r in speed_seats(PLANNED, records, path)}
+    assert rows[3].pull_source == "proxy" and rows[3].judgments_ignored == reason
+    assert rows[3].pull_judge is None
+    assert (rows[3].pull_matches, rows[3].pull_ballots) == (8, 8)  # own vote for 5
+    section = tier_section(list(rows.values()), "random", replicates=20, seed=0)
+    assert section["pull_source"] == "proxy" and section["judged_games"] == 0
+    assert section["judgments_ignored"] == {reason: 1} and section["judges"] == []
+    assert section["metrics"]["vote_pull"]["label"].endswith("(proxy: own votes)")
+
+
+def test_default_cli_audit_does_not_turn_the_proxy_into_judged(tmp_path: Path) -> None:
+    """End to end: `zantine audit` (keyword dry run by default) beside a speed game."""
+    game, _ = _meeting_game(tiers=SPEED_TIERS)
+    path = tmp_path / "g1.jsonl"
+    path.write_text(game.transcript.to_jsonl(), encoding="utf-8")
+    before = {r.seat: r for r in speed_seats(PLANNED, game.transcript.records, path)}
+    assert main(["audit", str(path)]) == 0
+    audit = json.loads(path.with_suffix(".audit.json").read_text())
+    assert audit["judgments"]["judge"]["scoring"] is False
+    assert audit["judgments"]["transcript_sha256"] == digest(game.transcript.records)
+    after = {r.seat: r for r in speed_seats(PLANNED, game.transcript.records, path)}
+    for seat, row in after.items():
+        assert row.pull_source == "proxy" and row.judgments_ignored == "not_scoring"
+        assert (row.pull_matches, row.pull_ballots) == (
+            before[seat].pull_matches,
+            before[seat].pull_ballots,
+        )
+    section = tier_section(list(after.values()), "random", replicates=20, seed=0)
+    assert section["pull_source"] == "proxy"
+    assert "(proxy: own votes)" in section["metrics"]["vote_pull"]["label"]
+
+    # A complete scoring audit for the same transcript is used, and labelled judged.
+    positions = [{"meeting": 1, "seat": 3, "target": 0, "low_confidence": False}]
+    audit["judgments"] = _judgments(audit["judgments"]["transcript_sha256"], positions)
+    path.with_suffix(".audit.json").write_text(json.dumps(audit), encoding="utf-8")
+    judged = speed_seats(PLANNED, game.transcript.records, path)
+    section = tier_section(judged, "random", replicates=20, seed=0)
+    assert section["pull_source"] == "judged" and section["judged_games"] == 1
+    assert section["judges"] == ["jev jev-1.13.0"] and section["judgments_ignored"] == {}
+    assert "proxy" not in section["metrics"]["vote_pull"]["label"]
 
 
 def test_silent_games_leave_speech_shares_undefined(tmp_path: Path) -> None:
