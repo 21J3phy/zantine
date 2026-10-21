@@ -20,6 +20,8 @@ from zantine.config import GameConfig
 from zantine.harness.ledger import Ledger
 from zantine.harness.live import LiveDisabled, play_live
 from zantine.harness.provider import ProviderError
+from zantine.judge.judges import ScriptedJudge, noul
+from zantine.judge.judges import choice as judge_choice
 from zantine.observations import MeetingContext
 from zantine.rules.actions import CallMeeting
 from zantine.runner import new_game, play
@@ -341,6 +343,43 @@ def test_a_reversed_secondary_accusation_is_never_broadcast() -> None:
     assert all(heard(game, seat) == [ORIGINAL] for seat in range(10))
 
 
+def test_a_reversed_self_role_is_caught_even_by_a_correct_but_blind_judge() -> None:
+    """``other`` Claims and a judge that sees no stance: the role anchor still differs."""
+    extractor = ScriptedExtractor(lambda inp: {"claims": [claim("other", "I", inp.text)]})
+
+    def blind(batch: Any, qid: str, q: Any) -> Any:
+        pick = "no_one" if "no_one" in q.options else "none"
+        return judge_choice(q.options, pick, 1.0) if q.kind == "choice" else noul(0.9)
+
+    check = MeaningCheck(extractor, ScriptedJudge(blind))
+    a, b = "I am a Crewmate.", "I am an Impostor."
+    problems = MeaningCheck.differences(check.meaning(item(a), a), check.meaning(item(b), b))
+    assert any(p.startswith("roles") for p in problems), problems
+
+
+def test_the_dry_judge_reads_the_speakers_own_stance_and_dead_players() -> None:
+    check = MeaningCheck(PatternExtractor(), MaskKeywordJudge())
+    alive = {"living": (0, 1, 2)}  # Pink (3) is dead
+    for text, red, pink in [
+        ("I am a Crewmate. Pink was the Impostor.", "defends", "accuses"),
+        ("I am an Impostor. Pink was innocent.", "accuses", "defends"),
+        ("I never killed Pink.", "defends", "none"),
+    ]:
+        stances = dict(check.meaning(item(text, **alive), text).stances)
+        assert (stances["Red"], stances["Pink"]) == (red, pink), text
+
+
+def test_an_invented_confession_is_never_broadcast() -> None:
+    masker = ScriptedMasker(lambda it, p: "I am an Impostor.")
+    game, _ = masked_game(masker, speech="I am a Crewmate.")
+    assert (said(game)["text"], said(game)["mask"]) == ("I am a Crewmate.", "neutralized")
+    assert all(heard(game, seat) == ["I am a Crewmate."] for seat in range(10))
+    first = events(game, "style_mask.check")[0]
+    assert any("Red" in p for p in first["problems"]) and any(
+        p.startswith("roles") for p in first["problems"]
+    )
+
+
 def test_a_claim_that_loses_its_hedge_is_a_meaning_change() -> None:
     key = ("location", "blue", None, "storage", None, None, False, False, False)
     anchors = {"players": ["blue"]}
@@ -354,7 +393,12 @@ def test_the_dry_judge_reads_stances() -> None:
     check = MeaningCheck(PatternExtractor(), MaskKeywordJudge())
     text = "I accuse Blue. Green was with me. Pink seems kind of sus."
     m = check.meaning(item(text), text)
-    assert dict(m.stances) == {"Blue": "accuses", "Green": "defends", "Pink": "suspects"}
+    assert dict(m.stances) == {
+        "Blue": "accuses",
+        "Green": "defends",
+        "Pink": "suspects",
+        "Red": "none",
+    }
     assert m.push == "Blue" and m.anchors["players"] == ["blue", "green", "pink"]
 
 
@@ -614,6 +658,7 @@ def test_a_lost_masker_response_is_held_against_the_cap() -> None:
         style_mask=style,
     )
     assert run.aborted == "spend_cap"
+    assert list(run.game.transcript.events("style_mask.final"))  # provenance kept on abort
     calls = [c["data"] for c in run.game.transcript.events("harness.call")]
     assert calls and all(not c["ok"] and c["purpose"] == "style_mask" for c in calls)
     worst = SPEC.model_spec().worst_case_cost(masker.request(item("x")).text_size())
@@ -629,6 +674,67 @@ def test_an_http_rejection_is_not_held() -> None:
     with pytest.raises(ProviderError):
         masker.rewrite(item("hello"))
     assert ledger.spent_usd == 0
+
+
+def test_the_transcript_keeps_what_the_checkers_endpoints_served() -> None:
+    from test_claim_extractor import SPEC as XSPEC
+    from test_claim_extractor import FakeEndpoint
+    from zantine.audit.llm import LLMExtractor
+    from zantine.judge.jev import JevAdapter, JevJudge, JevSpec
+
+    def jev(url: str, headers: dict[str, str], payload: dict[str, Any]) -> str:
+        # Same answers for any message, so every rewrite passes the check.
+        answers = {}
+        for qid, q in payload["questions"].items():
+            if q["type"] == "noul":
+                answers[qid] = noul(0.9)
+            else:
+                options = tuple(q["criteria"])
+                pick = "no_one" if "no_one" in options else "none"
+                answers[qid] = judge_choice(options, pick, 0.9)
+        usage = {"input_tokens": 1000, "output_tokens": 0}
+        return json.dumps({"model": "served-jev-v2", "answers": answers, "usage": usage})
+
+    ledger = Ledger(5.0)
+    extractor = LLMExtractor(XSPEC, ledger, OpenAICompatAdapter(XSPEC, FakeEndpoint(), "sk"))
+    spec = JevSpec()
+    judge = JevJudge(spec, ledger, JevAdapter(spec, jev, "sk"))
+    style = StyleMask(NeutralMasker(), MeaningCheck(extractor, judge))
+    config = GameConfig(seed=7, style_mask=True)
+    run = play_live(config, "scripted", spend_cap_usd=5.0, ledger=ledger, style_mask=style)
+    assert run.aborted is None
+    (setup,) = [e["data"] for e in run.game.transcript.events("style_mask.setup")]
+    (final,) = [e["data"] for e in run.game.transcript.events("style_mask.final")]
+    assert setup["check"]["extractor"]["served"] == [] and setup["check"]["judge"]["served"] == []
+    served = [{"model": "test/open-weights-7b", "system_fingerprint": "fp_test"}]
+    assert final["check"]["extractor"]["served"] == served
+    assert final["check"]["judge"]["served"] == ["served-jev-v2"]
+    assert run.game.transcript.records[-2]["style_mask"] == final  # the result record
+    for seat in range(10):
+        assert not any("served" in json.dumps(o.data) for o in run.game.observations_of(seat))
+
+
+def test_numbers_sort_the_same_under_every_hash_seed(tmp_path: Path) -> None:
+    import os
+    import subprocess
+    import sys
+
+    script = (
+        "import hashlib, json, sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).parent)!r})\n"
+        "from test_style_mask import masked_game\n"
+        "game, _ = masked_game(speech='The numbers were 1 and 01.')\n"
+        "blob = '\\n'.join(json.dumps(r, sort_keys=True) for r in game.transcript.records)\n"
+        "print(hashlib.sha256(blob.encode()).hexdigest())\n"
+    )
+    digests = set()
+    for seed in ("1", "5", "9"):
+        env = {**os.environ, "PYTHONHASHSEED": seed}
+        out = subprocess.run(
+            [sys.executable, "-c", script], env=env, capture_output=True, text=True, check=True
+        )
+        digests.add(out.stdout.strip())
+    assert len(digests) == 1
 
 
 def test_packaged_masker_is_pinned_and_the_live_gate_holds(
@@ -731,14 +837,31 @@ def test_no_game_is_ever_in_both_training_and_test() -> None:
     assert r["balanced_accuracy"] <= 0.6 and r["p_value_balanced_vs_chance"] > 0.05
 
 
+@pytest.mark.parametrize("coins", [(0, 0), (0, 1), (1, 0), (1, 1)])
+def test_two_games_agreeing_by_coincidence_are_not_significant(coins: tuple[int, int]) -> None:
+    """Exact no-style null: a fair coin per game decides which Model writes which text."""
+    texts, labels, groups, seats = [], [], [], []
+    for g, coin in enumerate(coins):
+        for seat, text in enumerate(("a" * 12, "z" * 12)):
+            for _ in range(5):
+                texts.append(text)
+                labels.append("AB"[seat ^ coin])
+                groups.append(f"g{g}")
+                seats.append(seat)
+    r = cross_validate(texts, labels, groups, units=seats, permutations=200)
+    assert r["balanced_accuracy"] in (0.0, 1.0)
+    # Half the equally likely relabelings are perfect too, so p is about 0.5, never 0.001.
+    assert r["p_value_balanced_vs_chance"] > 0.3 and r["p_value_vs_chance"] > 0.3
+    assert r["balanced_accuracy_ci95"] is None and "10+ games" in r["ci_note"]
+
+
 def test_inference_is_by_game_cluster_and_duplication_invariant() -> None:
     rng = random.Random(3)
     labels = [rng.choice("xy") for _ in range(160)]
     correct = [rng.random() < 0.75 for _ in labels]
     groups = [f"g{i % 8}" for i in range(160)]
-    kw = {"chance_acc": 0.5, "chance_bal": 0.5}
-    once = cluster_bootstrap(labels, correct, groups, **kw)
-    repeated = cluster_bootstrap(labels * 100, correct * 100, groups * 100, **kw)
+    once = cluster_bootstrap(labels, correct, groups)
+    repeated = cluster_bootstrap(labels * 100, correct * 100, groups * 100)
     assert once == repeated
     lo, hi = once["balanced_accuracy_ci95"]
     assert lo < 0.75 < hi

@@ -17,15 +17,17 @@ original).
 - **Judgments** (one judge batch per version):
   - ``push`` (Choice, as in the judgments): whom does the message argue to
     eject (another living player, ``skip``, ``no_one``)?
-  - ``stance`` (Choice) for every other living player: ``accuses``,
-    ``suspects`` (hedged suspicion), ``defends`` or ``none``. Catches a reversed
+  - ``stance`` (Choice) toward every player, the speaker ("I am a Crewmate" vs
+    "I am an Impostor") and dead players included: ``accuses``, ``suspects``
+    (hedged suspicion), ``defends`` or ``none``. Catches a reversed confession,
     secondary accusation or defense when the vote target is unchanged.
   - ``asserted`` (Noul, as in the judgments) for every Claim: stated as fact,
     or hedged? Catches added or removed hedging.
 - **Anchors** (plain code): the same player names, rooms, Task ids and numbers
-  mentioned, the same number of negations (not, never, n't, ...), and hedging
-  present in both or neither. A conservative backstop for edits the judge
-  might miss; ``neutralize`` never changes any of them.
+  mentioned, the same counts of role words (Impostor, Crewmate) and negations
+  (not, never, n't, ...), and hedging present in both or neither. A
+  conservative backstop for edits the judge might miss; ``neutralize`` never
+  changes any of them.
 
 Fatal provider errors and ``SpendCapReached`` propagate and stop the run.
 """
@@ -55,7 +57,7 @@ from zantine.judge.judges import Judge, KeywordJudge, choice
 from zantine.judge.questions import CHOICE, NOUL, Batch, JudgmentError, Question, parse_answers
 from zantine.stylemask.base import MaskInput
 
-CHECK_VERSION = "meaning-3"
+CHECK_VERSION = "meaning-4"
 CHECKED_KINDS = ("location", "together", "kill", "task_done")
 _SELF_WORDS = frozenset({"i", "me", "myself", "self"})
 
@@ -68,6 +70,12 @@ PUSH = (
 STANCE = (
     "Statement {sid} was said by {speaker}. What stance does statement {sid} take toward "
     "{name}? Use the statements in earlier only to resolve references." + SAFETY
+)
+STANCE_SELF = (
+    "Statement {sid} was said by {speaker}. What stance does statement {sid} take toward "
+    "{speaker}, the speaker? First-person statements ('I am a Crewmate', 'I did it', 'vote "
+    "me out') are about {speaker}. Use the statements in earlier only to resolve references."
+    + SAFETY
 )
 ACCUSES, SUSPECTS, DEFENDS, NONE = "accuses", "suspects", "defends", "none"
 
@@ -85,7 +93,9 @@ def stance_options(name: str) -> dict[str, str]:
 
 def prompt_hash() -> str:
     """Pins the question templates the meaning check asks."""
-    blob = json.dumps([NOTE, PUSH, STANCE, stance_options("X"), ASSERTED, ASSERTED_CRITERIA])
+    blob = json.dumps(
+        [NOTE, PUSH, STANCE, STANCE_SELF, stance_options("X"), ASSERTED, ASSERTED_CRITERIA]
+    )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -228,7 +238,9 @@ class MeaningCheck:
     ) -> Meaning:
         assert self.judge is not None
         speaker = item.speaker_name
-        others = [item.roster[s] for s in sorted(item.living) if s != item.speaker]
+        # Every player, the speaker and the dead included: a statement can confess,
+        # deny, or accuse someone who is no longer alive.
+        everyone = [item.roster[s] for s in sorted(item.roster)]
         state = {
             "note": NOTE,
             "meeting": item.meeting,
@@ -248,12 +260,18 @@ class MeaningCheck:
                 about={"judgment": "push", "statement": "s"},
             )
         }
-        for n, name in enumerate(others):
+        for n, name in enumerate(everyone):
+            template = STANCE_SELF if name == speaker else STANCE
             questions[f"stance_{n}"] = Question(
                 CHOICE,
-                STANCE.format(sid="s", speaker=speaker, name=name),
+                template.format(sid="s", speaker=speaker, name=name),
                 stance_options(name),
-                about={"judgment": "stance", "statement": "s", "player": name},
+                about={
+                    "judgment": "stance",
+                    "statement": "s",
+                    "player": name,
+                    "self": name == speaker,
+                },
             )
         for i in range(len(drafts)):
             questions[f"asserted_c{i}"] = Question(
@@ -279,7 +297,9 @@ class MeaningCheck:
                 if exc.fatal:
                     raise
                 raise MeaningUnavailable(f"judge: {exc}") from exc
-        stances = tuple((name, str(answers[f"stance_{n}"].value)) for n, name in enumerate(others))
+        stances = tuple(
+            (name, str(answers[f"stance_{n}"].value)) for n, name in enumerate(everyone)
+        )
         asserted = {(_key(d, speaker), answers[f"asserted_c{i}"].yes) for i, d in enumerate(drafts)}
         return Meaning(
             claims,
@@ -301,6 +321,10 @@ _HEDGE = re.compile(
 )
 _TASK = re.compile(r"\bT\d+\b", re.I)
 _NUMBER = re.compile(r"\b\d+\b")
+_ROLES = {
+    "impostor": re.compile(r"\bimpostors?\b", re.I),
+    "crewmate": re.compile(r"\bcrewmates?\b", re.I),
+}
 
 
 def _anchors(text: str, item: MaskInput) -> dict[str, Any]:
@@ -317,7 +341,10 @@ def _anchors(text: str, item: MaskInput) -> dict[str, Any]:
         "players": mentioned(item.roster.values()),
         "rooms": mentioned(item.rooms),
         "tasks": sorted({t.upper() for t in _TASK.findall(folded)}),
-        "numbers": sorted(set(_NUMBER.findall(_TASK.sub(" ", folded))), key=int),
+        # A total order: "1" and "01" are distinct but numerically equal.
+        "numbers": sorted(set(_NUMBER.findall(_TASK.sub(" ", folded))), key=lambda v: (int(v), v)),
+        # Role words ("I am a Crewmate" vs "I am an Impostor"), by count.
+        "roles": {role: len(rx.findall(folded)) for role, rx in _ROLES.items()},
         "negations": len(_NEGATION.findall(folded)),
         "hedged": bool(_HEDGE.search(folded)),
     }
@@ -391,18 +418,19 @@ def _show(c: ClaimKey) -> str:
 
 # The dry-run judge ----------------------------------------------------------------------
 
-STANCE_KEYWORD_VERSION = "keyword-1+stance-1"
+STANCE_KEYWORD_VERSION = "keyword-1+stance-2"
 
 
 class MaskKeywordJudge(KeywordJudge):
     """``KeywordJudge`` plus keyword rules for ``stance``; for dry runs, not scoring.
 
-    ``stance`` toward a player named N: ``accuses`` for "accuse/vote (for/out)/eject N",
-    "N is/was (an/the) Impostor", "N killed/kill/lied/is lying"; else ``defends``
-    for "N is/was (...) innocent/safe/clear(ed)/trustworthy/not (an/the) Impostor",
-    "trust/vouch for/defend N", "N was with me"; else ``suspects`` for
-    "suspect/doubt N", "N is/was/seems/looks (...) sus/suspicious/strange/weird/shady";
-    else ``none``.
+    ``stance`` toward a player named N (also "I" when N is the speaker):
+    ``accuses`` for "accuse/vote (for/out)/eject N", "N is/was (an/the) Impostor",
+    "N killed/kill/lied/is lying"; else ``defends`` for "N is/was not (an/the)
+    Impostor", "N is/was (...) innocent/safe/clear(ed)/trustworthy", "N is a
+    Crewmate", "N didn't/never kill", "trust/vouch for/defend N", "N was with me";
+    else ``suspects`` for "suspect/doubt N", "N is/was/seems/looks (...)
+    sus/suspicious/strange/weird/shady"; else ``none``.
     """
 
     def info(self) -> dict[str, Any]:
@@ -418,21 +446,27 @@ class MaskKeywordJudge(KeywordJudge):
             return super()._answer(batch, q)
         text = next(s for s in batch.state["statements"] if s["id"] == q.about["statement"])["text"]
         n = re.escape(q.about["player"])
+        # The speaker is also "I"; ``be`` covers "I am" as well as "N is".
+        who = rf"(?:I|{n})" if q.about.get("self") else n
+        be = r"(?:am|'m|is|was)"
         rules = [
             (ACCUSES, rf"\b(?:accuse|vote(?: for| out)?|eject)\s+{n}\b"),
-            (ACCUSES, rf"\b{n}\s+(?:is|was)\s+(?:an?\s+|the\s+)?impostor\b"),
-            (ACCUSES, rf"\b{n}\s+(?:killed|kill|kills|lied|is lying|was lying)\b"),
+            (ACCUSES, rf"\b{who}\s+{be}\s+(?:an?\s+|the\s+)?impostor\b"),
+            (ACCUSES, rf"\b{who}\s+(?:killed|kill|kills|lied|is lying|was lying)\b"),
+            (DEFENDS, rf"\b{who}\s+{be}\s+not\s+(?:an?\s+|the\s+)?impostor\b"),
             (
                 DEFENDS,
-                rf"\b{n}\s+(?:is|was)\s+(?:\w+\s+){{0,2}}(?:innocent|safe|clear|cleared|trustworthy)",
+                rf"\b{who}\s+{be}\s+(?:\w+\s+){{0,2}}(?:innocent|safe|clear|cleared|trustworthy)",
             ),
-            (DEFENDS, rf"\b{n}\s+(?:is|was)\s+not\s+(?:an?\s+|the\s+)?impostor\b"),
+            (DEFENDS, rf"\b{who}\s+{be}\s+(?:an?\s+)?crewmate\b"),
+            (DEFENDS, rf"\b{who}\s+(?:didn't|did not|never)\s+kill"),
             (DEFENDS, rf"\b(?:trust|vouch for|defend)\s+{n}\b"),
             (DEFENDS, rf"\b{n}\s+was\s+with\s+me\b"),
             (SUSPECTS, rf"\b(?:suspect|doubt)\s+{n}\b"),
             (
                 SUSPECTS,
-                rf"\b{n}\s+(?:is|was|seems|looks)\s+(?:\w+\s+){{0,2}}(?:sus|suspicious|strange|weird|shady)",
+                rf"\b{who}\s+(?:is|was|seems|looks)\s+(?:\w+\s+){{0,2}}"
+                r"(?:sus|suspicious|strange|weird|shady)",
             ),
         ]
         # First match wins, so an accusation outranks a defense or a suspicion.

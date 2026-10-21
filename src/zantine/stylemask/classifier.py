@@ -16,12 +16,18 @@ once on the ``original`` text and once on the masked ``text`` players saw.
 - Scores: **balanced accuracy** (mean per-Model recall; chance is 1/K for K
   Models, so an 8-vs-2 Lopsided Lobby can't inflate it) and plain accuracy
   (chance: the majority-Model share).
-- Inference treats the **game** as the independent unit, since a game's
-  messages share Seats, content and a classifier: 95% CIs come from a game
-  cluster bootstrap (resample whole games, recompute both scores from their
-  pooled out-of-fold predictions), and each one-sided p-value is the share of
-  bootstrap replicates at or below chance. Repeating messages within a game
-  changes neither the scores nor their uncertainty.
+- Significance: a **permutation test** of the whole pipeline. The null is "no
+  transferable Model style": which Model sits in which Seat of a game doesn't
+  change the text. Each permutation shuffles the Model labels among the Seats
+  of every game (a Seat's messages keep one label, and each game keeps its
+  lineup), re-runs the full cross-validation and recomputes both scores; the
+  one-sided p-value is (1 + permutations scoring at least as well) /
+  (1 + permutations). So a few games that agree by coincidence are not
+  evidence: with two two-Seat games, perfect accuracy has p of about 0.5.
+- Uncertainty: 95% CIs from a game cluster bootstrap (resample whole games and
+  pool their out-of-fold predictions). They describe how much the score depends
+  on which games were played, not significance, and are withheld below
+  ``MIN_CI_GAMES`` games. Repeating messages within a game changes neither.
 
 Dry runs with scripted bots are trivial (every bot writes the same templates,
 so there is no style to find and both scores sit at chance); the real number
@@ -43,11 +49,14 @@ from typing import Any
 CLASSIFIER_VERSION = "char-nb-1"
 NGRAMS = (2, 4)
 BOOTSTRAP = 1000
+PERMUTATIONS = 200
+MIN_CI_GAMES = 10
 
 
 @dataclass(frozen=True)
 class Sample:
     game: str
+    seat: int
     label: str
     original: str
     masked: str | None  # None when the game ran without a Style Mask
@@ -75,6 +84,7 @@ def samples(records: Sequence[dict[str, Any]], game: str) -> list[Sample]:
         out.append(
             Sample(
                 game,
+                d["speaker"],
                 labels[d["speaker"]],
                 placeholder(original, names, rooms),
                 None if masked is None else placeholder(masked, names, rooms),
@@ -107,16 +117,21 @@ class NaiveBayes:
         self.vocab: set[str] = set()
 
     def fit(self, texts: Sequence[str], labels: Sequence[str]) -> NaiveBayes:
+        return self.fit_features([features(t) for t in texts], labels)
+
+    def fit_features(self, feats: Sequence[Counter[str]], labels: Sequence[str]) -> NaiveBayes:
         counts: dict[str, Counter[str]] = defaultdict(Counter)
-        for text, label in zip(texts, labels, strict=True):
-            counts[label].update(features(text))
+        for f, label in zip(feats, labels, strict=True):
+            counts[label].update(f)
         self.counts = dict(counts)
         self.totals = {k: sum(c.values()) for k, c in self.counts.items()}
         self.vocab = set().union(*self.counts.values()) if self.counts else set()
         return self
 
     def predict(self, text: str) -> str:
-        feats = features(text)
+        return self.predict_features(features(text))
+
+    def predict_features(self, feats: Counter[str]) -> str:
         v = len(self.vocab) + 1
         best, best_score = "", -math.inf
         for label in sorted(self.counts):
@@ -128,9 +143,20 @@ class NaiveBayes:
 
 
 def cross_validate(
-    texts: Sequence[str], labels: Sequence[str], groups: Sequence[str], folds: int = 5
+    texts: Sequence[str],
+    labels: Sequence[str],
+    groups: Sequence[str],
+    folds: int = 5,
+    *,
+    units: Sequence[Any] | None = None,
+    permutations: int = PERMUTATIONS,
 ) -> dict[str, Any]:
-    """Out-of-fold predictions and scores; ``None`` scores with fewer than two Models."""
+    """Out-of-fold scores, permutation p-values and game-cluster CIs.
+
+    ``groups`` are games; ``units`` (default: each message) are what carries one
+    label within a game, normally its Seat. ``None`` scores with fewer than two
+    Models or games.
+    """
     n = len(texts)
     classes = sorted(set(labels))
     games = sorted(set(groups))
@@ -146,32 +172,72 @@ def cross_validate(
     folds = min(folds, len(games))
     fold_of_game = {g: i % folds for i, g in enumerate(games)}
     fold = [fold_of_game[g] for g in groups]
+    feats = [features(t) for t in texts]
+    predicted = _out_of_fold(feats, labels, fold, folds)
+    correct = [p == y for p, y in zip(predicted, labels, strict=True)]
+    acc, bal = sum(correct) / n, balanced_accuracy(labels, correct)
+
+    # Permutation null: shuffle labels among the units of each game, re-run everything.
+    unit_ids = list(range(n)) if units is None else list(units)
+    members: dict[tuple[str, Any], list[int]] = defaultdict(list)
+    for i, (g, u) in enumerate(zip(groups, unit_ids, strict=True)):
+        members[(g, u)].append(i)
+    by_game: dict[str, list[tuple[str, Any]]] = defaultdict(list)
+    for key in sorted(members, key=repr):
+        by_game[key[0]].append(key)
+    rng = random.Random(0)
+    at_least_acc = at_least_bal = 0
+    for _ in range(permutations):
+        shuffled = list(labels)
+        for game in games:
+            keys = by_game[game]
+            unit_labels = [labels[members[k][0]] for k in keys]
+            rng.shuffle(unit_labels)
+            for k, y in zip(keys, unit_labels, strict=True):
+                for i in members[k]:
+                    shuffled[i] = y
+        pred = _out_of_fold(feats, shuffled, fold, folds)
+        ok = [p == y for p, y in zip(pred, shuffled, strict=True)]
+        at_least_acc += sum(ok) / n >= acc - 1e-12
+        at_least_bal += balanced_accuracy(shuffled, ok) >= bal - 1e-12
+
+    out = base | {
+        "folds": folds,
+        "split": "game",
+        "permutations": permutations,
+        "accuracy": acc,
+        "chance_accuracy": max(base["models"].values()) / n,
+        "p_value_vs_chance": (1 + at_least_acc) / (1 + permutations),
+        "balanced_accuracy": bal,
+        "chance_balanced_accuracy": 1 / len(classes),
+        "p_value_balanced_vs_chance": (1 + at_least_bal) / (1 + permutations),
+        "confusion": confusion(labels, predicted),
+    }
+    if len(games) >= MIN_CI_GAMES:
+        out |= cluster_bootstrap(labels, correct, groups)
+    else:
+        out |= {
+            "accuracy_ci95": None,
+            "balanced_accuracy_ci95": None,
+            "ci_note": f"CIs need {MIN_CI_GAMES}+ games",
+        }
+    return out
+
+
+def _out_of_fold(
+    feats: Sequence[Counter[str]], labels: Sequence[str], fold: Sequence[int], folds: int
+) -> list[str]:
+    n = len(feats)
     predicted = [""] * n
     for f in range(folds):
         train = [i for i in range(n) if fold[i] != f]
         test = [i for i in range(n) if fold[i] == f]
         if not test or not train:
             continue
-        model = NaiveBayes().fit([texts[i] for i in train], [labels[i] for i in train])
+        model = NaiveBayes().fit_features([feats[i] for i in train], [labels[i] for i in train])
         for i in test:
-            predicted[i] = model.predict(texts[i])
-    correct = [p == y for p, y in zip(predicted, labels, strict=True)]
-    majority = max(base["models"].values()) / n
-    chance_bal = 1 / len(classes)
-    boot = cluster_bootstrap(labels, correct, groups, chance_acc=majority, chance_bal=chance_bal)
-    return base | {
-        "folds": folds,
-        "split": "game",
-        "accuracy": sum(correct) / n,
-        "accuracy_ci95": boot["accuracy_ci95"],
-        "chance_accuracy": majority,
-        "p_value_vs_chance": boot["p_accuracy"],
-        "balanced_accuracy": balanced_accuracy(labels, correct),
-        "balanced_accuracy_ci95": boot["balanced_accuracy_ci95"],
-        "chance_balanced_accuracy": chance_bal,
-        "p_value_balanced_vs_chance": boot["p_balanced"],
-        "confusion": confusion(labels, predicted),
-    }
+            predicted[i] = model.predict_features(feats[i])
+    return predicted
 
 
 def balanced_accuracy(labels: Sequence[str], correct: Sequence[bool]) -> float:
@@ -186,8 +252,6 @@ def cluster_bootstrap(
     correct: Sequence[bool],
     groups: Sequence[str],
     *,
-    chance_acc: float,
-    chance_bal: float,
     replicates: int = BOOTSTRAP,
 ) -> dict[str, Any]:
     """Game cluster bootstrap of accuracy and balanced accuracy (seeded, so reproducible).
@@ -217,8 +281,6 @@ def cluster_bootstrap(
     return {
         "accuracy_ci95": _percentiles(accs),
         "balanced_accuracy_ci95": _percentiles(bals),
-        "p_accuracy": (sum(a <= chance_acc for a in accs) + 1) / (replicates + 1),
-        "p_balanced": (sum(b <= chance_bal for b in bals) + 1) / (replicates + 1),
     }
 
 
@@ -251,7 +313,9 @@ def transcript_paths(paths: Iterable[str | Path]) -> list[Path]:
     return out
 
 
-def evaluate(paths: Iterable[str | Path], folds: int = 5) -> dict[str, Any]:
+def evaluate(
+    paths: Iterable[str | Path], folds: int = 5, permutations: int = PERMUTATIONS
+) -> dict[str, Any]:
     from zantine.audit.report import load_transcript
 
     files = transcript_paths(paths)
@@ -262,7 +326,14 @@ def evaluate(paths: Iterable[str | Path], folds: int = 5) -> dict[str, Any]:
 
     def score(items: list[Sample], masked_text: bool) -> dict[str, Any]:
         texts = [(s.masked if masked_text else s.original) or "" for s in items]
-        return cross_validate(texts, [s.label for s in items], [s.game for s in items], folds)
+        return cross_validate(
+            texts,
+            [s.label for s in items],
+            [s.game for s in items],
+            folds,
+            units=[s.seat for s in items],
+            permutations=permutations,
+        )
 
     return {
         "classifier": {
@@ -270,6 +341,8 @@ def evaluate(paths: Iterable[str | Path], folds: int = 5) -> dict[str, Any]:
             "ngrams": list(NGRAMS),
             "folds": folds,
             "bootstrap": BOOTSTRAP,
+            "permutations": permutations,
+            "min_ci_games": MIN_CI_GAMES,
         },
         "transcripts": len(files),
         "masked_games": len({s.game for s in masked}),

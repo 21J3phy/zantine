@@ -174,6 +174,8 @@ def play_live(
         aborted, detail = "provider_error", str(exc)
     finally:
         ledger.sink = None
+    if aborted and game.style_mask is not None:
+        game.record_style_mask()
     if aborted:
         game.transcript.record(
             "aborted",

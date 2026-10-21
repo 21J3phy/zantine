@@ -89,6 +89,22 @@ class Game:
     def observations_of(self, seat: int) -> tuple[Observation, ...]:
         return tuple(self._observations[seat])
 
+    def record_style_mask(self) -> dict[str, Any]:
+        """Write the Style Mask's final provenance as a ``style_mask.final`` event.
+
+        ``style_mask.setup`` is written before any call, so this one carries what
+        endpoints actually served (masker, extractor and judge ``served`` lists)
+        and the outcome counts. Called at game end, and by ``play_live`` when a
+        run aborts. Ground truth only; never observed by players.
+        """
+        assert self.style_mask is not None
+        final = {
+            **self.style_mask.info(),
+            "outcomes": dict(sorted(self._mask_outcomes.items())),
+        }
+        self.event("style_mask.final", **final)
+        return final
+
     def public_message(
         self,
         channel: str,
@@ -242,10 +258,7 @@ class Game:
             if data is not None:
                 extra[module.name] = data
         if self.style_mask is not None:
-            extra["style_mask"] = {
-                "masker": self.style_mask.masker.info(),
-                "outcomes": dict(sorted(self._mask_outcomes.items())),
-            }
+            extra["style_mask"] = self.record_style_mask()
         self.transcript.result(
             winner=state.winner.value,
             reason=state.win_reason,

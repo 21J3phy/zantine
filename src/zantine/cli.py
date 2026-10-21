@@ -117,6 +117,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ev.add_argument("paths", nargs="+", type=Path, help="transcripts or directories of them")
     ev.add_argument("--folds", type=int, default=5, help="cross-validation folds (default 5)")
+    ev.add_argument(
+        "--permutations",
+        type=int,
+        default=200,
+        help="label permutations for the p-values (default 200; each re-runs the classifier)",
+    )
     ev.add_argument("--out", type=Path, help="write the JSON report here")
     args = parser.parse_args(argv)
     if args.command == "stylemask":
@@ -302,7 +308,9 @@ def stylemask_eval(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
     for path in args.paths:
         if not path.exists():
             parser.error(f"no such file or directory: {path}")
-    report = evaluate(args.paths, folds=args.folds)
+    if args.permutations < 1:
+        parser.error("--permutations must be at least 1")
+    report = evaluate(args.paths, folds=args.folds, permutations=args.permutations)
     print(
         f"style classifier {report['classifier']['name']}: {report['transcripts']} transcripts, "
         f"{report['masked_games']} with a Style Mask"
@@ -323,15 +331,22 @@ def stylemask_eval(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
 def _classifier_line(r: dict[str, Any]) -> str:
     if r["balanced_accuracy"] is None:
         return f"{r['messages']} messages: {r['note']}"
-    lo, hi = r["balanced_accuracy_ci95"]
-    alo, ahi = r["accuracy_ci95"]
+
+    def ci(key: str) -> str:
+        if r[key] is None:
+            return ""
+        lo, hi = r[key]
+        return f" [{lo:.0%}, {hi:.0%}]"
+
     return (
         f"{r['messages']} messages in {r['games']} games ({r['folds']} folds by game), "
-        f"{len(r['models'])} Models: balanced accuracy {r['balanced_accuracy']:.0%} "
-        f"[{lo:.0%}, {hi:.0%}] vs chance {r['chance_balanced_accuracy']:.0%} "
-        f"(p={r['p_value_balanced_vs_chance']:.3g}); accuracy {r['accuracy']:.0%} "
-        f"[{alo:.0%}, {ahi:.0%}] vs majority {r['chance_accuracy']:.0%} "
-        f"(p={r['p_value_vs_chance']:.3g}); CIs and p by game cluster bootstrap"
+        f"{len(r['models'])} Models: balanced accuracy {r['balanced_accuracy']:.0%}"
+        f"{ci('balanced_accuracy_ci95')} vs chance {r['chance_balanced_accuracy']:.0%} "
+        f"(p={r['p_value_balanced_vs_chance']:.3g}); accuracy {r['accuracy']:.0%}"
+        f"{ci('accuracy_ci95')} vs majority {r['chance_accuracy']:.0%} "
+        f"(p={r['p_value_vs_chance']:.3g}); p by within-game Seat-label permutation "
+        f"({r['permutations']}), CIs by game cluster bootstrap"
+        + (f" ({r['ci_note']})" if r.get("ci_note") else "")
     )
 
 
