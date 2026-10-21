@@ -28,7 +28,7 @@ from typing import Any
 
 from zantine.audit.llm import ExtractorSpec, OpenAICompatAdapter, http_post
 from zantine.harness.ledger import Ledger
-from zantine.harness.provider import HarnessRequest, ProviderAdapter, ToolSpec
+from zantine.harness.provider import HarnessRequest, ProviderAdapter, ProviderError, ToolSpec
 from zantine.stylemask.base import Masker, MaskError, MaskInput
 
 PROMPT_VERSION = "style-mask-prompt-1"
@@ -141,16 +141,26 @@ class LLMMasker(Masker):
         )
 
     def rewrite(self, item: MaskInput, problem: str | None = None) -> str:
-        response = self.ledger.send(
-            self.adapter,
-            self.request(item, problem),
-            purpose="style_mask",
-            phase="rewrite",
-            # Not the speaker: per-Seat costs are the Seat's own Model calls.
-            seat=None,
-            round=item.round,
-            attempt=1 if problem is None else 2,
-        )
+        reserved: list[float] = []
+        try:
+            response = self.ledger.send(
+                self.adapter,
+                self.request(item, problem),
+                purpose="style_mask",
+                phase="rewrite",
+                # Not the speaker: per-Seat costs are the Seat's own Model calls.
+                seat=None,
+                round=item.round,
+                attempt=1 if problem is None else 2,
+                on_start=reserved.append,
+            )
+        except ProviderError as exc:
+            # As in LLMExtractor.extract: an HTTP error status is a rejection, never
+            # billed. Without one the call may have been billed (lost in transit, or a
+            # reply without trustworthy usage): hold its worst case against the cap.
+            if exc.status is None and reserved:
+                self.ledger.hold(reserved[0])
+            raise
         served = {k: response.raw.get(k) for k in ("model", "system_fingerprint")}
         if served not in self.served:
             self.served.append(served)

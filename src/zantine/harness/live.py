@@ -130,6 +130,9 @@ def play_live(
             require_live(live)
         adapter_factory = make_adapter
     ledger = ledger or Ledger(spend_cap_usd)
+    if style_mask is not None and any(lg is not ledger for lg in style_mask.ledgers()):
+        # Otherwise masking calls would draw on (and be reported by) another cap.
+        raise ValueError("the Style Mask's paid parts must use this run's ledger")
     adapters: dict[str, ProviderAdapter] = {}
     built: dict[str, ProviderAdapter] = {}
     for arg, spec in specs.items():

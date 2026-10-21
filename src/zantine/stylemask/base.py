@@ -84,7 +84,7 @@ _EMPHASIS = re.compile(r"(?<![\w*_~])(\*{1,3}|_{1,3}|~~)(?=\S)(.+?)(?<=\S)\1(?![
 _LINE_MARKUP = re.compile(r"^\s{0,3}(?:#{1,6}\s+|>\s?|[-*+\u2022]\s+|\d{1,2}[.)]\s+)", re.M)
 _ALL_CAPS = re.compile(r"\b[A-Z][A-Z']+\b")
 _EMOTICON = re.compile(r"(?<!\S)[:;=]['-]?[()\[\]DPpOo3/\\|*]+(?!\S)|(?<!\S)<3+(?!\S)")
-_LONE_I = re.compile(r"(?<![\w.'])i(?=(?:'(?:m|d|ll|ve|s))?\b)(?![.\w])")
+_LONE_I = re.compile(r"(?<![\w.'-])i(?=(?:'(?:m|d|ll|ve|s))?\b)(?![.\w])")
 
 
 def neutralize(text: str, keep: Iterable[str] = ()) -> str:

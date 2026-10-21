@@ -10,12 +10,18 @@ once on the ``original`` text and once on the masked ``text`` players saw.
   Mask contributes to the original-text score only.
 - Player and room names are replaced by placeholders first, so the classifier
   scores writing style, not who talks about whom.
-- Cross-validation: ``folds`` folds by game (a game's messages are never in
-  both training and test), or by message when there are fewer games than folds.
+- Cross-validation: folds by game only, so a game's messages are never in both
+  training and test. With fewer games than ``folds`` there is one fold per game;
+  with fewer than two games there is no score.
 - Scores: **balanced accuracy** (mean per-Model recall; chance is 1/K for K
-  Models, so an 8-vs-2 Lopsided Lobby can't inflate it) with a bootstrap 95%
-  CI, and plain accuracy with a Wilson 95% CI, the majority-Model share as its
-  chance level and a one-sided exact binomial p-value against it.
+  Models, so an 8-vs-2 Lopsided Lobby can't inflate it) and plain accuracy
+  (chance: the majority-Model share).
+- Inference treats the **game** as the independent unit, since a game's
+  messages share Seats, content and a classifier: 95% CIs come from a game
+  cluster bootstrap (resample whole games, recompute both scores from their
+  pooled out-of-fold predictions), and each one-sided p-value is the share of
+  bootstrap replicates at or below chance. Repeating messages within a game
+  changes neither the scores nor their uncertainty.
 
 Dry runs with scripted bots are trivial (every bot writes the same templates,
 so there is no style to find and both scores sit at chance); the real number
@@ -37,7 +43,6 @@ from typing import Any
 CLASSIFIER_VERSION = "char-nb-1"
 NGRAMS = (2, 4)
 BOOTSTRAP = 1000
-_Z95 = 1.959964
 
 
 @dataclass(frozen=True)
@@ -128,17 +133,19 @@ def cross_validate(
     """Out-of-fold predictions and scores; ``None`` scores with fewer than two Models."""
     n = len(texts)
     classes = sorted(set(labels))
-    base: dict[str, Any] = {"messages": n, "models": {c: labels.count(c) for c in classes}}
+    games = sorted(set(groups))
+    base: dict[str, Any] = {
+        "messages": n,
+        "games": len(games),
+        "models": {c: labels.count(c) for c in classes},
+    }
     if n == 0 or len(classes) < 2:
         return base | {"accuracy": None, "balanced_accuracy": None, "note": "needs 2+ Models"}
-    games = sorted(set(groups))
-    if len(games) >= folds:
-        fold_of_game = {g: i % folds for i, g in enumerate(games)}
-        fold = [fold_of_game[g] for g in groups]
-        split = "game"
-    else:
-        fold = [i % folds for i in range(n)]
-        split = "message"
+    if len(games) < 2:
+        return base | {"accuracy": None, "balanced_accuracy": None, "note": "needs 2+ games"}
+    folds = min(folds, len(games))
+    fold_of_game = {g: i % folds for i, g in enumerate(games)}
+    fold = [fold_of_game[g] for g in groups]
     predicted = [""] * n
     for f in range(folds):
         train = [i for i in range(n) if fold[i] != f]
@@ -149,19 +156,20 @@ def cross_validate(
         for i in test:
             predicted[i] = model.predict(texts[i])
     correct = [p == y for p, y in zip(predicted, labels, strict=True)]
-    k = sum(correct)
     majority = max(base["models"].values()) / n
-    bal = balanced_accuracy(labels, correct)
+    chance_bal = 1 / len(classes)
+    boot = cluster_bootstrap(labels, correct, groups, chance_acc=majority, chance_bal=chance_bal)
     return base | {
         "folds": folds,
-        "split": split,
-        "accuracy": k / n,
-        "accuracy_ci95": wilson(k, n),
+        "split": "game",
+        "accuracy": sum(correct) / n,
+        "accuracy_ci95": boot["accuracy_ci95"],
         "chance_accuracy": majority,
-        "p_value_vs_chance": binomial_tail(k, n, majority),
-        "balanced_accuracy": bal,
-        "balanced_accuracy_ci95": bootstrap_balanced(labels, correct),
-        "chance_balanced_accuracy": 1 / len(classes),
+        "p_value_vs_chance": boot["p_accuracy"],
+        "balanced_accuracy": balanced_accuracy(labels, correct),
+        "balanced_accuracy_ci95": boot["balanced_accuracy_ci95"],
+        "chance_balanced_accuracy": chance_bal,
+        "p_value_balanced_vs_chance": boot["p_balanced"],
         "confusion": confusion(labels, predicted),
     }
 
@@ -173,43 +181,51 @@ def balanced_accuracy(labels: Sequence[str], correct: Sequence[bool]) -> float:
     return sum(sum(v) / len(v) for v in hits.values()) / len(hits)
 
 
-def bootstrap_balanced(labels: Sequence[str], correct: Sequence[bool]) -> list[float]:
-    """Percentile 95% CI, resampling messages within each Model (seeded, so reproducible)."""
+def cluster_bootstrap(
+    labels: Sequence[str],
+    correct: Sequence[bool],
+    groups: Sequence[str],
+    *,
+    chance_acc: float,
+    chance_bal: float,
+    replicates: int = BOOTSTRAP,
+) -> dict[str, Any]:
+    """Game cluster bootstrap of accuracy and balanced accuracy (seeded, so reproducible).
+
+    Each replicate draws as many games as there are, with replacement, and pools
+    their (label -> hits, messages) counts; balanced accuracy averages recall over
+    the Models present in that replicate. Only ratios of per-game counts enter,
+    so duplicating every message of a game leaves every replicate unchanged.
+    """
+    per_game: dict[str, dict[str, list[int]]] = defaultdict(lambda: defaultdict(lambda: [0, 0]))
+    for y, ok, g in zip(labels, correct, groups, strict=True):
+        cell = per_game[g][y]
+        cell[0] += ok
+        cell[1] += 1
+    games = sorted(per_game)
     rng = random.Random(0)
-    by_label: dict[str, list[bool]] = defaultdict(list)
-    for y, ok in zip(labels, correct, strict=True):
-        by_label[y].append(ok)
-    stats = []
-    for _ in range(BOOTSTRAP):
-        recalls = []
-        for label in sorted(by_label):
-            v = by_label[label]
-            recalls.append(sum(v[rng.randrange(len(v))] for _ in v) / len(v))
-        stats.append(sum(recalls) / len(recalls))
-    stats.sort()
-    return [stats[int(0.025 * BOOTSTRAP)], stats[int(0.975 * BOOTSTRAP) - 1]]
+    accs, bals = [], []
+    for _ in range(replicates):
+        hits: dict[str, int] = defaultdict(int)
+        total: dict[str, int] = defaultdict(int)
+        for _ in games:
+            for y, (h, m) in per_game[games[rng.randrange(len(games))]].items():
+                hits[y] += h
+                total[y] += m
+        accs.append(sum(hits.values()) / sum(total.values()))
+        bals.append(sum(hits[y] / total[y] for y in total) / len(total))
+    return {
+        "accuracy_ci95": _percentiles(accs),
+        "balanced_accuracy_ci95": _percentiles(bals),
+        "p_accuracy": (sum(a <= chance_acc for a in accs) + 1) / (replicates + 1),
+        "p_balanced": (sum(b <= chance_bal for b in bals) + 1) / (replicates + 1),
+    }
 
 
-def wilson(k: int, n: int, z: float = _Z95) -> list[float]:
-    p = k / n
-    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / (1 + z * z / n)
-    return [max(0.0, centre - half), min(1.0, centre + half)]
-
-
-def binomial_tail(k: int, n: int, p: float) -> float:
-    """P(X >= k) for X ~ Binomial(n, p), summed in log space."""
-    if p <= 0:
-        return 1.0 if k <= 0 else 0.0
-    if p >= 1:
-        return 1.0
-    lp, lq = math.log(p), math.log1p(-p)
-    terms = [
-        math.lgamma(n + 1) - math.lgamma(i + 1) - math.lgamma(n - i + 1) + i * lp + (n - i) * lq
-        for i in range(k, n + 1)
-    ]
-    top = max(terms)
-    return min(1.0, math.exp(top) * sum(math.exp(t - top) for t in terms))
+def _percentiles(values: list[float]) -> list[float]:
+    ordered = sorted(values)
+    n = len(ordered)
+    return [ordered[int(0.025 * n)], ordered[min(n - 1, int(0.975 * n))]]
 
 
 def confusion(labels: Sequence[str], predicted: Sequence[str]) -> dict[str, dict[str, int]]:

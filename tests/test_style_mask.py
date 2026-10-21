@@ -20,7 +20,6 @@ from zantine.config import GameConfig
 from zantine.harness.ledger import Ledger
 from zantine.harness.live import LiveDisabled, play_live
 from zantine.harness.provider import ProviderError
-from zantine.judge.judges import KeywordJudge
 from zantine.observations import MeetingContext
 from zantine.rules.actions import CallMeeting
 from zantine.runner import new_game, play
@@ -29,7 +28,9 @@ from zantine.seats.bots import PlaybookBot
 from zantine.stylemask import (
     MaskError,
     MaskInput,
+    Meaning,
     MeaningCheck,
+    MeaningUnavailable,
     NeutralMasker,
     ScriptedMasker,
     StyleMask,
@@ -37,12 +38,12 @@ from zantine.stylemask import (
     dry_style_mask,
     neutralize,
 )
+from zantine.stylemask.check import MaskKeywordJudge
 from zantine.stylemask.classifier import (
-    binomial_tail,
+    cluster_bootstrap,
     cross_validate,
     evaluate,
     placeholder,
-    wilson,
 )
 from zantine.stylemask.llm import SYSTEM_PROMPT, LLMMasker, load_masker_specs
 
@@ -70,7 +71,7 @@ def masked_game(
         **config,
     )
     if masker is not None or extractor is not None:
-        check = MeaningCheck(extractor or PatternExtractor(), KeywordJudge())
+        check = MeaningCheck(extractor or PatternExtractor(), MaskKeywordJudge())
         game.style_mask = StyleMask(masker or NeutralMasker(), check)
     game.run()
     return game, bots
@@ -231,17 +232,20 @@ def test_a_rewrite_that_changes_the_meaning_is_never_broadcast(fake: Any, proble
         assert heard(game, seat) == [NEUTRAL]
 
 
+RETRY_FIX = "Listen. I was in Storage with Green. I accuse Blue."
+
+
 def test_a_retry_that_fixes_the_meaning_is_used() -> None:
     def fix_on_retry(it: MaskInput, problem: str | None) -> str:
-        return flip_room(it, problem) if problem is None else "I was in Storage. I accuse Blue."
+        return flip_room(it, problem) if problem is None else RETRY_FIX
 
     game, _ = masked_game(ScriptedMasker(fix_on_retry))
     stmt = said(game)
-    assert (stmt["text"], stmt["mask"]) == ("I was in Storage. I accuse Blue.", "rewritten")
+    assert (stmt["text"], stmt["mask"]) == (RETRY_FIX, "rewritten")
 
 
 def test_negation_and_added_claims_count_as_meaning_changes() -> None:
-    check = MeaningCheck(PatternExtractor(), KeywordJudge())
+    check = MeaningCheck(PatternExtractor(), MaskKeywordJudge())
     original = check.meaning(item("I was in Storage."), "I was in Storage.")
     negated = check.meaning(item("x"), "I was not in Storage.")
     added = check.meaning(item("x"), "I was in Storage. Blue was in Electrical.")
@@ -259,25 +263,99 @@ def test_negation_and_added_claims_count_as_meaning_changes() -> None:
 def test_dropping_a_seen_or_throughout_qualifier_is_a_meaning_change(
     original: str, rewrite: str, lost: str
 ) -> None:
-    check = MeaningCheck(PatternExtractor(), KeywordJudge())
+    check = MeaningCheck(PatternExtractor(), MaskKeywordJudge())
     before, after = check.meaning(item(original), original), check.meaning(item(rewrite), rewrite)
     problems = MeaningCheck.differences(before, after)
     assert any(p.startswith("lost Claim") and lost in p for p in problems), problems
 
 
-def test_claims_whose_quote_is_not_in_the_text_are_ignored() -> None:
-    def invents(inp: Any) -> dict[str, Any]:
-        return {
-            "claims": [
-                claim("location", "I", "I was in Storage", room="Storage"),
-                claim("location", "Blue", "Blue was in Electrical", room="Electrical"),
-                claim("location", "Green", "", room="Cafeteria"),
-            ]
-        }
+GOOD = claim("location", "I", "I was in Storage", room="Storage")
+MISSING_FIELDS = {"kind": "location", "subject": "I", "room": "Storage"}
+UNGROUNDED = claim("location", "I", "I was in Storage yesterday", room="Storage")
+EMPTY_QUOTE = claim("location", "I", "", room="Storage")
 
-    check = MeaningCheck(ScriptedExtractor(invents), None)
-    meaning = check.meaning(item("I was in Storage."), "I was in Storage.")
-    assert [c[1] for c in meaning.claims] == ["red"]
+
+@pytest.mark.parametrize(
+    "items",
+    [[MISSING_FIELDS], [GOOD, MISSING_FIELDS], [UNGROUNDED], [GOOD, EMPTY_QUOTE], ["junk"]],
+)
+def test_an_incomplete_or_ungrounded_extraction_is_unavailable(items: list[Any]) -> None:
+    check = MeaningCheck(ScriptedExtractor(lambda inp: {"claims": items}), None)
+    with pytest.raises(MeaningUnavailable):
+        check.meaning(item("I was in Storage."), "I was in Storage.")
+
+
+@pytest.mark.parametrize("items", [[MISSING_FIELDS], [GOOD, MISSING_FIELDS], [UNGROUNDED]])
+def test_removing_an_unreadable_claim_is_never_approved(items: list[Any]) -> None:
+    """Original unreadable: the original is sent, never "Nothing to report."."""
+    extractor = ScriptedExtractor(lambda inp: {"claims": items if "Storage" in inp.text else []})
+    masker = ScriptedMasker(lambda it, p: "Nothing to report.")
+    game, _ = masked_game(masker, speech="I was in Storage.", extractor=extractor)
+    assert (said(game)["text"], said(game)["mask"]) == ("I was in Storage.", "original")
+
+
+def test_an_unreadable_candidate_is_rejected() -> None:
+    def extract(inp: Any) -> dict[str, Any]:
+        if inp.text == "I was in Storage, I think.":  # the masker's candidate
+            return {"claims": [GOOD, MISSING_FIELDS]}
+        return {"claims": [claim("location", "I", "in Storage", room="Storage")]}
+
+    masker = ScriptedMasker(lambda it, p: "I was in Storage, I think.")
+    game, _ = masked_game(masker, speech="I was in Storage.", extractor=ScriptedExtractor(extract))
+    checks = events(game, "style_mask.check")
+    assert not checks[0]["ok"] and "unreadable items" in checks[0]["problems"][0]
+    assert (said(game)["text"], said(game)["mask"]) == ("I was in Storage.", "neutralized")
+
+
+ORIGINAL = "I suspect Blue. Vote for Green."
+
+
+@pytest.mark.parametrize(
+    ("original", "rewrite", "problem"),
+    [
+        # Secondary accusation reversed; the vote target is unchanged.
+        (ORIGINAL, "Blue is innocent. Vote for Green.", "defends Blue instead of suspects"),
+        (ORIGINAL, "Vote for Green.", "players ['green'] instead of ['blue', 'green']"),
+        # Defense reversed.
+        ("Pink was with me. I accuse Green.", "I accuse Pink and Green.", "accuses Pink"),
+        # Hedging removed, from a Claim and from a suspicion.
+        ("Maybe Blue was in Storage.", "Blue was in Storage.", "hedged False instead of True"),
+        ("Blue is probably lying.", "Blue is lying.", "hedged False instead of True"),
+        ("I was not in Storage.", "I was in Storage.", "negations 0 instead of 1"),
+        ("I did T12 in round 3.", "I did T13 in round 3.", "tasks ['T13'] instead of ['T12']"),
+    ],
+)
+def test_changed_stances_hedges_and_anchors_are_meaning_changes(
+    original: str, rewrite: str, problem: str
+) -> None:
+    check = MeaningCheck(PatternExtractor(), MaskKeywordJudge())
+    before, after = check.meaning(item(original), original), check.meaning(item(rewrite), rewrite)
+    problems = MeaningCheck.differences(before, after)
+    assert any(problem in p for p in problems), problems
+
+
+def test_a_reversed_secondary_accusation_is_never_broadcast() -> None:
+    masker = ScriptedMasker(lambda it, p: "Blue is innocent. Vote for Green.")
+    game, _ = masked_game(masker, speech=ORIGINAL)
+    assert (said(game)["text"], said(game)["mask"]) == (ORIGINAL, "neutralized")
+    assert all(heard(game, seat) == [ORIGINAL] for seat in range(10))
+
+
+def test_a_claim_that_loses_its_hedge_is_a_meaning_change() -> None:
+    key = ("location", "blue", None, "storage", None, None, False, False, False)
+    anchors = {"players": ["blue"]}
+    hedged = Meaning((key,), anchors, push="no_one", asserted=((key, False),))
+    stated = Meaning((key,), anchors, push="no_one", asserted=((key, True),))
+    (problem,) = MeaningCheck.differences(hedged, stated)
+    assert problem == "Claim (location subject=blue room=storage) is asserted instead of hedged"
+
+
+def test_the_dry_judge_reads_stances() -> None:
+    check = MeaningCheck(PatternExtractor(), MaskKeywordJudge())
+    text = "I accuse Blue. Green was with me. Pink seems kind of sus."
+    m = check.meaning(item(text), text)
+    assert dict(m.stances) == {"Blue": "accuses", "Green": "defends", "Pink": "suspects"}
+    assert m.push == "Blue" and m.anchors["players"] == ["blue", "green", "pink"]
 
 
 def test_if_even_the_fallback_fails_the_original_is_sent() -> None:
@@ -375,13 +453,18 @@ class Disguised(SeatController):
 def test_no_player_sees_a_model_id_masker_id_or_original_text() -> None:
     """Hidden Identity scan: Model and masker ids and unmasked text stay in ground truth."""
     bots = [
-        Disguised(PlaybookBot(speech={1: f"I accuse {['Blue', 'Red'][s % 2]}."}), f"model-{s}")
+        Disguised(
+            PlaybookBot(speech={1: f"I accuse {['Blue', 'Red'][s % 2]}."}),
+            f"model-{'abcdefghij'[s]}",
+        )
         for s in range(10)
     ]
     bots[RED].inner.actions[1] = CallMeeting()
-    masker = ScriptedMasker(lambda it, p: re.sub(r"model-\d", "", neutralize(it.text)), id="mk-7")
+    masker = ScriptedMasker(
+        lambda it, p: re.sub(r"\s*-\s*model-[a-j]\.?", "", neutralize(it.text)), id="mk-7"
+    )
     game = make_game(bots=dict(enumerate(bots)), tasks_per_crewmate=0, round_cap=2, style_mask=True)
-    game.style_mask = StyleMask(masker, MeaningCheck(PatternExtractor(), KeywordJudge()))
+    game.style_mask = StyleMask(masker, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
     game.run()
     originals = [s["original"] for s in events(game, "statement") if s["text"]]
     assert originals and all("model-" in o for o in originals)
@@ -486,7 +569,7 @@ def test_llm_masker_rejects_unusable_replies(reply: str) -> None:
 def test_live_game_with_a_model_masker_bills_the_shared_ledger() -> None:
     endpoint = FakeRewriter()
     masker, ledger = llm_masker(endpoint, cap=1.0)
-    style = StyleMask(masker, MeaningCheck(PatternExtractor(), KeywordJudge()))
+    style = StyleMask(masker, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
     config = GameConfig(seed=7, style_mask=True)
     run = play_live(config, "scripted", spend_cap_usd=1.0, ledger=ledger, style_mask=style)
     assert run.aborted is None and endpoint.calls
@@ -496,6 +579,56 @@ def test_live_game_with_a_model_masker_bills_the_shared_ledger() -> None:
     assert all(s["calls"] == 0 for s in run.cost["seats"])
     stmts = [e["data"] for e in run.game.transcript.events("statement") if e["data"]["text"]]
     assert stmts and all(s["masker"] == "test-masker" for s in stmts)
+
+
+def test_play_live_refuses_a_style_mask_on_another_ledger() -> None:
+    config = GameConfig(seed=7, style_mask=True)
+    masker, own = llm_masker(FakeRewriter(), cap=5.0)
+    style = StyleMask(masker, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
+    with pytest.raises(ValueError, match="this run's ledger"):  # ledger omitted
+        play_live(config, "scripted", spend_cap_usd=1e-6, style_mask=style)
+    with pytest.raises(ValueError, match="this run's ledger"):  # a different ledger
+        play_live(config, "scripted", spend_cap_usd=1.0, ledger=Ledger(1.0), style_mask=style)
+    # A paid extractor or judge on another ledger is refused the same way.
+    other = Ledger(1.0)
+    extractor = ScriptedExtractor({})
+    extractor.ledger = other  # type: ignore[attr-defined]
+    mixed = StyleMask(masker, MeaningCheck(extractor, MaskKeywordJudge()))
+    with pytest.raises(ValueError, match="this run's ledger"):
+        play_live(config, "scripted", spend_cap_usd=5.0, ledger=own, style_mask=mixed)
+    assert own.records == [] and other.records == []
+
+
+def test_a_lost_masker_response_is_held_against_the_cap() -> None:
+    def lost(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        raise ProviderError("timed out after sending", fatal=False)
+
+    ledger = Ledger(0.01)
+    masker = LLMMasker(SPEC, ledger, OpenAICompatAdapter(SPEC, lost, "sk"))
+    style = StyleMask(masker, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
+    run = play_live(
+        GameConfig(seed=7, style_mask=True),
+        "scripted",
+        spend_cap_usd=0.01,
+        ledger=ledger,
+        style_mask=style,
+    )
+    assert run.aborted == "spend_cap"
+    calls = [c["data"] for c in run.game.transcript.events("harness.call")]
+    assert calls and all(not c["ok"] and c["purpose"] == "style_mask" for c in calls)
+    worst = SPEC.model_spec().worst_case_cost(masker.request(item("x")).text_size())
+    assert ledger.spent_usd >= len(calls) * worst * 0.5 and ledger.spent_usd <= 0.01
+
+
+def test_an_http_rejection_is_not_held() -> None:
+    def rejected(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        raise ProviderError("HTTP 503: busy", fatal=False, status=503)
+
+    ledger = Ledger(1.0)
+    masker = LLMMasker(SPEC, ledger, OpenAICompatAdapter(SPEC, rejected, "sk"))
+    with pytest.raises(ProviderError):
+        masker.rewrite(item("hello"))
+    assert ledger.spent_usd == 0
 
 
 def test_packaged_masker_is_pinned_and_the_live_gate_holds(
@@ -571,12 +704,44 @@ def test_the_classifier_finds_formatting_style_and_neutralize_removes_it() -> No
     assert after["chance_balanced_accuracy"] == 0.5 and after["chance_accuracy"] == 0.5
 
 
-def test_statistics_helpers() -> None:
-    lo, hi = wilson(50, 100)
-    assert lo < 0.5 < hi and hi - lo == pytest.approx(0.19, abs=0.01)
-    assert binomial_tail(0, 10, 0.3) == pytest.approx(1.0)
-    assert binomial_tail(10, 10, 0.5) == pytest.approx(0.5**10)
-    assert cross_validate(["a", "b"], ["x", "x"], ["g", "g"])["balanced_accuracy"] is None
+def test_too_little_data_gives_no_score() -> None:
+    assert cross_validate(["a", "b"], ["x", "x"], ["g", "h"])["note"] == "needs 2+ Models"
+    one_game = cross_validate(["a", "b"] * 5, ["x", "y"] * 5, ["g"] * 10)
+    assert one_game["balanced_accuracy"] is None and one_game["note"] == "needs 2+ games"
+
+
+def game_specific(games: int, per_game: int = 30) -> tuple[list[str], list[str], list[str]]:
+    """Two labels with no shared style, only content words unique to each game and label."""
+    texts, labels, groups = [], [], []
+    for g in range(games):
+        word = {lab: "".join(random.Random(f"{g}{lab}").choices("bcdfghk", k=8)) for lab in "xy"}
+        for i in range(per_game):
+            label = "x" if i % 2 else "y"
+            texts.append(f"I saw {word[label]} in the hall {i % 3}.")
+            labels.append(label)
+            groups.append(f"game{g}")
+    return texts, labels, groups
+
+
+def test_no_game_is_ever_in_both_training_and_test() -> None:
+    texts, labels, groups = game_specific(4)
+    r = cross_validate(texts, labels, groups, folds=5)
+    assert (r["folds"], r["split"], r["games"]) == (4, "game", 4)
+    # Game-specific content can't transfer across games, so the score is chance.
+    assert r["balanced_accuracy"] <= 0.6 and r["p_value_balanced_vs_chance"] > 0.05
+
+
+def test_inference_is_by_game_cluster_and_duplication_invariant() -> None:
+    rng = random.Random(3)
+    labels = [rng.choice("xy") for _ in range(160)]
+    correct = [rng.random() < 0.75 for _ in labels]
+    groups = [f"g{i % 8}" for i in range(160)]
+    kw = {"chance_acc": 0.5, "chance_bal": 0.5}
+    once = cluster_bootstrap(labels, correct, groups, **kw)
+    repeated = cluster_bootstrap(labels * 100, correct * 100, groups * 100, **kw)
+    assert once == repeated
+    lo, hi = once["balanced_accuracy_ci95"]
+    assert lo < 0.75 < hi
 
 
 def test_eval_reads_transcripts_and_the_cli_writes_a_report(
@@ -588,16 +753,22 @@ def test_eval_reads_transcripts_and_the_cli_writes_a_report(
     ]
     bots[RED].inner.actions[1] = CallMeeting()
     bots[GREEN].inner.actions[3] = CallMeeting()
-    game = make_game(bots=dict(enumerate(bots)), tasks_per_crewmate=0, round_cap=4, style_mask=True)
-    game.run()
-    path = tmp_path / "g.jsonl"
-    game.transcript.write(path)
+    for seed in (1, 2):
+        game = make_game(
+            bots=dict(enumerate(bots)),
+            tasks_per_crewmate=0,
+            round_cap=4,
+            style_mask=True,
+            seed=seed,
+        )
+        game.run()
+        game.transcript.write(tmp_path / f"g{seed}.jsonl")
     (tmp_path / "notes.jsonl").write_text('{"kind": "call"}\n')
-    report = evaluate([tmp_path], folds=2)
-    assert report["transcripts"] == 1 and report["masked_games"] == 1
-    assert report["masked"]["models"] == {"m0": 30, "m1": 30}
-    assert report["original"]["split"] == "message"
+    report = evaluate([tmp_path], folds=5)
+    assert report["transcripts"] == 2 and report["masked_games"] == 2
+    assert report["masked"]["models"] == {"m0": 60, "m1": 60}
+    assert (report["original"]["split"], report["original"]["folds"]) == ("game", 2)
     out = tmp_path / "report.json"
-    assert main(["stylemask", "eval", str(tmp_path), "--folds", "2", "--out", str(out)]) == 0
+    assert main(["stylemask", "eval", str(tmp_path), "--out", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert "balanced accuracy" in printed and json.loads(out.read_text())["masked_games"] == 1
+    assert "folds by game" in printed and json.loads(out.read_text())["masked_games"] == 2

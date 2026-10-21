@@ -1,38 +1,61 @@
 """The meaning check: does a rewrite say the same thing as the original?
 
-Two parts, both reusing the post-game scoring tools on a single message:
+Each version (original and rewrite) is read separately, as if its speaker had
+said it, and the two readings must agree on everything below. Anything the
+check can't read fails closed: that version's meaning is unavailable, so a
+rewrite can't be confirmed (``StyleMask`` then retries, falls back, or sends the
+original).
 
-- **Claims**: a ``ClaimExtractor`` (the Claim Audit's) reads the original and
-  the rewrite. Their checkable Claims (``location``, ``together``, ``kill``,
-  ``task_done``) must match as sets, compared on kind, subject, object, room,
-  Round, Task, negation and the ``seen`` / ``throughout`` qualifiers. As in
-  ``claims.resolve``, a Claim only counts if its quote is non-empty and appears
-  in that version's text. ``other`` Claims are never checked by the audit, so
-  they are not compared.
-- **Accusation**: a ``Judge`` answers the judgments' ``push`` Choice ("whom does
-  this message argue to eject?", over the other living players, ``skip`` and
-  ``no_one``) for each version separately; the answers must be equal.
+- **Claims** (Claim Audit extractor). The checkable Claims (``location``,
+  ``together``, ``kill``, ``task_done``) must match as sets, on kind, subject,
+  object, room, Round, Task, negation and the ``seen`` / ``throughout``
+  qualifiers. The reading is unavailable if the extractor's reply had any
+  rejected (malformed) item, or a checkable Claim whose quote is empty or isn't
+  in that version's text: an item that couldn't be read or grounded does not
+  show the message has no such Claim. ``other`` Claims are never checked by the
+  audit, so they are not compared.
+- **Judgments** (one judge batch per version):
+  - ``push`` (Choice, as in the judgments): whom does the message argue to
+    eject (another living player, ``skip``, ``no_one``)?
+  - ``stance`` (Choice) for every other living player: ``accuses``,
+    ``suspects`` (hedged suspicion), ``defends`` or ``none``. Catches a reversed
+    secondary accusation or defense when the vote target is unchanged.
+  - ``asserted`` (Noul, as in the judgments) for every Claim: stated as fact,
+    or hedged? Catches added or removed hedging.
+- **Anchors** (plain code): the same player names, rooms, Task ids and numbers
+  mentioned, the same number of negations (not, never, n't, ...), and hedging
+  present in both or neither. A conservative backstop for edits the judge
+  might miss; ``neutralize`` never changes any of them.
 
-A message whose meaning can't be read (extractor or judge error) can't be
-confirmed, so ``StyleMask`` treats it as a failed check. Fatal provider errors
-and ``SpendCapReached`` propagate and stop the run.
+Fatal provider errors and ``SpendCapReached`` propagate and stop the run.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
-from dataclasses import dataclass
+from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Any
 
-from zantine.audit.claims import ExtractionError, ExtractionInput, parse_payload
+from zantine.audit.claims import ClaimDraft, ExtractionError, ExtractionInput, parse_payload
 from zantine.audit.extractors import ClaimExtractor
 from zantine.harness.provider import ProviderError
-from zantine.judge.batches import NO_ONE, NOTE, SAFETY, SKIP
-from zantine.judge.judges import Judge
-from zantine.judge.questions import CHOICE, Batch, JudgmentError, Question, parse_answers
+from zantine.judge.batches import (
+    ASSERTED,
+    ASSERTED_CRITERIA,
+    MAX_QUESTIONS,
+    NO_ONE,
+    NOTE,
+    SAFETY,
+    SKIP,
+)
+from zantine.judge.judges import Judge, KeywordJudge, choice
+from zantine.judge.questions import CHOICE, NOUL, Batch, JudgmentError, Question, parse_answers
 from zantine.stylemask.base import MaskInput
 
-CHECK_VERSION = "meaning-2"
+CHECK_VERSION = "meaning-3"
 CHECKED_KINDS = ("location", "together", "kill", "task_done")
 _SELF_WORDS = frozenset({"i", "me", "myself", "self"})
 
@@ -42,6 +65,29 @@ PUSH = (
     "'I agree with Blue'. Answer skip if it argues for skipping the vote, and no_one if it "
     "argues for no vote at all." + SAFETY
 )
+STANCE = (
+    "Statement {sid} was said by {speaker}. What stance does statement {sid} take toward "
+    "{name}? Use the statements in earlier only to resolve references." + SAFETY
+)
+ACCUSES, SUSPECTS, DEFENDS, NONE = "accuses", "suspects", "defends", "none"
+
+
+def stance_options(name: str) -> dict[str, str]:
+    return {
+        ACCUSES: f"Says or argues that {name} is an Impostor, lied, did something wrong, "
+        "or should be ejected.",
+        SUSPECTS: f"Voices a hedged suspicion or doubt about {name} without asserting it.",
+        DEFENDS: f"Says or argues that {name} is innocent or trustworthy, vouches for {name}, "
+        f"or argues against ejecting {name}.",
+        NONE: f"Takes no stance toward {name}.",
+    }
+
+
+def prompt_hash() -> str:
+    """Pins the question templates the meaning check asks."""
+    blob = json.dumps([NOTE, PUSH, STANCE, stance_options("X"), ASSERTED, ASSERTED_CRITERIA])
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
 
 # kind, subject, object, room, round, task, negated, seen, throughout
 ClaimKey = tuple[str, str | None, str | None, str | None, int | None, str | None, bool, bool, bool]
@@ -59,20 +105,28 @@ _KEY_FIELDS = (
 
 
 class MeaningUnavailable(Exception):
-    """The meaning of one version could not be read (extractor or judge failure)."""
+    """The meaning of one version could not be read completely (extractor or judge)."""
 
 
 @dataclass(frozen=True)
 class Meaning:
     claims: tuple[ClaimKey, ...]  # sorted, distinct
-    push: str | None  # None when the check has no judge
-    push_confidence: float | None = None
+    anchors: dict[str, Any]
+    push: str | None = None  # the judge's readings; None when the check has no judge
+    stances: tuple[tuple[str, str], ...] = ()  # (player name, stance), by name
+    asserted: tuple[tuple[ClaimKey, bool], ...] = ()  # sorted, distinct
+    confidence: dict[str, float] = field(default_factory=dict)  # question id -> confidence
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "claims": [dict(zip(_KEY_FIELDS, c, strict=True)) for c in self.claims],
+            "anchors": self.anchors,
             "push": self.push,
-            "push_confidence": self.push_confidence,
+            "stances": dict(self.stances),
+            "asserted": [
+                {**dict(zip(_KEY_FIELDS, c, strict=True)), "asserted": a} for c, a in self.asserted
+            ],
+            "confidence": self.confidence,
         }
 
 
@@ -96,18 +150,20 @@ class MeaningCheck:
     def info(self) -> dict[str, Any]:
         return {
             "version": CHECK_VERSION,
+            "prompt_sha256": prompt_hash(),
             "compared_kinds": list(CHECKED_KINDS),
             "extractor": self.extractor.info(),
             "judge": self.judge.info() if self.judge else None,
         }
 
     def meaning(self, item: MaskInput, text: str) -> Meaning:
-        """What ``text`` claims and whom it pushes to eject, as if ``item``'s speaker said it."""
-        claims = self._claims(item, text)
+        """Everything compared for ``text``, as if ``item``'s speaker said it."""
+        drafts = self._drafts(item, text)
+        claims = tuple(sorted({_key(d, item.speaker_name) for d in drafts}, key=repr))
+        anchors = _anchors(text, item)
         if self.judge is None:
-            return Meaning(claims, None)
-        push, confidence = self._push(item, text)
-        return Meaning(claims, push, confidence)
+            return Meaning(claims, anchors)
+        return self._judged(item, text, drafts, claims, anchors)
 
     @staticmethod
     def differences(expected: Meaning, found: Meaning) -> list[str]:
@@ -117,11 +173,25 @@ class MeaningCheck:
             out.append(f"lost Claim {_show(c)}")
         for c in sorted(set(found.claims) - set(expected.claims), key=repr):
             out.append(f"added Claim {_show(c)}")
+        was, now = _asserted_by_key(expected), _asserted_by_key(found)
+        for c in sorted(set(was) & set(now), key=repr):
+            if was[c] != now[c]:
+                out.append(
+                    f"Claim {_show(c)} is {_strength(now[c])} instead of {_strength(was[c])}"
+                )
         if expected.push != found.push:
             out.append(f"pushes to eject {found.push!r} instead of {expected.push!r}")
+        before, after = dict(expected.stances), dict(found.stances)
+        for name in sorted(set(before) | set(after)):
+            if before.get(name) != after.get(name):
+                out.append(f"{after.get(name)} {name} instead of {before.get(name)}")
+        for key in sorted(set(expected.anchors) | set(found.anchors)):
+            a, b = expected.anchors.get(key), found.anchors.get(key)
+            if a != b:
+                out.append(f"{key} {b!r} instead of {a!r}")
         return out
 
-    def _claims(self, item: MaskInput, text: str) -> tuple[ClaimKey, ...]:
+    def _drafts(self, item: MaskInput, text: str) -> list[ClaimDraft]:
         inp = ExtractionInput(
             text=text,
             speaker=item.speaker_name,
@@ -138,48 +208,125 @@ class MeaningCheck:
             if exc.fatal:
                 raise
             raise MeaningUnavailable(f"extractor: {exc}") from exc
+        if parsed.rejected:
+            raise MeaningUnavailable(f"extractor: unreadable items: {'; '.join(parsed.rejected)}")
         said = _squash(text)
-        keys = {
-            _key(d, item.speaker_name)
-            for d in parsed.drafts
-            if d.kind in CHECKED_KINDS and _squash(d.quote) and _squash(d.quote) in said
-        }
-        return tuple(sorted(keys, key=repr))
+        drafts = [d for d in parsed.drafts if d.kind in CHECKED_KINDS]
+        for d in drafts:
+            quote = _squash(d.quote)
+            if not quote or quote not in said:
+                raise MeaningUnavailable(f"extractor: Claim quote {d.quote!r} is not in the text")
+        return drafts
 
-    def _push(self, item: MaskInput, text: str) -> tuple[str, float]:
+    def _judged(
+        self,
+        item: MaskInput,
+        text: str,
+        drafts: list[ClaimDraft],
+        claims: tuple[ClaimKey, ...],
+        anchors: dict[str, Any],
+    ) -> Meaning:
         assert self.judge is not None
         speaker = item.speaker_name
-        batch = Batch(
-            id=f"style_mask.{item.channel}",
-            state={
-                "note": NOTE,
-                "meeting": item.meeting,
-                "players": [item.roster[s] for s in sorted(item.living)],
-                "earlier": [{"speaker": who, "text": said} for who, said in item.earlier],
-                "statements": [{"id": "s", "speaker": speaker, "text": text}],
-            },
-            questions={
-                "push_s": Question(
-                    CHOICE,
-                    PUSH.format(sid="s", speaker=speaker),
-                    push_options(item),
-                    about={"judgment": "push", "statement": "s"},
-                )
-            },
-            round=item.round,
+        others = [item.roster[s] for s in sorted(item.living) if s != item.speaker]
+        state = {
+            "note": NOTE,
+            "meeting": item.meeting,
+            "players": [item.roster[s] for s in sorted(item.living)],
+            "earlier": [{"speaker": who, "text": said} for who, said in item.earlier],
+            "statements": [{"id": "s", "speaker": speaker, "text": text}],
+            "claims": [
+                {"id": f"c{i}", "quote": d.quote, "meaning": _draft_meaning(d)}
+                for i, d in enumerate(drafts)
+            ],
+        }
+        questions: dict[str, Question] = {
+            "push_s": Question(
+                CHOICE,
+                PUSH.format(sid="s", speaker=speaker),
+                push_options(item),
+                about={"judgment": "push", "statement": "s"},
+            )
+        }
+        for n, name in enumerate(others):
+            questions[f"stance_{n}"] = Question(
+                CHOICE,
+                STANCE.format(sid="s", speaker=speaker, name=name),
+                stance_options(name),
+                about={"judgment": "stance", "statement": "s", "player": name},
+            )
+        for i in range(len(drafts)):
+            questions[f"asserted_c{i}"] = Question(
+                NOUL,
+                ASSERTED.format(cid=f"c{i}", sid="s", speaker=speaker),
+                ASSERTED_CRITERIA,
+                about={"judgment": "asserted", "claim": f"c{i}"},
+            )
+        answers = {}
+        items = list(questions.items())
+        for k in range(0, len(items), MAX_QUESTIONS):
+            batch = Batch(
+                id=f"style_mask.{item.channel}.{k // MAX_QUESTIONS}",
+                state=state,
+                questions=dict(items[k : k + MAX_QUESTIONS]),
+                round=item.round,
+            )
+            try:
+                answers |= parse_answers(batch, self.judge.judge(batch), threshold=0.0)
+            except JudgmentError as exc:
+                raise MeaningUnavailable(f"judge: {exc}") from exc
+            except ProviderError as exc:
+                if exc.fatal:
+                    raise
+                raise MeaningUnavailable(f"judge: {exc}") from exc
+        stances = tuple((name, str(answers[f"stance_{n}"].value)) for n, name in enumerate(others))
+        asserted = {(_key(d, speaker), answers[f"asserted_c{i}"].yes) for i, d in enumerate(drafts)}
+        return Meaning(
+            claims,
+            anchors,
+            push=str(answers["push_s"].value),
+            stances=tuple(sorted(stances)),
+            asserted=tuple(sorted(asserted, key=repr)),
+            confidence={qid: a.confidence for qid, a in sorted(answers.items())},
         )
-        try:
-            answer = parse_answers(batch, self.judge.judge(batch), threshold=0.0)["push_s"]
-        except JudgmentError as exc:
-            raise MeaningUnavailable(f"judge: {exc}") from exc
-        except ProviderError as exc:
-            if exc.fatal:
-                raise
-            raise MeaningUnavailable(f"judge: {exc}") from exc
-        return str(answer.value), answer.confidence
 
 
-def _key(d: Any, speaker: str) -> ClaimKey:
+# Anchors -------------------------------------------------------------------------------
+
+_NEGATION = re.compile(r"\b(?:not|no|never|nobody|none|nothing|neither|nor|cannot)\b|n't\b", re.I)
+_HEDGE = re.compile(
+    r"\b(?:i think|i guess|i believe|i feel|maybe|probably|perhaps|possibly|might|may|could|"
+    r"likely|unlikely|not sure|unsure|seems?|seemed|apparently|kind of|sort of)\b",
+    re.I,
+)
+_TASK = re.compile(r"\bT\d+\b", re.I)
+_NUMBER = re.compile(r"\b\d+\b")
+
+
+def _anchors(text: str, item: MaskInput) -> dict[str, Any]:
+    folded = text.replace("\u2019", "'")
+
+    def mentioned(words: Iterable[str]) -> list[str]:
+        return sorted(
+            w
+            for w in {w.casefold() for w in words}
+            if re.search(rf"(?<!\w){re.escape(w)}(?!\w)", folded, re.I)
+        )
+
+    return {
+        "players": mentioned(item.roster.values()),
+        "rooms": mentioned(item.rooms),
+        "tasks": sorted({t.upper() for t in _TASK.findall(folded)}),
+        "numbers": sorted(set(_NUMBER.findall(_TASK.sub(" ", folded))), key=int),
+        "negations": len(_NEGATION.findall(folded)),
+        "hedged": bool(_HEDGE.search(folded)),
+    }
+
+
+# Claims --------------------------------------------------------------------------------
+
+
+def _key(d: ClaimDraft, speaker: str) -> ClaimKey:
     def name(value: str | None) -> str | None:
         if value is None:
             return None
@@ -201,6 +348,31 @@ def _key(d: Any, speaker: str) -> ClaimKey:
     )
 
 
+def _draft_meaning(d: ClaimDraft) -> dict[str, Any]:
+    return {
+        "kind": d.kind,
+        "subject": d.subject,
+        "object": d.object,
+        "room": d.room,
+        "round": d.round,
+        "task": d.task,
+        "negated": d.negated,
+        "seen": d.seen,
+        "throughout": d.throughout,
+    }
+
+
+def _asserted_by_key(m: Meaning) -> dict[ClaimKey, frozenset[bool]]:
+    out: dict[ClaimKey, set[bool]] = {}
+    for key, value in m.asserted:
+        out.setdefault(key, set()).add(value)
+    return {k: frozenset(v) for k, v in out.items()}
+
+
+def _strength(values: frozenset[bool]) -> str:
+    return "/".join(sorted("asserted" if v else "hedged" for v in values))
+
+
 def _squash(text: str) -> str:
     return " ".join(text.casefold().split())
 
@@ -215,3 +387,54 @@ def _show(c: ClaimKey) -> str:
         if flag:
             parts.append(label)
     return "(" + " ".join(parts) + ")"
+
+
+# The dry-run judge ----------------------------------------------------------------------
+
+STANCE_KEYWORD_VERSION = "keyword-1+stance-1"
+
+
+class MaskKeywordJudge(KeywordJudge):
+    """``KeywordJudge`` plus keyword rules for ``stance``; for dry runs, not scoring.
+
+    ``stance`` toward a player named N: ``accuses`` for "accuse/vote (for/out)/eject N",
+    "N is/was (an/the) Impostor", "N killed/kill/lied/is lying"; else ``defends``
+    for "N is/was (...) innocent/safe/clear(ed)/trustworthy/not (an/the) Impostor",
+    "trust/vouch for/defend N", "N was with me"; else ``suspects`` for
+    "suspect/doubt N", "N is/was/seems/looks (...) sus/suspicious/strange/weird/shady";
+    else ``none``.
+    """
+
+    def info(self) -> dict[str, Any]:
+        return {
+            "name": "keyword",
+            "model": None,
+            "version": STANCE_KEYWORD_VERSION,
+            "scoring": False,
+        }
+
+    def _answer(self, batch: Batch, q: Question) -> dict[str, Any]:
+        if q.about.get("judgment") != "stance":
+            return super()._answer(batch, q)
+        text = next(s for s in batch.state["statements"] if s["id"] == q.about["statement"])["text"]
+        n = re.escape(q.about["player"])
+        rules = [
+            (ACCUSES, rf"\b(?:accuse|vote(?: for| out)?|eject)\s+{n}\b"),
+            (ACCUSES, rf"\b{n}\s+(?:is|was)\s+(?:an?\s+|the\s+)?impostor\b"),
+            (ACCUSES, rf"\b{n}\s+(?:killed|kill|kills|lied|is lying|was lying)\b"),
+            (
+                DEFENDS,
+                rf"\b{n}\s+(?:is|was)\s+(?:\w+\s+){{0,2}}(?:innocent|safe|clear|cleared|trustworthy)",
+            ),
+            (DEFENDS, rf"\b{n}\s+(?:is|was)\s+not\s+(?:an?\s+|the\s+)?impostor\b"),
+            (DEFENDS, rf"\b(?:trust|vouch for|defend)\s+{n}\b"),
+            (DEFENDS, rf"\b{n}\s+was\s+with\s+me\b"),
+            (SUSPECTS, rf"\b(?:suspect|doubt)\s+{n}\b"),
+            (
+                SUSPECTS,
+                rf"\b{n}\s+(?:is|was|seems|looks)\s+(?:\w+\s+){{0,2}}(?:sus|suspicious|strange|weird|shady)",
+            ),
+        ]
+        # First match wins, so an accusation outranks a defense or a suspicion.
+        pick = next((st for st, pattern in rules if re.search(pattern, text, re.I)), NONE)
+        return choice(q.options, pick)

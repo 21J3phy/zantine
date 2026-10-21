@@ -326,10 +326,12 @@ def _classifier_line(r: dict[str, Any]) -> str:
     lo, hi = r["balanced_accuracy_ci95"]
     alo, ahi = r["accuracy_ci95"]
     return (
-        f"{r['messages']} messages, {len(r['models'])} Models: balanced accuracy "
-        f"{r['balanced_accuracy']:.0%} [{lo:.0%}, {hi:.0%}] vs chance "
-        f"{r['chance_balanced_accuracy']:.0%}; accuracy {r['accuracy']:.0%} [{alo:.0%}, "
-        f"{ahi:.0%}] vs majority {r['chance_accuracy']:.0%} (p={r['p_value_vs_chance']:.3g})"
+        f"{r['messages']} messages in {r['games']} games ({r['folds']} folds by game), "
+        f"{len(r['models'])} Models: balanced accuracy {r['balanced_accuracy']:.0%} "
+        f"[{lo:.0%}, {hi:.0%}] vs chance {r['chance_balanced_accuracy']:.0%} "
+        f"(p={r['p_value_balanced_vs_chance']:.3g}); accuracy {r['accuracy']:.0%} "
+        f"[{alo:.0%}, {ahi:.0%}] vs majority {r['chance_accuracy']:.0%} "
+        f"(p={r['p_value_vs_chance']:.3g}); CIs and p by game cluster bootstrap"
     )
 
 

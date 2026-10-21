@@ -71,7 +71,8 @@ def build_style_mask(
     from zantine.audit.extractors import ClaimExtractor, PatternExtractor
     from zantine.audit.llm import LLMExtractor, load_extractor_specs
     from zantine.judge.jev import JevJudge
-    from zantine.judge.judges import Judge, KeywordJudge
+    from zantine.judge.judges import Judge
+    from zantine.stylemask.check import MaskKeywordJudge
     from zantine.stylemask.llm import LLMMasker, load_masker_specs
 
     def need_ledger() -> Ledger:
@@ -99,7 +100,7 @@ def build_style_mask(
         x = LLMExtractor.from_env(xspecs[extractor], need_ledger(), live=live)
     j: Judge
     if judge == "keyword":
-        j = KeywordJudge()
+        j = MaskKeywordJudge()
     elif judge == "jev":
         j = JevJudge.from_env(need_ledger(), live=live)
     else:

@@ -75,6 +75,11 @@ class StyleMask:
     def masker_id(self) -> str:
         return str(self.masker.info()["id"])
 
+    def ledgers(self) -> list[Any]:
+        """The Ledgers of the paid parts (masker, extractor, judge), if any."""
+        parts = (self.masker, self.check.extractor, self.check.judge)
+        return [p.ledger for p in parts if getattr(p, "ledger", None) is not None]
+
     def info(self) -> dict[str, Any]:
         return {
             "rule": RULE_VERSION,
@@ -155,6 +160,6 @@ def dry_style_mask() -> StyleMask:
     scoring extractor and Jev instead (``stylemask.build_style_mask``).
     """
     from zantine.audit.extractors import PatternExtractor
-    from zantine.judge.judges import KeywordJudge
+    from zantine.stylemask.check import MaskKeywordJudge
 
-    return StyleMask(NeutralMasker(), MeaningCheck(PatternExtractor(), KeywordJudge()))
+    return StyleMask(NeutralMasker(), MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
