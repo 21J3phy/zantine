@@ -4,6 +4,7 @@ prompt-injection safety and the ``zantine audit`` command. No network."""
 from __future__ import annotations
 
 import email.message
+import http.client
 import io
 import json
 import os
@@ -563,3 +564,57 @@ def test_a_reply_that_is_not_an_object_holds_the_worst_case(body: Any) -> None:
     assert not report["complete"]
     assert all(not r.ok for r in ledger.records)
     assert ledger.spent_usd > 0  # no usage to trust: the worst case of each call is held
+
+
+class BrokenBody(io.RawIOBase):
+    """A 200 reply whose body fails while it is read."""
+
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer: Any) -> int:
+        raise self.error
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        lambda: BrokenBody(http.client.IncompleteRead(b'{"choices": [')),
+        lambda: BrokenBody(ConnectionResetError(54, "Connection reset by peer")),
+        lambda: io.BytesIO(b'\xff\xfe{"choices": []}'),  # not UTF-8
+        lambda: io.BytesIO(b'{"choices": ['),  # truncated JSON
+    ],
+)
+def test_reply_body_read_failures_are_retried_and_held(body: Any) -> None:
+    """Through the real http_post: a body lost or garbled after the request was sent
+    never escapes run_audit; each statement is retried once, and every call's worst
+    case stays held against the cap (it may have been billed)."""
+    url = SPEC.base_url + "/chat/completions"
+    requests: list[str] = []
+
+    class Transport(urllib.request.BaseHandler):
+        handler_order = 100
+
+        def http_open(self, req: urllib.request.Request) -> urllib.response.addinfourl:
+            requests.append(req.full_url)
+            resp = urllib.response.addinfourl(body(), email.message.Message(), url, 200)
+            resp.msg = "OK"
+            return resp
+
+    opener = make_opener(Transport())
+    ledger = Ledger(5.0)
+
+    def post(u: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        return http_post(u, headers, payload, opener=opener)
+
+    report = run_audit(
+        kill_game(), LLMExtractor(SPEC, ledger, OpenAICompatAdapter(SPEC, post, "k")), ledger=ledger
+    )
+    spoken = [s for s in report["statements"] if s["text"].strip()]
+    assert not report["complete"] and report["aborted"] is None
+    assert len(requests) == len(ledger.records) == 2 * len(spoken)
+    assert all(not r.ok for r in ledger.records)
+    assert ledger.spent_usd > 0

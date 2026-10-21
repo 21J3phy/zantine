@@ -21,6 +21,7 @@ Live gate: like live Seats, an extractor call needs an explicit flag plus
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import tomllib
@@ -336,19 +337,30 @@ def http_post(
     *,
     opener: urllib.request.OpenerDirector | None = None,
 ) -> dict[str, Any]:
-    """POST JSON with the standard library. Network errors become ``ProviderError``."""
+    """POST JSON with the standard library. Network errors become ``ProviderError``.
+
+    An HTTP error status is a rejection (``status`` set). Any other failure,
+    including one while reading or decoding the reply body (a connection lost
+    mid-body, invalid UTF-8 or JSON), has no status: the call may have been
+    billed, so the caller holds its worst case and may retry.
+    """
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
     )
     try:
         with (opener or make_opener()).open(req, timeout=120) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            body = resp.read()
+        return json.loads(body.decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", "replace")[:500]
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:500]
+        except (http.client.HTTPException, OSError):
+            detail = "(error body unreadable)"
         raise ProviderError(
             f"HTTP {exc.code}: {detail}", fatal=exc.code in _FATAL_STATUSES, status=exc.code
         ) from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (http.client.HTTPException, OSError, ValueError) as exc:
+        # OSError: URLError, timeouts, resets; ValueError: bad UTF-8 or JSON.
         raise ProviderError(f"{type(exc).__name__}: {exc}", fatal=False) from exc
 
 
