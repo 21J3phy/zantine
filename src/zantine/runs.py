@@ -7,7 +7,8 @@ Layout of ``runs/<run-id>/`` (other tools read it; see ``docs/architecture.md``)
     run.lock                 held (flock) by the one ``zantine run`` using the directory
     index.jsonl              one line per finished attempt (complete or aborted), append-only
     spend.jsonl              a reservation before every paid call and its settled cost
-                             after it, append-only
+                             after it, plus a hold for every call that failed without a
+                             reply but may still have been billed; append-only
     games/<game-id>.jsonl    the transcript of each complete game
     aborted/<game-id>.<attempt>.jsonl   transcripts of attempts stopped by the spend cap
                                         or a fatal API error (kept for the spend record)
@@ -205,10 +206,13 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def spent_usd(run_dir: Path) -> float:
     """Everything the run has spent so far, from the spend log: every settled call,
-    plus the worst case of any reservation never settled (a crash mid-call)."""
+    every hold (the worst case of a call lost without a reply, which the provider
+    may have billed), plus the worst case of any reservation never settled (a
+    crash mid-call)."""
     lines = read_jsonl(run_dir / SPEND)
     settled = {r["reservation"] for r in lines if r["kind"] == "call"}
     total = sum(r["cost_usd"] for r in lines if r["kind"] == "call")
+    total += sum(r["hold_usd"] for r in lines if r["kind"] == "hold")
     total += sum(
         r["reserved_usd"]
         for r in lines
@@ -221,8 +225,10 @@ class RunLedger(Ledger):
     """A Ledger that journals every paid call to ``spend.jsonl``.
 
     Before a call is sent, a ``reserve`` line records its worst-case cost; after
-    it, a ``call`` line settles it at its real cost. The log survives a crash at
-    any point, so the run-level cap stays honest. ``game_attempt`` is the attempt
+    it, a ``call`` line settles it at its real cost. A caller's ``hold`` (the
+    worst case of a call that failed without a reply, e.g. lost in transit) is a
+    ``hold`` line, so a resume can't forget it. The log survives a crash at any
+    point, so the run-level cap stays honest. ``game_attempt`` is the attempt
     at the scheduled game; ``call_attempt`` is the Seat's retry of one decision.
     """
 
@@ -246,6 +252,16 @@ class RunLedger(Ledger):
             "call_attempt": attempt,
             "model": model.id,
             "reserved_usd": needed,
+        }
+        _append_line(self.path, line)
+
+    def hold(self, amount_usd: float) -> None:
+        super().hold(amount_usd)
+        line = {
+            "kind": "hold",
+            "game": self.game,
+            "game_attempt": self.attempt,
+            "hold_usd": amount_usd,
         }
         _append_line(self.path, line)
 

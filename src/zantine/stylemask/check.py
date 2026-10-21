@@ -23,11 +23,15 @@ original).
     secondary accusation or defense when the vote target is unchanged.
   - ``asserted`` (Noul, as in the judgments) for every Claim: stated as fact,
     or hedged? Catches added or removed hedging.
+- **Same content** (one paired judge question, asked only once everything
+  else agrees): does the rewrite say exactly what the original says, including
+  instructions, plans and their order, requests and questions? This covers
+  content outside the Claim schema and the stances.
 - **Anchors** (plain code): the same player names, rooms, Task ids and numbers
-  mentioned, the same counts of role words (Impostor, Crewmate) and negations
-  (not, never, n't, ...), and hedging present in both or neither. A
-  conservative backstop for edits the judge might miss; ``neutralize`` never
-  changes any of them.
+  mentioned, in the same order ("Storage, then Electrical"), the same counts
+  of role words (Impostor, Crewmate) and negations (not, never, n't, ...), and
+  hedging present in both or neither. A conservative backstop for edits the
+  judge might miss; ``neutralize`` never changes any of them.
 
 Fatal provider errors and ``SpendCapReached`` propagate and stop the run.
 """
@@ -53,11 +57,11 @@ from zantine.judge.batches import (
     SAFETY,
     SKIP,
 )
-from zantine.judge.judges import Judge, KeywordJudge, choice
+from zantine.judge.judges import Judge, KeywordJudge, choice, noul
 from zantine.judge.questions import CHOICE, NOUL, Batch, JudgmentError, Question, parse_answers
 from zantine.stylemask.base import MaskInput
 
-CHECK_VERSION = "meaning-4"
+CHECK_VERSION = "meaning-5"
 CHECKED_KINDS = ("location", "together", "kill", "task_done")
 _SELF_WORDS = frozenset({"i", "me", "myself", "self"})
 
@@ -71,6 +75,18 @@ STANCE = (
     "Statement {sid} was said by {speaker}. What stance does statement {sid} take toward "
     "{name}? Use the statements in earlier only to resolve references." + SAFETY
 )
+SAME_CONTENT = (
+    "Statements a and b are two versions of one message said by {speaker}; b is meant to "
+    "be a rewording of a in a plainer style. Does b say exactly what a says: the same facts, "
+    "accusations, defenses, instructions, plans and their order, requests, questions and "
+    "certainty, adding and leaving out nothing? Differences only in wording, punctuation "
+    "and formatting don't matter. Use the statements in earlier only to resolve references."
+    + SAFETY
+)
+SAME_CONTENT_CRITERIA = {
+    "true": "The same content; only the wording or style differs.",
+    "false": "Some content differs: added, left out, reordered, reversed, or more or less certain.",
+}
 STANCE_SELF = (
     "Statement {sid} was said by {speaker}. What stance does statement {sid} take toward "
     "{speaker}, the speaker? First-person statements ('I am a Crewmate', 'I did it', 'vote "
@@ -94,7 +110,17 @@ def stance_options(name: str) -> dict[str, str]:
 def prompt_hash() -> str:
     """Pins the question templates the meaning check asks."""
     blob = json.dumps(
-        [NOTE, PUSH, STANCE, STANCE_SELF, stance_options("X"), ASSERTED, ASSERTED_CRITERIA]
+        [
+            NOTE,
+            PUSH,
+            STANCE,
+            STANCE_SELF,
+            stance_options("X"),
+            ASSERTED,
+            ASSERTED_CRITERIA,
+            SAME_CONTENT,
+            SAME_CONTENT_CRITERIA,
+        ]
     )
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
@@ -174,6 +200,49 @@ class MeaningCheck:
         if self.judge is None:
             return Meaning(claims, anchors)
         return self._judged(item, text, drafts, claims, anchors)
+
+    def same_content(self, item: MaskInput, original: str, rewrite: str) -> list[str]:
+        """The judge's paired check that ``rewrite`` says what ``original`` says.
+
+        Covers what no other comparison represents (instructions, plans, requests,
+        questions). Empty when it agrees or there is no judge; raises
+        ``MeaningUnavailable`` when the judge's answer can't be read.
+        """
+        if self.judge is None:
+            return []
+        speaker = item.speaker_name
+        batch = Batch(
+            id=f"style_mask.{item.channel}.same",
+            state={
+                "note": NOTE,
+                "meeting": item.meeting,
+                "earlier": [{"speaker": who, "text": said} for who, said in item.earlier],
+                "statements": [
+                    {"id": "a", "speaker": speaker, "text": original},
+                    {"id": "b", "speaker": speaker, "text": rewrite},
+                ],
+            },
+            questions={
+                "same_content": Question(
+                    NOUL,
+                    SAME_CONTENT.format(speaker=speaker),
+                    SAME_CONTENT_CRITERIA,
+                    about={"judgment": "same_content", "original": "a", "rewrite": "b"},
+                )
+            },
+            round=item.round,
+        )
+        try:
+            answer = parse_answers(batch, self.judge.judge(batch), threshold=0.0)["same_content"]
+        except JudgmentError as exc:
+            raise MeaningUnavailable(f"judge: {exc}") from exc
+        except ProviderError as exc:
+            if exc.fatal:
+                raise
+            raise MeaningUnavailable(f"judge: {exc}") from exc
+        if answer.yes:
+            return []
+        return [f"the judge finds different content (p={float(answer.value):.2f})"]
 
     @staticmethod
     def differences(expected: Meaning, found: Meaning) -> list[str]:
@@ -338,6 +407,8 @@ def _anchors(text: str, item: MaskInput) -> dict[str, Any]:
         )
 
     return {
+        # Mentions in the order they're said ("Storage, then Electrical").
+        "order": _mention_order(folded, item),
         "players": mentioned(item.roster.values()),
         "rooms": mentioned(item.rooms),
         "tasks": sorted({t.upper() for t in _TASK.findall(folded)}),
@@ -348,6 +419,25 @@ def _anchors(text: str, item: MaskInput) -> dict[str, Any]:
         "negations": len(_NEGATION.findall(folded)),
         "hedged": bool(_HEDGE.search(folded)),
     }
+
+
+def _mention_order(text: str, item: MaskInput) -> list[str]:
+    """Players, rooms, Task ids and numbers in order of appearance (longest match wins)."""
+    spans: list[tuple[int, int, str]] = []
+    for kind, words in (("player", item.roster.values()), ("room", item.rooms)):
+        for w in {w.casefold() for w in words}:
+            for m in re.finditer(rf"(?<!\w){re.escape(w)}(?!\w)", text, re.I):
+                spans.append((m.start(), m.end(), f"{kind}:{w}"))
+    for m in _TASK.finditer(text):
+        spans.append((m.start(), m.end(), f"task:{m.group(0).upper()}"))
+    for m in _NUMBER.finditer(_TASK.sub(lambda t: " " * len(t.group(0)), text)):
+        spans.append((m.start(), m.end(), f"number:{m.group(0)}"))
+    out, end = [], -1
+    for start, stop, label in sorted(spans, key=lambda s: (s[0], -(s[1] - s[0]), s[2])):
+        if start >= end:
+            out.append(label)
+            end = stop
+    return out
 
 
 # Claims --------------------------------------------------------------------------------
@@ -400,6 +490,11 @@ def _strength(values: frozenset[bool]) -> str:
     return "/".join(sorted("asserted" if v else "hedged" for v in values))
 
 
+def _words(text: str) -> list[str]:
+    """The word sequence of a text, ignoring case, punctuation and formatting."""
+    return re.findall(r"[0-9a-z]+", text.replace("\u2019", "'").casefold())
+
+
 def _squash(text: str) -> str:
     return " ".join(text.casefold().split())
 
@@ -418,7 +513,7 @@ def _show(c: ClaimKey) -> str:
 
 # The dry-run judge ----------------------------------------------------------------------
 
-STANCE_KEYWORD_VERSION = "keyword-1+stance-2"
+STANCE_KEYWORD_VERSION = "keyword-1+stance-2+same-1"
 
 
 class MaskKeywordJudge(KeywordJudge):
@@ -430,7 +525,8 @@ class MaskKeywordJudge(KeywordJudge):
     Impostor", "N is/was (...) innocent/safe/clear(ed)/trustworthy", "N is a
     Crewmate", "N didn't/never kill", "trust/vouch for/defend N", "N was with me";
     else ``suspects`` for "suspect/doubt N", "N is/was/seems/looks (...)
-    sus/suspicious/strange/weird/shady"; else ``none``.
+    sus/suspicious/strange/weird/shady"; else ``none``. ``same_content``: yes when
+    both versions have the same word sequence, ignoring case and punctuation.
     """
 
     def info(self) -> dict[str, Any]:
@@ -442,6 +538,10 @@ class MaskKeywordJudge(KeywordJudge):
         }
 
     def _answer(self, batch: Batch, q: Question) -> dict[str, Any]:
+        if q.about.get("judgment") == "same_content":
+            texts = {s["id"]: s["text"] for s in batch.state["statements"]}
+            a, b = texts[q.about["original"]], texts[q.about["rewrite"]]
+            return noul(0.9 if _words(a) == _words(b) else 0.1)
         if q.about.get("judgment") != "stance":
             return super()._answer(batch, q)
         text = next(s for s in batch.state["statements"] if s["id"] == q.about["statement"])["text"]

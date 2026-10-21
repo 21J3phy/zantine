@@ -3,6 +3,7 @@ masker (fake endpoint), determinism and the style classifier report. No network.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import random
@@ -380,6 +381,62 @@ def test_an_invented_confession_is_never_broadcast() -> None:
     )
 
 
+def blind_judge() -> ScriptedJudge:
+    """Answers that never notice anything: no push, no stance, asserted, same content."""
+
+    def answer(batch: Any, qid: str, q: Any) -> Any:
+        if q.kind == "noul":
+            return noul(0.9)
+        return judge_choice(q.options, "no_one" if "no_one" in q.options else "none", 1.0)
+
+    return ScriptedJudge(answer)
+
+
+INSTRUCTION = "Go to Storage, then Electrical."
+
+
+def test_a_reversed_instruction_is_never_broadcast_even_with_a_blind_judge() -> None:
+    extractor = ScriptedExtractor(lambda inp: {"claims": [claim("other", "I", inp.text)]})
+    masker = ScriptedMasker(lambda it, p: "Go to Electrical, then Storage.")
+    game, _ = masked_game(masker, speech=INSTRUCTION)
+    # The same with the reviewer's checker: schema-valid `other` Claims and a blind judge.
+    bots = {seat: PlaybookBot() for seat in range(10)}
+    bots[RED] = PlaybookBot(actions={1: CallMeeting()}, speech={1: INSTRUCTION})
+    blind = make_game(
+        bots=bots, tasks_per_crewmate=0, round_cap=1, meeting_passes=1, style_mask=True
+    )
+    blind.style_mask = StyleMask(masker, MeaningCheck(extractor, blind_judge()))
+    blind.run()
+    for g in (game, blind):
+        assert (said(g)["text"], said(g)["mask"]) == (INSTRUCTION, "neutralized")
+        assert all(heard(g, seat) == [INSTRUCTION] for seat in range(10))
+        first = events(g, "style_mask.check")[0]
+        assert any(p.startswith("order") for p in first["problems"]), first["problems"]
+
+
+@pytest.mark.parametrize(
+    ("original", "rewrite", "problem"),
+    [
+        # A preserved factual Claim next to a changed instruction.
+        (
+            "I was in Storage. Go to Cafeteria, then Electrical.",
+            "I was in Storage. Go to Electrical, then Cafeteria.",
+            "order",
+        ),
+        # Same names and order, different instruction: only the paired question sees it.
+        ("I was in Storage. Go to Electrical.", "I was in Storage. Avoid Electrical.", "judge"),
+    ],
+)
+def test_a_changed_instruction_next_to_a_kept_claim_is_rejected(
+    original: str, rewrite: str, problem: str
+) -> None:
+    game, _ = masked_game(ScriptedMasker(lambda it, p: rewrite), speech=original)
+    assert (said(game)["text"], said(game)["mask"]) == (original, "neutralized")
+    first = events(game, "style_mask.check")[0]
+    assert first["meaning"]["claims"] == first["expected"]["claims"] != []
+    assert any(p.startswith(problem) or problem in p for p in first["problems"])
+
+
 def test_a_claim_that_loses_its_hedge_is_a_meaning_change() -> None:
     key = ("location", "blue", None, "storage", None, None, False, False, False)
     anchors = {"players": ["blue"]}
@@ -487,7 +544,8 @@ class Disguised(SeatController):
     def speak(self, ctx: MeetingContext) -> str:
         self.seen.append(ctx)
         said = self.inner.speak(ctx)
-        return f"**{said}**!!! — {self.model} \U0001f916" if said else said
+        # Style only: what a player says about itself is content, which the mask keeps.
+        return f"**{said}**!!! \u2014 \U0001f916" if said else said
 
     def vote(self, ctx: MeetingContext) -> int | None:
         self.seen.append(ctx)
@@ -504,14 +562,12 @@ def test_no_player_sees_a_model_id_masker_id_or_original_text() -> None:
         for s in range(10)
     ]
     bots[RED].inner.actions[1] = CallMeeting()
-    masker = ScriptedMasker(
-        lambda it, p: re.sub(r"\s*-\s*model-[a-j]\.?", "", neutralize(it.text)), id="mk-7"
-    )
+    masker = ScriptedMasker(lambda it, p: neutralize(it.text, it.keep_words()), id="mk-7")
     game = make_game(bots=dict(enumerate(bots)), tasks_per_crewmate=0, round_cap=2, style_mask=True)
     game.style_mask = StyleMask(masker, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
     game.run()
     originals = [s["original"] for s in events(game, "statement") if s["text"]]
-    assert originals and all("model-" in o for o in originals)
+    assert originals and all("**" in o and "!!!" in o for o in originals)
     for seat, bot in enumerate(bots):
         seen = json.dumps([dataclasses.asdict(c) for c in bot.seen], default=str)
         seen += json.dumps([dataclasses.asdict(o) for o in game.observations_of(seat)])
@@ -979,3 +1035,67 @@ def test_a_run_refuses_to_switch_maskers_or_use_one_dry(tmp_path: Path) -> None:
     dry_dir = one_masked_game_run(tmp_path, "dry")
     with pytest.raises(ValueError, match="--style-mask is for --live"):
         execute(dry_dir, mode="dry", style_mask=masker_factory(FakeRewriter()))
+
+
+def test_lost_masking_calls_stay_held_across_a_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fake_providers
+    from fake_providers import fake_adapter
+    from zantine.harness.pricing import load_models
+    from zantine.runs import RunLedger, execute, read_jsonl, spent_usd
+
+    # Free Seats, so only the masker's held worst cases count against the cap.
+    free = {"input": 0.0, "cached_input": 0.0, "cache_write": 0.0, "output": 0.0}
+    models = {
+        k: dataclasses.replace(v, price_valid_until=None, **free) for k, v in load_models().items()
+    }
+    polite, called = fake_providers.polite_call, []
+
+    def meeting_first(tail: str) -> Any:
+        name, args = polite(tail)
+        if name == "wait" and not called:
+            called.append(True)
+            return ("call_meeting", {})
+        return name, args
+
+    monkeypatch.setattr(fake_providers, "polite_call", meeting_first)
+
+    sent: list[int] = []
+
+    def lost(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        sent.append(1)
+        raise ProviderError("read timed out after sending", fatal=False)
+
+    def factory(ledger: Ledger) -> StyleMask:
+        masker = LLMMasker(SPEC, ledger, OpenAICompatAdapter(SPEC, lost, "sk"))
+        return StyleMask(masker, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
+
+    run_dir = one_masked_game_run(tmp_path)
+    live = {"mode": "live", "spend_cap_usd": 0.01, "adapter_factory": fake_adapter}
+    first = execute(run_dir, models=models, style_mask=factory, **live)
+    assert first.stopped == "spend_cap" and sent
+    held = [r for r in read_jsonl(run_dir / "spend.jsonl") if r["kind"] == "hold"]
+    assert len(held) == len(sent)
+    durable = spent_usd(run_dir)
+    assert durable == pytest.approx(sum(r["hold_usd"] for r in held)) and durable > 0
+    # A resume starts from the held spend: it can't buy back the budget.
+    before = len(sent)
+    called.clear()
+    execute(run_dir, models=models, style_mask=factory, **live)
+    assert spent_usd(run_dir) <= 0.01
+    assert len(sent) - before < before
+
+    # Controls: an HTTP rejection is never held, and a priced call isn't charged twice.
+    ledger = RunLedger(1.0, tmp_path / "control" / "spend.jsonl")
+
+    def rejected(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        raise ProviderError("HTTP 503: busy", fatal=False, status=503)
+
+    for post in (rejected, FakeRewriter()):
+        masker = LLMMasker(SPEC, ledger, OpenAICompatAdapter(SPEC, post, "sk"))
+        with contextlib.suppress(ProviderError):
+            masker.rewrite(item("I was in Storage"))
+    lines = read_jsonl(tmp_path / "control" / "spend.jsonl")
+    assert not [r for r in lines if r["kind"] == "hold"]
+    assert spent_usd(tmp_path / "control") == pytest.approx((300 * 1.0 + 40 * 2.0) / 1e6)

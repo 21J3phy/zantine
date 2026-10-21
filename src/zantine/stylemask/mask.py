@@ -147,6 +147,11 @@ class StyleMask:
             out = Attempt(source, n, text, False, (str(exc),), None)
         else:
             problems = MeaningCheck.differences(expected, found)
+            if not problems:  # only then ask the paired question (one more judge call)
+                try:
+                    problems = self.check.same_content(item, item.text, text)
+                except MeaningUnavailable as exc:
+                    problems = [str(exc)]
             out = Attempt(source, n, text, not problems, tuple(problems), found)
         checked[text] = out
         return out
