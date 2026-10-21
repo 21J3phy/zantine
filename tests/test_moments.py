@@ -698,3 +698,89 @@ def test_up_to_date_replays_unrelated_files_and_no_replay_are_left_alone(
     (tmp_path / "a.html").write_text(stale)
     find_in_path(current, out_dir=tmp_path, write_replays=False)
     assert (tmp_path / "a.html").read_text() == stale
+
+
+# Split-key Shared Tasks (#71's credit for every reader) -------------------------------
+
+
+def readers_heard_after(seed: int) -> tuple[Records, dict[str, Any], list[int], int] | None:
+    """A scripted game where a split-key Task completes and readers of the successful
+    attempt (not only the enterer) speak afterwards: the completion event, those
+    readers, and a living Crewmate outside the Task who also speaks afterwards."""
+    records = scripted(seed)
+    result = result_of(records)
+    tasks = next(r for r in records if r.get("type") == "tasks.generated")["data"]["tasks"]
+    roles = {s["seat"]: s["role"] for s in records[0]["seats"]}
+    for completed in (r for r in records if r.get("type") == "splitkey.completed"):
+        task, attempt = completed["data"]["task"], completed["data"]["attempt"]
+        key = next(k for k in result["splitkey"]["keys"] if k["task"] == task)
+        (success,) = [h for h in key["history"] if h["attempt"] == attempt]
+        later = {
+            r["data"]["speaker"]
+            for r in records
+            if r["kind"] == "event" and r["type"] == "statement" and r["seq"] > completed["seq"]
+        }
+        readers = sorted(s for s in success["read_by"] if s in later)
+        holders = next(t["assignees"] for t in tasks if t["id"] == task)
+        outsiders = [
+            s
+            for s in sorted(later)
+            if s not in holders and s not in success["read_by"] and roles[s] == "crewmate"
+        ]
+        if [s for s in readers if s != completed["data"]["seat"]] and outsiders:
+            return records, completed, readers, outsiders[0]
+    return None
+
+
+def say_completed(records: Records, seats: list[int], task: str, after: int) -> Records:
+    """Those Seats' Meeting statements after seq ``after`` become "I completed Task
+    <task>." (the event and every listener's copy, so the transcript stays consistent)."""
+    text = f"I completed Task {task}."
+    return [
+        {**r, "data": {**r["data"], "text": text}}
+        if r.get("type") == "statement" and r["seq"] > after and r["data"]["speaker"] in seats
+        else r
+        for r in records
+    ]
+
+
+def test_split_key_readers_telling_the_truth_are_not_lie_moments() -> None:
+    """Every reader of the successful attempt really completed the Shared Task, so a
+    complete scoring audit accepts their "I completed it" and no Lie Moment names them;
+    a Crewmate who never held the Task still produces one (control)."""
+    found = next(filter(None, map(readers_heard_after, range(200))), None)
+    assert found, "no scripted seed in 0-199 has a split-key reader speaking after completion"
+    records, completed, readers, outsider = found
+    task, enterer = completed["data"]["task"], completed["data"]["seat"]
+    # Scripted holders all enter the code once they know it; drop the other readers'
+    # own entries so, as in the reported game, only their read and the completion
+    # notice tell them (and the record) that the Task is done.
+    records = [
+        r
+        for r in records
+        if not (
+            r.get("type") in ("tasks.graded", "splitkey.entered")
+            and r["data"].get("seat", r.get("seat")) in set(readers) - {enterer}
+            and r["data"].get("task") == task
+        )
+    ]
+    records = say_completed(records, [*readers, outsider], task, completed["seq"])
+    quote = f"I completed Task {task}"
+    audit = run_audit(
+        records,
+        ScriptedExtractor({f"{quote}.": {"claims": [claim("task_done", "I", quote, task=task)]}}),
+    )
+    audit["extractor"]["scoring"] = True  # as a scoring sidecar would be
+    assert audit["complete"]
+    labels_by_seat = {(c["speaker"], c["verdict"]["label"]) for c in audit["claims"]}
+    assert {label for seat, label in labels_by_seat if seat in readers} == {"true"}
+    assert {label for seat, label in labels_by_seat if seat == outsider} == {"lie"}
+
+    report = find_moments(records, json.loads(json.dumps(audit)))
+    assert report["audit_rejected"] is None
+    named = {
+        s["seat"] for m in report["moments"] if m["type"] == "surviving_lie" for s in m["seats"]
+    }
+    assert not named & set(readers)
+    assert outsider in named or outsider in result_of(records)["ejected"]
+    assert all(not m["provisional"] for m in report["moments"] if m["type"] == "surviving_lie")
