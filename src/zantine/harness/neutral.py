@@ -6,6 +6,8 @@ Everything a Model sees is defined here and nowhere else:
 - ``SYSTEM_PROMPT``: the rules and response format, identical for every Seat.
 - ``tools(rules)``: one tool per registered action kind (plug-in actions included,
   derived from their dataclass fields), plus ``speak``, ``vote`` and ``skip_vote``.
+  With Room Chat installed, every action tool also takes ``say``: what the Seat
+  says in its room alongside that action, so talking never costs a Round.
   All tools are offered on every call so the cached prefix never changes; the
   prompt says which ones fit the current decision.
 - Memory: the Seat's observations rendered in order, grouped into fixed blocks
@@ -38,7 +40,7 @@ from zantine.rules.actions import Action, Invalid
 from zantine.rules.registry import Rules
 
 HARNESS_NAME = "neutral"
-HARNESS_VERSION = 5
+HARNESS_VERSION = 6
 MEMORY_BLOCK_LINES = 8
 
 RULES_PROMPT = """\
@@ -59,10 +61,17 @@ You only perceive your own room: at the end of every Round you see who is in you
 bodies there. If a kill happens in the room you started the Round in, you see it, even if you \
 were walking out. Impostors have a kill cooldown, which also restarts after every Meeting.
 
+Room Chat: with any action you may also say something, using that action tool's `say` argument \
+(an empty string says nothing). It is heard at the end of the Round, after movement, by every \
+living player in the room where you end the Round, including anyone who just walked in; players \
+in other rooms never hear it. A player killed that Round says nothing. Your Talk Budget for \
+Room Chat is shown with your state each Round; longer text is cut off.
+
 Tasks: each Crewmate is privately given Tasks, small pieces of work with checkable answers, \
 each in a set room; some can only be done after another player's Task is complete. Working on a \
 Task takes your whole Round in its room, and only you learn whether your answer was right. \
-Impostors have no Tasks.
+Some Tasks are Shared Tasks that several players can only finish together; their briefs \
+explain how. Impostors have no Tasks.
 
 Crisis: an Impostor can spend its action to trigger a Crisis. Everyone is told its two stations \
 and its deadline, but not who triggered it. It is fixed only if, in the same Round, someone works \
@@ -203,9 +212,35 @@ def _action_doc(cls: type[Action]) -> str:
     return " ".join(doc.split("\n\n")[0].split())
 
 
+SAY_FIELD = "say"
+SAY_PROPERTY: dict[str, Any] = {
+    "type": "string",
+    "description": (
+        "Room Chat: what you say this Round to everyone in the room where you end the Round "
+        "(empty string to stay silent). Longer than your Talk Budget is cut off."
+    ),
+}
+
+
+def room_chat(rules: Rules) -> bool:
+    """Is Room Chat installed (so every action tool takes ``say``)?"""
+    return any(m.name == "chat" for m in rules.modules)
+
+
+def _with_say(tool: ToolSpec) -> ToolSpec:
+    params = dict(tool.parameters)
+    params["properties"] = {**params["properties"], SAY_FIELD: SAY_PROPERTY}
+    params["required"] = [*params["required"], SAY_FIELD]
+    return ToolSpec(tool.name, tool.description, params)
+
+
 def tools(rules: Rules) -> tuple[ToolSpec, ...]:
+    chat = room_chat(rules)
     return (
-        *(action_tool(cls) for cls in action_kinds(rules).values()),
+        *(
+            _with_say(action_tool(cls)) if chat else action_tool(cls)
+            for cls in action_kinds(rules).values()
+        ),
         SPEAK_TOOL,
         VOTE_TOOL,
         SKIP_VOTE_TOOL,
@@ -283,6 +318,11 @@ def render_observation(obs: Observation, roster: Mapping[int, str]) -> str:
             return f"{r} Everyone alive returned to {d['room']}."
         case "game_over":
             return f"{r} Game over: {d['winner']} win ({d['reason']})."
+        case "chat.message":
+            return (
+                f"{r} Room Chat in {d['room']}: {_who(d['speaker'], roster)} said "
+                f"{json.dumps(d['text'], ensure_ascii=False)}"
+            )
     return f"{r} {obs.type}: {json.dumps(d, sort_keys=True, ensure_ascii=False)}"
 
 
@@ -373,6 +413,11 @@ def action_state(ctx: ActionContext) -> list[str]:
     if ctx.role is Role.IMPOSTOR and ctx.kill_cooldown is not None:
         state.append(f"Kill cooldown: {ctx.kill_cooldown} Round(s).")
     state.append(f"Emergency Meetings left: {ctx.emergency_meetings_left}.")
+    budget = ctx.extra.get("chat", {}).get("budget_chars")
+    if budget is not None:
+        state.append(
+            f"Room Chat: your Talk Budget this Round is {budget} characters (the `say` argument)."
+        )
     state.append(_roster_line(roster))
     state += _extra_lines(ctx.extra)
     return state
@@ -442,13 +487,23 @@ def _single_call(response: ProviderResponse, allowed: Sequence[str]) -> tuple[An
     return call, None
 
 
-def parse_action(rules: Rules, response: ProviderResponse) -> Action:
+def parse_turn(rules: Rules, response: ProviderResponse) -> tuple[Action, str]:
+    """The action and the Room Chat ``say`` that came with it ("" if none)."""
     kinds = action_kinds(rules)
     call, error = _single_call(response, list(kinds))
     if error:
-        return Invalid(reason=error, raw=response.text[:500])
+        return Invalid(reason=error, raw=response.text[:500]), ""
     data = {k: v for k, v in call.arguments.items() if k != "kind"}
-    return rules.parse_action({"kind": kinds[call.name].kind, **data})
+    said = ""
+    if room_chat(rules):
+        said = data.pop(SAY_FIELD, "")
+        if not isinstance(said, str):
+            return Invalid(reason="say must be a string", raw=repr(call.arguments)), ""
+    return rules.parse_action({"kind": kinds[call.name].kind, **data}), said
+
+
+def parse_action(rules: Rules, response: ProviderResponse) -> Action:
+    return parse_turn(rules, response)[0]
 
 
 def parse_speech(response: ProviderResponse) -> tuple[str | None, str | None]:

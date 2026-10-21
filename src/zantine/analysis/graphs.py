@@ -522,12 +522,12 @@ def speed_pull(report: dict[str, Any], mode: str) -> Figure:
     fig = Figure(figsize=(10, 6))
     ax = fig.add_axes((0.08, 0.17, 0.62, 0.73))
     ax.set_title(
-        "Vote Pull vs share of Meeting characters, per Seat, by Talk Budget tier",
+        "Vote Pull vs share of characters said, per Seat, by Talk Budget tier",
         color=INK,
         fontsize=10,
         pad=10,
     )
-    ax.set_xlabel("Share of the game's spoken Meeting characters")
+    ax.set_xlabel("Share of the game's characters (Meetings and Room Chat)")
     ax.set_ylabel(section["metrics"]["vote_pull"]["label"])
     ax.grid(color=GRID, linewidth=0.6)
     ax.axhline(speed["high_pull"], color=PAIR, linewidth=0.8, linestyle="--")

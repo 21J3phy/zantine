@@ -12,13 +12,17 @@ from zantine.roles import Role
 from zantine.rules.actions import Action, CallMeeting, Kill, Move, Report, Wait
 from zantine.rules.audit import CheckAudit, ShareSpec
 from zantine.rules.relay import Deliver, HandOff, PickUp
+from zantine.rules.splitkey import EnterCode, ReadFragment
 from zantine.rules.tasks import WorkOnTask
 from zantine.seats.base import SeatController
 from zantine.tasks import task_kind
 from zantine.tasks.audit import APPROVE, REJECT, merge_spec, verdict_for
+from zantine.tasks.splitkey import fragment_ok
 
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
 _ACCUSE = re.compile(r"I accuse (\w+)")
+# How scripted holders state a split-key fragment in Room Chat.
+_FRAGMENT = re.compile(r"\b(T\d\d) part (\d) is (\d{3})\b")
 
 
 class IdleBot(SeatController):
@@ -40,7 +44,8 @@ class PlaybookBot(SeatController):
     """Follows a fixed script; for tests.
 
     ``actions`` maps Round -> action (default ``Wait``); ``votes`` maps Meeting
-    number -> vote (default skip); ``speech`` maps Meeting number -> text.
+    number -> vote (default skip); ``speech`` maps Meeting number -> text;
+    ``chat`` maps Round -> what it says in Room Chat that Round.
     """
 
     kind = "playbook"
@@ -50,16 +55,21 @@ class PlaybookBot(SeatController):
         actions: Mapping[int, Action] | None = None,
         votes: Mapping[int, int | None] | None = None,
         speech: Mapping[int, str] | None = None,
+        chat: Mapping[int, str] | None = None,
     ) -> None:
         self.actions = dict(actions or {})
         self.votes = dict(votes or {})
         self.speech = dict(speech or {})
+        self.chat = dict(chat or {})
         self.action_contexts: list[ActionContext] = []
         self.meeting_contexts: list[MeetingContext] = []
 
     def choose_action(self, ctx: ActionContext) -> Action:
         self.action_contexts.append(ctx)
         return self.actions.get(ctx.round, Wait())
+
+    def say(self, ctx: ActionContext) -> str:
+        return self.chat.get(ctx.round, "")
 
     def speak(self, ctx: MeetingContext) -> str:
         self.meeting_contexts.append(ctx)
@@ -79,6 +89,11 @@ class ScriptedBot(SeatController):
     a blocked Task is retried after a couple of Rounds), and wander when idle.
     Carriers handle relays in Task id order, walking to each next step and
     holding in the handoff room until their partner arrives.
+    Split-key holders (when no solo step is open) gather in the entry room; once
+    every holder is there they all go to read their fragments, come back and say
+    them in Room Chat ("T47 part 2 is 315."), and enter the code once they know
+    all three and every fragment they can check passes its checksum (else they
+    say which part fails). After the first read they always go straight on.
     Audits: a spec holder shares its half whenever the auditor is in its room;
     an auditor with a reading and both halves goes to check it (wrongly in a
     ``mistakes`` share of checks); with nothing else to do, both wait for each
@@ -107,10 +122,15 @@ class ScriptedBot(SeatController):
         self.reckless = reckless
         self.diligence = diligence
         self.mistakes = mistakes
+        # (task, attempt) split-key reads this bot has set off to do.
+        self._key_go: set[tuple[str, int]] = set()
+        # Room Chat for the action chosen last.
+        self._say = ""
 
     # Actions ------------------------------------------------------------------
 
     def choose_action(self, ctx: ActionContext) -> Action:
+        self._say = ""
         if ctx.role is Role.IMPOSTOR:
             return self._impostor_action(ctx)
         if ctx.bodies_here:
@@ -132,6 +152,10 @@ class ScriptedBot(SeatController):
             and WorkOnTask.kind in task_kind(t["kind"]).work_actions
             and ctx.round - blocked.get(t["task"], -10) > self.retry_after
         ]
+        # A split-key read under way (or due) goes first: it runs against a deadline.
+        urgent = self._splitkey_action(ctx, gather=False)
+        if urgent is not None:
+            return urgent
         # Preserve the shared relay ordering so carriers cannot wait in a cycle.
         relays = [r for r in ctx.extra.get("relay", {}).get("relays", []) if r["next"]]
         if relays:
@@ -141,6 +165,9 @@ class ScriptedBot(SeatController):
             if relay["status"] == "holding" or self.rng.random() < self.diligence:
                 return Move(to=_path(relay)[0])
             return Wait()
+        key = self._splitkey_action(ctx, gather=not tasks)
+        if key is not None:
+            return key
         checks = [a for a in audits if a["duty"] == "auditor" and a["spec_received"]]
         checks = [a for a in checks if a["reading"]]
         waits = [
@@ -176,6 +203,48 @@ class ScriptedBot(SeatController):
         if self.rng.random() < self.mistakes:
             verdict = REJECT if verdict == APPROVE else APPROVE
         return CheckAudit(task=audit["task"], verdict=verdict)
+
+    def say(self, ctx: ActionContext) -> str:
+        return self._say
+
+    def _splitkey_action(self, ctx: ActionContext, gather: bool) -> Action | None:
+        keys = [k for k in ctx.extra.get("splitkey", {}).get("keys", []) if not k["done"]]
+        if not keys:
+            return None
+        k = min(keys, key=lambda k: k["task"])
+        task, mine = k["task"], k["fragment"]
+        if mine is not None:
+            if k["entry_path"]:
+                if len(k["entry_path"]) == 1:
+                    # Said on arrival, so it is heard in the entry room.
+                    self._say = f"{task} part {k['part']} is {mine}."
+                return Move(to=k["entry_path"][0])
+            self._say = f"{task} part {k['part']} is {mine}."
+            known = {**_fragments_heard(ctx.observations, k), k["part"]: mine}
+            check = known.get(k["checks_part"])
+            if check is not None and not fragment_ok(check, k["checksum"]):
+                liar = next(h["seat"] for h in k["holders"] if h["part"] == k["checks_part"])
+                self._say += (
+                    f" {task} part {k['checks_part']} from {ctx.roster[liar]} fails my checksum."
+                )
+                return Wait()
+            if len(known) == 3:
+                return EnterCode(task=task, code="".join(known[p] for p in (1, 2, 3)))
+            return Wait()
+        # Once a code is open, rush to read while a read would still beat its deadline.
+        rush = k["deadline"] is not None and ctx.round + len(k["terminal_path"]) < k["deadline"]
+        go = (task, k["attempt"]) in self._key_go or rush
+        others = {h["seat"] for h in k["holders"]} - {ctx.seat}
+        if not go and not k["entry_path"] and others <= set(ctx.players_here):
+            self._key_go.add((task, k["attempt"]))
+            go = True
+        if go:
+            if k["terminal_path"]:
+                return Move(to=k["terminal_path"][0])
+            return ReadFragment(task=task)
+        if not gather:
+            return None
+        return Move(to=k["entry_path"][0]) if k["entry_path"] else Wait()
 
     def _impostor_action(self, ctx: ActionContext) -> Action:
         fellows = _fellow_impostors(ctx.observations)
@@ -251,6 +320,23 @@ def _relay_step(relay: dict) -> Action:
 
 
 # Reading observations and statements ----------------------------------------------
+
+
+def _fragments_heard(observations: Sequence[Observation], key: dict) -> dict[int, str]:
+    """Fragments of the current code its holders stated in Room Chat: part -> digits."""
+    holders = {h["part"]: h["seat"] for h in key["holders"]}
+    heard: dict[int, str] = {}
+    for obs in observations:
+        if obs.data.get("task") == key["task"] and obs.type in (
+            "splitkey.reset",
+            "splitkey.took_over",
+        ):
+            heard = {}
+        elif obs.type == "chat.message":
+            for task, part, digits in _FRAGMENT.findall(obs.data["text"]):
+                if task == key["task"] and holders.get(int(part)) == obs.data["speaker"]:
+                    heard[int(part)] = digits
+    return heard
 
 
 def _fellow_impostors(observations: Sequence[Observation]) -> set[int]:
