@@ -127,9 +127,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     pc.add_argument("--live", action="store_true", help="allow paid extractor calls")
     pc.add_argument("--spend-cap", type=float, default=2.0, help="USD cap on extractor spend")
+    add_panel_parser(sub)
     args = parser.parse_args(argv)
     if args.command == "report":
         return report.command(parser, args)
+    if args.command == "panel":
+        return panel(parser, args)
     if args.command == "replay":
         return replay(parser, args.transcript, args.out)
     if args.command in ("schedule", "run"):
@@ -308,6 +311,154 @@ def audit(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
     print(f"audit: {out}")
     complete = report["complete"] and (judge is None or report["judgments"]["complete"])
     return 0 if complete else 1
+
+
+def add_panel_parser(sub: Any) -> None:
+    pan = sub.add_parser(
+        "panel", help="Label Panel: three AI judges that validate the Claim Audit (#34)"
+    )
+    ps = pan.add_subparsers(dest="panel_command", required=True)
+
+    def paid(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--judges", type=Path, help="alternative panel judges.toml")
+        p.add_argument("--live", action="store_true", help="allow paid judge calls")
+        p.add_argument(
+            "--spend-cap", type=float, required=True, help="USD cap on Label Panel spend"
+        )
+        p.add_argument("--seed", type=int, default=0)
+
+    q = ps.add_parser("qualify", help="score each judge on plain Planted Claims (>= 0.95)")
+    q.add_argument("--planted", type=Path, required=True, help="Planted Claims report (#14)")
+    q.add_argument(
+        "games", type=Path, nargs="+", help="transcripts the planted items' `game` indexes"
+    )
+    q.add_argument("--out", type=Path, default=Path("runs/panel/qualification.json"))
+    paid(q)
+    lab = ps.add_parser("label", help="label a stratified sample of real-game Claims")
+    lab.add_argument(
+        "transcripts", type=Path, nargs="+", help="audited transcripts (<t>.audit.json beside)"
+    )
+    lab.add_argument("--qualification", type=Path, required=True)
+    lab.add_argument("--n", type=int, default=600, help="Claims to sample (default 600)")
+    lab.add_argument("--out", type=Path, default=Path("runs/panel/labels.json"))
+    paid(lab)
+    rep = ps.add_parser("report", help="Krippendorff's alpha and pipeline accuracy")
+    rep.add_argument("labels", type=Path)
+    rep.add_argument("--out", type=Path, help="JSON to write (default: <labels>.report.json)")
+
+
+def panel(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    import json
+
+    from zantine.audit import load_transcript, write_audit
+    from zantine.harness.ledger import Ledger
+    from zantine.panel import LLMPanelJudge, PlantedReport, candidates, load_panel
+    from zantine.panel import label as run_label
+    from zantine.panel import qualify as run_qualify
+    from zantine.panel import report as run_report
+
+    def read_json(path: Path) -> Any:
+        if not path.is_file():
+            parser.error(f"no such file: {path}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    if args.panel_command == "report":
+        try:
+            out = run_report(read_json(args.labels))
+        except ValueError as exc:
+            parser.error(str(exc))
+        write_audit(out, args.out or args.labels.with_suffix(".report.json"))
+        print_panel_report(out)
+        return 0 if out["complete"] else 1
+
+    ledger = Ledger(args.spend_cap)
+    try:
+        config = load_panel(args.judges)
+        judges = [LLMPanelJudge.from_env(j, ledger, live=args.live) for j in config.judges]
+    except ValueError as exc:
+        parser.error(str(exc))
+    print(VALIDATED_BY_LINE)
+    if args.panel_command == "qualify":
+        games = [load_transcript(g) for g in args.games]
+        try:
+            planted = PlantedReport.from_json(games, read_json(args.planted))
+            out = run_qualify(
+                judges, planted, seed=args.seed, min_planted=config.min_planted, ledger=ledger
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+        write_audit(out, args.out)
+        for r in out["judges"]:
+            j, acc = r["judge"], r["planted"]
+            verdict = "qualified" if r["qualified"] else "REJECTED: replace this judge"
+            print(
+                f"  {j['id']} ({j['family']} {j['model']} @ {j['revision']}): "
+                f"{_pct(acc['accuracy'])} of {acc['n']} plain Planted Claims "
+                f"[{_pct(acc['ci95'][0])}, {_pct(acc['ci95'][1])}]  {verdict}"
+            )
+        _print_panel_cost(out)
+        print(f"qualification: {args.out}")
+        return 0 if out["complete"] and not out["rejected"] else 1
+
+    pool, pipeline = [], []
+    for t in args.transcripts:
+        audit = read_json(t.with_suffix(".audit.json"))
+        try:
+            pool += candidates(load_transcript(t), audit)
+        except ValueError as exc:
+            parser.error(f"{t}: {exc}")
+        judge = (audit.get("judgments") or {}).get("judge")
+        pipeline.append({"extractor": audit.get("extractor"), "judge": judge})
+    try:
+        out = run_label(
+            judges,
+            pool,
+            n=args.n,
+            seed=args.seed,
+            qualification=read_json(args.qualification),
+            ledger=ledger,
+            alpha_threshold=config.alpha_threshold,
+            pipeline=pipeline,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    write_audit(out, args.out)
+    print(f"{out['n']} Claims sampled from {len(pool)} across {len(out['strata'])} strata")
+    if out["aborted"]:
+        print(f"ABORTED ({out['aborted']['reason']}): {out['aborted']['detail']}")
+    _print_panel_cost(out)
+    print(f"labels: {args.out}")
+    return 0 if out["complete"] else 1
+
+
+VALIDATED_BY_LINE = "Label Panel: validated by an AI panel, not by humans."
+
+
+def _print_panel_cost(out: dict[str, Any]) -> None:
+    c = out["cost"]
+    if c:
+        print(
+            f"Label Panel spend ${c['cost_usd']:.4f} ({c['calls']} calls) "
+            f"+ ${c['held_usd']:.4f} held for calls without usage "
+            f"of ${c['spend_cap_usd']:.2f} cap"
+        )
+
+
+def print_panel_report(out: dict[str, Any]) -> None:
+    print(VALIDATED_BY_LINE)
+    print(f"{out['n']} Claims; judges: {', '.join(j['id'] for j in out['judges'])}")
+    print("  label        alpha   [95% CI]          pipeline vs majority  [95% CI]")
+    for t, r in out["labels"].items():
+        a, (alo, ahi) = r["alpha"], r["alpha_ci95"]
+        p = r["pipeline_vs_majority"]
+        alpha = "   -  " if a is None else f"{a:6.3f}"
+        ci = "    -    " if alo is None else f"{alo:.2f}-{ahi:.2f}"
+        flag = "  REVISE (alpha < threshold)" if r["revise"] else ""
+        flag = "  (alpha undefined: too few or uniform labels)" if a is None else flag
+        print(
+            f"  {t:<11} {alpha}  [{ci}]  {_pct(p['accuracy'])} of {p['n']:<4}"
+            f"[{_pct(p['ci95'][0])}, {_pct(p['ci95'][1])}]{flag}"
+        )
 
 
 def print_audit(report: dict[str, Any]) -> None:
