@@ -582,8 +582,9 @@ def test_relay_completion_credits_both_carriers_in_their_rooms() -> None:
         claim("task_done", "I", task="T39", room=relay_rooms["pickup"]),
     )
     assert labels([named, some, right_room]) == ["true"] * 3
-    # Wrong room: false, but the deliverer is never told grades, so not a Lie.
-    assert wrong_room["verdict"]["label"] == "misstatement"
+    # Wrong room: it saw where it delivered (grade or not), so it knew.
+    assert wrong_room["verdict"]["label"] == "lie"
+    assert [p["type"] for p in wrong_room["verdict"]["proof"]] == ["relay.delivered"]
 
     first_leg, at_handoff = claims_after(
         records,
@@ -610,15 +611,20 @@ def test_a_tampered_delivery_is_a_misstatement_not_a_lie() -> None:
     delivered = event(tampered, "relay.delivered", task="T39")
     assert delivered["data"]["tampered"] and not delivered["data"]["correct"]
     deliverer = delivered["data"]["seat"]
-    named, some = claims_after(
+    named, some, that_round, too_early = claims_after(
         tampered,
         deliverer,
         delivered["seq"],
         claim("task_done", "I", task="T39"),
         claim("task_done", "I"),
+        claim("task_done", "I", task="T39", round=delivered["round"]),
+        claim("task_done", "I", task="T39", round=1),
     )
     assert named["verdict"]["truth"] == "false"
     assert (named["verdict"]["label"], named["verdict"]["proof"]) == ("misstatement", [])
+    assert that_round["verdict"]["label"] == "misstatement"  # the failed grade is hidden
+    # But it knows it delivered in a later Round, so "in Round 1" was known false.
+    assert too_early["verdict"]["label"] == "lie"
     assert some["verdict"]["label"] in ("true", "misstatement")  # never a Lie
     carrier = event(tampered, "relay.handed_off", task="T39")["data"]["seat"]
     (first_leg,) = claims_after(
@@ -679,3 +685,99 @@ def test_audit_completion_credits_the_auditor_and_the_spec_holder() -> None:
     assert credited["verdict"]["label"] == "true"
     # Where the spec holder stood when its share counted isn't recorded.
     assert where["verdict"]["label"] == "unverifiable"
+
+
+def test_a_worker_knows_when_and_where_it_completed_its_task() -> None:
+    """A correct grade says when the Task was done, and the assignment where: a Claim
+    with the wrong Round or room is a Lie, not a Misstatement."""
+    config = GameConfig(seed=1, tasks_per_crewmate=1, relay_tasks=0, audit_tasks=0)
+    records = play(config, "scripted").transcript.records
+    rec = build_record(records)
+    done = next(
+        d
+        for d in rec.tasks_done
+        if any(s.speaker == d.seat and s.seq > d.seq for s in rec.statements)
+    )
+    other_room = next(r for r in rec.rooms if r != done.room)
+    other_round = next(r for r in range(1, done.round + 1) if r != done.round)
+    right, wrong_room, wrong_round, some_wrong_round, some = claims_after(
+        records,
+        done.seat,
+        done.seq,
+        claim("task_done", "I", task=done.task, room=done.room, round=done.round),
+        claim("task_done", "I", task=done.task, room=other_room),
+        claim("task_done", "I", task=done.task, round=other_round),
+        claim("task_done", "I", round=other_round),
+        claim("task_done", "I"),
+    )
+    assert labels([right, wrong_room, wrong_round, some_wrong_round, some]) == [
+        "true",
+        "lie",
+        "lie",
+        "lie",
+        "true",
+    ]
+    assert {p["type"] for p in wrong_room["verdict"]["proof"]} == {
+        "tasks.graded",
+        "tasks.assigned",
+    }
+    assert [p["type"] for p in wrong_round["verdict"]["proof"]] == ["tasks.graded"]
+
+
+def test_audit_knowledge_respects_round_room_and_the_spec_holders_closure() -> None:
+    records = play(GameConfig(seed=24), "scripted").transcript.records
+    checked = event(records, "audit.checked", correct=True)
+    task, auditor, holder = (checked["data"][k] for k in ("task", "auditor", "spec_from"))
+    rec = build_record(records)
+    room, when = rec.task_rooms[task], checked["round"]
+    other_room = next(r for r in rec.rooms if r != room)
+    other_round = next(r for r in range(1, when) if r != when)
+
+    wrong_room, wrong_round = claims_after(
+        records,
+        auditor,
+        checked["seq"],
+        claim("task_done", "I", task=task, room=other_room),
+        claim("task_done", "I", task=task, round=other_round),
+    )
+    assert labels([wrong_room, wrong_round]) == ["lie", "lie"]
+    assert "audit.result" in {p["type"] for p in wrong_round["verdict"]["proof"]}
+
+    # The spec holder shared its half and was told the Audit closed.
+    named, some, early = claims_after(
+        records,
+        holder,
+        checked["seq"],
+        claim("task_done", "I", task=task, negated=True),
+        claim("task_done", "I", negated=True),
+        claim("task_done", "I", task=task, round=other_round),
+    )
+    assert labels([named, some, early]) == ["lie", "lie", "lie"]
+    assert [p["type"] for p in named["verdict"]["proof"]][-1] == "audit.closed"
+    assert "audit.shared" in {p["type"] for p in named["verdict"]["proof"]}
+
+
+def test_a_spec_holder_before_closure_knows_its_audit_is_open() -> None:
+    """Control: before the check, no closure was told, so the denial is simply true."""
+    # Seed 46: T58's spec holder speaks at a Meeting before the Audit is checked.
+    records = play(GameConfig(seed=46), "scripted").transcript.records
+    checked = event(records, "audit.checked", task="T58", correct=True)
+    task, holder = checked["data"]["task"], checked["data"]["spec_from"]
+    placed = next(
+        r["seq"]
+        for r in records
+        if r["kind"] == "event" and r["type"] == "audit.placed" and r["data"]["task"]["id"] == task
+    )
+    rec = build_record(records)
+    before = [s for s in rec.statements if s.speaker == holder and placed < s.seq < checked["seq"]]
+    assert before
+    denial, claimed = claims_after(
+        records,
+        holder,
+        before[0].seq - 1,
+        claim("task_done", "I", task=task, negated=True),
+        claim("task_done", "I", task=task),
+    )
+    assert denial["verdict"]["label"] == "true"
+    assert claimed["verdict"]["label"] == "lie"  # it would have been told of the closure
+    assert "audit.closed" not in {p["type"] for p in claimed["verdict"]["proof"]}

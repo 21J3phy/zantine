@@ -32,7 +32,11 @@ What counts as proof, per kind:
   at all, its assignment: every answer is graded to the worker); an auditor's
   failed ``audit.result`` (or its assignment); a spec holder's assignment with no
   ``audit.closed``; a relay carrier's own progress showing its leg still open.
-  A delivered relay's grade is never told, so a failed delivery is never a Lie.
+  When it did complete the Task, the records of when and where (a passing grade
+  or ``audit.result``, a spec holder's ``audit.shared`` + ``audit.closed``, a
+  carrier's own handoff or delivery) prove a Claim with another Round or room
+  false. A delivered relay's grade is never told, so a failed delivery is never
+  a Lie. A denial is a Lie when such a record shows the completion.
   For a Task it never held, its assignment records list what it does hold;
   ``role_assigned`` for an Impostor with no Task records. "Some Task" needs
   such a proof for every Task it holds.
@@ -478,35 +482,65 @@ class _Checker:
         return None
 
     def not_done(self, task: str) -> list[dict[str, Any]] | None:
-        """The speaker's own records showing it had not completed ``task``, per kind."""
+        """The speaker's own records showing it had not completed ``task`` as claimed
+        (in the claimed Round and room), from what the Task's kind tells it."""
         kind = self.rec.task_kinds.get(task)
+        holding = self.own(*_HOLDING, task=task)
         if kind == RELAY_KIND:
-            # A carrier is told its own progress, never the grade: a delivered
-            # (possibly tampered) part looks the same as an intact one.
             status = [o for o in self.own(*_RELAY_STATUS, task=task) if "status" in o["data"]]
             if status and status[-1]["data"]["status"] in _RELAY_OPEN:
                 return [status[-1]]
-            return None
+            # A carrier's share of a relay can only be its own handoff or delivery,
+            # which it saw (Round and room). Whether a delivered part passed is
+            # never told: a tampered part looks the same.
+            legs = self.own("relay.handed_off", "relay.delivered", task=task)
+            return self.ruled_out(legs, lambda o: o["data"].get("room"), [])
         if kind == AUDIT_KIND:
-            if self.own("audit.closed", task=task) or any(
-                o["data"].get("correct") for o in self.own("audit.result", task=task)
-            ):
-                return None
-            duties = [o for o in self.own("audit.assigned", "audit.partner", task=task)]
+            duties = self.own("audit.assigned", "audit.partner", task=task)
             duty = duties[-1]["data"].get("duty") if duties else None
+            room = self.rec.task_rooms.get(task)
             if duty == "auditor":
-                # The auditor is told the outcome of every check it makes.
-                failed = self.own("audit.result", task=task)
-                return failed or self.own(*_HOLDING, task=task) or None
+                # The auditor is told the outcome of every check it makes, in the
+                # Audit's room.
+                results = self.own("audit.result", task=task)
+                passed = [o for o in results if o["data"].get("correct")]
+                if not passed:
+                    return results or holding or None
+                return self.ruled_out(passed, lambda o: room, holding)
             if duty == "spec_holder":
-                # The spec holder is told when its Audit closes.
-                return self.own(*_HOLDING, task=task) or None
+                # The spec holder is told when its Audit closes; it shares the credit
+                # only for a spec it shared itself. Where it stood is not recorded.
+                closed = self.own("audit.closed", task=task)
+                if not closed:
+                    return holding or None
+                shared = self.own("audit.shared", task=task)
+                return self.ruled_out(closed, lambda o: None, shared) if shared else None
             return None
         # A solo Task: the worker is told the grade of every answer it submits.
         graded = self.own("tasks.graded", task=task)
-        if any(o["data"].get("correct") for o in graded):
-            return None
-        return graded or self.own(*_HOLDING, task=task) or None
+        passed = [o for o in graded if o["data"].get("correct")]
+        if not passed:
+            return graded or holding or None
+        room = self.rec.task_rooms.get(task)
+        return self.ruled_out(passed, lambda o: room, holding)
+
+    def ruled_out(
+        self,
+        occasions: list[dict[str, Any]],
+        room_of: Callable[[dict[str, Any]], str | None],
+        context: list[dict[str, Any]],
+    ) -> list[dict[str, Any]] | None:
+        """``occasions``: the speaker's records of every time it (may have) completed
+        the Task. Proof when none fits the claimed Round and room (an unknown room
+        always might); ``context`` (e.g. the assignment naming the Task's room) is
+        cited too when a room is claimed."""
+        c, rounds = self.c, self.rounds(since_meeting=False)
+        for o in occasions:
+            room = room_of(o)
+            if o["round"] in rounds and (c.room is None or room is None or room == c.room):
+                return None
+        cited = [*occasions, *context] if c.room is not None else [*occasions]
+        return sorted(cited, key=lambda o: o["seq"]) or None
 
     def task_knew_true(self, matches: list[Any]) -> list[dict[str, Any]] | None:
         if self.c.subject != self.speaker:
@@ -516,6 +550,11 @@ class _Checker:
             for o in self.own(type):
                 if o["data"].get("correct") and (o["round"], o["data"]["task"]) in done:
                     return [_cite(o)]
+        # A spec holder who shared its half is told when the Audit closes.
+        for o in self.own("audit.closed"):
+            shared = self.own("audit.shared", task=o["data"]["task"])
+            if shared and (o["round"], o["data"]["task"]) in done:
+                return [_cite(r) for r in [*shared, o]]
         return None
 
 
