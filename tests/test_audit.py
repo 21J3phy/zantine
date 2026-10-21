@@ -41,6 +41,7 @@ def setup(**config: Any) -> tuple[Game, Task, Task]:
     game = make_game(
         audit_tasks=0,
         relay_tasks=0,
+        splitkey_tasks=0,
         task_dependency_chance=0,
         task_kinds=("sort_list",),
         **config,
@@ -417,7 +418,9 @@ def test_audit_item_normalization_agrees_with_the_target_grader(kind: str) -> No
 
 
 def test_audit_placement_respects_task_id_capacity() -> None:
-    game = make_game(impostors=(), num_impostors=0, tasks_per_crewmate=9, relay_tasks=0)
+    game = make_game(
+        impostors=(), num_impostors=0, tasks_per_crewmate=9, relay_tasks=0, splitkey_tasks=0
+    )
     game.start()
     assert len(board(game.state).graph) == 90
     assert audits(board(game.state)) == []

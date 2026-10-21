@@ -233,6 +233,8 @@ HISTORICAL_DEFAULTS: dict[str, Any] = {
     "talk_budgets": None,  # #25: None = every Seat has talk_budget_chars
     "talk_tiers": None,
     "verification_protocol": BASELINE,  # #37: the v1 rule
+    "room_chat_budget_chars": 0,  # #72: 0 = no Room Chat, as before it existed
+    "splitkey_tasks": 0,  # #72: no split-key Tasks before them
 }
 
 
@@ -248,6 +250,9 @@ def effective_conditions(config: dict[str, Any]) -> dict[str, Any]:
     if budgets is None and (chars is None or seats is None):
         raise ValueError("a transcript header has no Talk Budget settings")
     c["seat_talk_budgets"] = list(budgets) if budgets is not None else [chars] * seats
+    if c.get("splitkey_tasks") == 0:
+        # A game with no split-key Tasks plays the same whatever their window.
+        c.pop("splitkey_window", None)
     return {k: v for k, v in c.items() if k not in DESIGN_KEYS}
 
 

@@ -15,9 +15,10 @@ from zantine.analysis.report import write_report
 from zantine.analysis.speed import digest, speed_seats, tier_section
 from zantine.cli import main
 from zantine.config import GameConfig
+from zantine.engine import Game
 from zantine.harness import neutral
 from zantine.rng import GameRng
-from zantine.rules.actions import CallMeeting
+from zantine.rules.actions import CallMeeting, Kill
 from zantine.runs import create_run, execute, game_setup, load_manifest
 from zantine.scenario import build_scenario
 from zantine.schedule import load_pool, seat_lineup
@@ -293,6 +294,86 @@ def test_silent_games_leave_speech_shares_undefined(tmp_path: Path) -> None:
             b = both["metrics"][key]["per_tier"][tier]
             assert b["estimate"] == pytest.approx(a["estimate"])
             assert (b["n_units"], b["n_games"]) == (a["n_units"], a["n_games"])
+
+
+NO_TASKS = {"tasks_per_crewmate": 0, "relay_tasks": 0, "splitkey_tasks": 0, "audit_tasks": 0}
+
+
+def _chat_game(chat: dict[int, str], meeting_speech: dict[int, str] | None = None) -> Game:
+    """Round 1: Room Chat by ``chat``; Seat 0 kills Seat 5 and Seat 3 forfeits, both
+    while saying something. With ``meeting_speech``, Round 2 is an emergency Meeting
+    where Seats speak that and everyone else stays silent."""
+    bots = {seat: PlaybookBot(chat={1: text}) for seat, text in chat.items()}
+    bots[0] = PlaybookBot({1: Kill(5)}, chat={1: chat.get(0, "")})
+    bots[5] = PlaybookBot(chat={1: "I am about to be killed"})
+    # A Crewmate trying to kill is two Invalid Actions: the Round is forfeited.
+    bots[3] = PlaybookBot({1: Kill(4)}, chat={1: "forfeited speech"})
+    if meeting_speech is not None:
+        for seat in range(10):
+            bots.setdefault(seat, PlaybookBot())
+            bots[seat].speech[1] = meeting_speech.get(seat, "")
+        bots[4].actions[2] = CallMeeting()
+    game = make_game(bots=bots, talk_budgets=BUDGETS, talk_tiers=SPEED_TIERS, **NO_TASKS)
+    game.start()
+    game.state.player(0).kill_cooldown = 0
+    game.play_round()
+    if meeting_speech is not None:
+        game.play_round()
+    return game
+
+
+def test_floor_share_counts_room_chat_in_a_chat_only_game(tmp_path: Path) -> None:
+    # Room Chat budgets scale with the tiers: 200 * talk_budget // 500.
+    chat = {2: "hello", 4: "   ", 6: "z" * 100, 8: "ok"}
+    game = _chat_game(chat)
+    delivered = events(game, "chat.message")
+    assert {e["speaker"] for e in delivered} == {2, 6, 8}  # blank, killed, forfeited: none
+    assert {e["speaker"] for e in events(game, "chat.dropped")} == {5}
+    assert not events(game, "statement")
+    rows = {r.seat: r for r in speed_seats(PLANNED, game.transcript.records, tmp_path)}
+    budget6 = game.config.room_chat_budget(6)
+    assert budget6 == 31
+    assert (rows[6].messages, rows[6].chars, rows[6].truncated) == (1, budget6, 1)
+    assert (rows[6].chat_messages, rows[6].chat_chars, rows[6].chat_truncated) == (1, 31, 1)
+    assert (rows[2].messages, rows[2].chars, rows[2].truncated) == (1, 5, 0)
+    for seat in (0, 1, 3, 4, 5, 7, 9):
+        assert rows[seat].messages == 0 and rows[seat].floor_share == 0
+    assert rows[2].floor_share == pytest.approx(1 / 3)
+    assert rows[8].char_share == pytest.approx(2 / (5 + 31 + 2))
+    section = tier_section(list(rows.values()), "random", replicates=50, seed=0)
+    assert section["games_without_speech"] == 0
+
+
+def test_floor_share_counts_each_delivered_message_once_across_channels(
+    tmp_path: Path,
+) -> None:
+    game = _chat_game({2: "hello", 6: "there"}, meeting_speech={2: "a" * 50, 7: "b" * 20})
+    delivered = events(game, "chat.message")
+    # Heard by several players, but each delivered message is counted once.
+    assert all(len(e["listeners"]) > 1 for e in delivered) and len(delivered) == 2
+    statements = [e for e in events(game, "statement") if e["text"].strip()]
+    spoken = len(statements)
+    assert spoken > 0 and {e["speaker"] for e in statements} == {2, 7}
+    rows = {r.seat: r for r in speed_seats(PLANNED, game.transcript.records, tmp_path)}
+    total = spoken + 2
+    assert sum(r.messages for r in rows.values()) == total
+    assert rows[6].floor_share == pytest.approx(1 / total)
+    assert rows[2].messages == 1 + sum(e["speaker"] == 2 for e in statements)
+    assert rows[2].chat_messages == 1
+    assert sum(r.floor_share for r in rows.values()) == pytest.approx(1.0)
+    chars = sum(len(e["text"]) for e in statements) + len("hello") + len("there")
+    assert sum(r.chars for r in rows.values()) == chars
+
+
+def test_transcripts_without_room_chat_count_meeting_statements_only(tmp_path: Path) -> None:
+    game, _ = _meeting_game()
+    records = game.transcript.records
+    assert not any(r.get("type", "").startswith("chat.") for r in records)
+    rows = speed_seats(PLANNED, records, tmp_path / "g1.jsonl")
+    assert all(r.chat_messages == r.chat_chars == r.chat_truncated == 0 for r in rows)
+    # As before Room Chat: every Seat spoke 3 Meeting passes.
+    assert [r.messages for r in rows] == [3] * 10
+    assert rows[0].floor_share == pytest.approx(0.1)
 
 
 def test_report_survives_estimates_without_finite_replicates(tmp_path: Path) -> None:

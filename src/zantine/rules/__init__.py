@@ -5,11 +5,13 @@ from __future__ import annotations
 from collections.abc import Iterable
 
 from zantine.rules.audit import AuditModule
+from zantine.rules.chat import ChatModule
 from zantine.rules.containment import ContainmentModule
 from zantine.rules.core import CoreModule
 from zantine.rules.crisis import CrisisModule
 from zantine.rules.registry import GameModule, MeetingRequest, RoundContext, Rules
 from zantine.rules.relay import RelayModule
+from zantine.rules.splitkey import SplitKeyModule
 from zantine.rules.tasks import TasksModule
 from zantine.rules.verification import VerificationModule
 
@@ -18,13 +20,16 @@ __all__ = ["GameModule", "MeetingRequest", "RoundContext", "Rules", "default_rul
 
 def default_modules() -> list[GameModule]:
     # One line per module, e.g. TasksModule(), RoomChatModule(), CrisisModule().
+    # Task modules that place Tasks (relay, split-key, audit) come after TasksModule.
     return [
         CoreModule(),
         CrisisModule(),
         TasksModule(),
         RelayModule(),
+        SplitKeyModule(),
         AuditModule(),
         VerificationModule(),
+        ChatModule(),
         ContainmentModule(),
     ]
 

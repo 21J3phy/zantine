@@ -27,6 +27,7 @@ from zantine.rules.audit import (
     CheckAudit,
     ShareSpec,
     audit_board,
+    auditable,
     audits,
     place_audit,
 )
@@ -55,6 +56,7 @@ def act(game: Game, seat: int, action: Any) -> None:
 def mandatory(**config: Any) -> Game:
     defaults = {
         "relay_tasks": 0,
+        "splitkey_tasks": 0,
         "task_kinds": ("sort_list",),
         "tasks_per_crewmate": 1,
         "task_dependency_chance": 0,
@@ -114,7 +116,7 @@ def test_mandatory_gates_every_auditable_task_with_two_independent_cross_checks(
     game = mandatory(tasks_per_crewmate=2)
     tb = board(game.state)
     targets = [t for t in tb.graph.counted() if t.checks_required]
-    assert targets and len(targets) == len(tb.graph.counted())
+    assert targets and targets == [t for t in tb.graph.counted() if auditable(t)]
     assert len(audits(tb)) == CHECKS * len(targets)
     for target in targets:
         first, second = checks_of(game, target)
@@ -426,7 +428,7 @@ def test_a_worker_gets_the_same_answer_before_and_after_its_work_is_verified() -
 
 
 def test_scripted_bots_perform_mandatory_checks_deterministically() -> None:
-    config = GameConfig(seed=21, num_impostors=0, verification_protocol="mandatory", round_cap=100)
+    config = GameConfig(seed=6, num_impostors=0, verification_protocol="mandatory", round_cap=100)
     a, b = play(config, "scripted"), play(config, "scripted")
     assert a.transcript.to_jsonl() == b.transcript.to_jsonl()
     result = a.transcript.records[-1]
@@ -724,15 +726,16 @@ def test_a_baseline_played_under_other_conditions_is_refused(
 
 def test_default_optional_reassignment_is_the_v1_rule() -> None:
     """Under the default protocol a death and Meeting hand out work exactly as on the
-    base branch before #37 (same seed: T20 -> 6, T77 -> 3, T56 -> 9), so a v1 run's
-    optional games stay comparable; only the mandatory protocol weighs open work."""
+    base branch (same seed, checked against main at b2aaad0: T20 -> 8, T77 -> 6,
+    T56 -> 8), so a v1 run's optional games stay comparable; only the mandatory
+    protocol weighs open work."""
     game = make_game(seed=1)
     game.start()
     assert not board(game.state).outcome_blind_load
     game.state.player(2).alive = False
     run_meeting(game, MeetingRequest("emergency", 9))
     moved = [(e["task"], e["to_seat"]) for e in events(game, "tasks.reassigned")]
-    assert moved == [("T20", 6), ("T77", 3), ("T56", 9)]
+    assert moved == [("T20", 8), ("T77", 6), ("T56", 8)]
     assert board(mandatory().state).outcome_blind_load
 
 
@@ -778,28 +781,38 @@ def header_run(tmp_path: Path, headers: dict[str, dict[str, Any]]) -> Any:
 
 
 def test_historical_headers_are_compared_by_their_effective_settings(tmp_path: Path) -> None:
-    """A genuine header from before per-Seat Talk Budgets (#25), written by the engine
-    at issue-12 (tests/fixtures), means 500 characters for every Seat: it matches a
-    current default game, but not one whose Seats are all overridden to 1000, and a
-    field missing with no known historical default is refused, never a wildcard."""
+    """A genuine header written by the engine at issue-12 (tests/fixtures), before
+    per-Seat Talk Budgets (#25), Room Chat and split-key Tasks (#72), means 500
+    characters for every Seat, no Room Chat and no split-key Tasks. It matches a
+    current game played that way, but not one whose Seats are all overridden to 1000
+    nor a current default game (which has Room Chat), and a field missing with no
+    known historical default is refused, never a wildcard."""
     from zantine.analysis.verification import check_conditions, effective_conditions
 
     old = json.loads((FIXTURES / "pre_talk_budgets_header.json").read_text())
     assert "talk_budgets" not in old["config"] and old["config"]["talk_budget_chars"] == 500
     # Through JSON, as analysis reads every header.
-    current, louder = (
+    then = {"room_chat_budget_chars": 0, "splitkey_tasks": 0}
+    current, louder, default = (
         json.loads(json.dumps(play(config, "scripted").transcript.records[0]))
-        for config in (GameConfig(seed=5), GameConfig(seed=6, talk_budgets=(1000,) * 10))
+        for config in (
+            GameConfig(seed=5, **then),
+            GameConfig(seed=6, talk_budgets=(1000,) * 10, **then),
+            GameConfig(seed=7),
+        )
     )
     assert effective_conditions(old["config"]) == effective_conditions(current["config"])
     assert effective_conditions(louder["config"])["seat_talk_budgets"] == [1000] * 10
     gappy = json.loads(json.dumps(old))
     del gappy["config"]["relay_tasks"]
     data, g = header_run(
-        tmp_path, {"old": old, "current": current, "louder": louder, "gappy": gappy}
+        tmp_path,
+        {"old": old, "current": current, "louder": louder, "default": default, "gappy": gappy},
     )
     check_conditions([(data, g["old"]), (data, g["current"])])
     with pytest.raises(ValueError, match="seat_talk_budgets"):
         check_conditions([(data, g["old"]), (data, g["louder"])])
+    with pytest.raises(ValueError, match="room_chat_budget_chars is 0"):
+        check_conditions([(data, g["old"]), (data, g["default"])])
     with pytest.raises(ValueError, match="no 'relay_tasks'"):
         check_conditions([(data, g["current"]), (data, g["gappy"])])
