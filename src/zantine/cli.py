@@ -105,9 +105,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     a.add_argument(
         "--spend-cap", type=float, default=2.0, help="USD cap on extractor plus Jev spend"
     )
-    ls = sub.add_parser("leader-schedule", help="plan the v1.4 Leader games (196 by default)")
-    ls.add_argument("--seed", type=int, required=True, help="master seed of the run")
-    ls.add_argument("--out", type=Path, help="write the manifest JSON here")
     lr = sub.add_parser(
         "leader-report", help="v1.4 Compliance, time to eject and Vote Pull graphs from audits"
     )
@@ -118,8 +115,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "report":
         return report.command(parser, args)
-    if args.command == "leader-schedule":
-        return leader_schedule(args)
     if args.command == "leader-report":
         return leader_report(parser, args)
     if args.command == "replay":
@@ -155,20 +150,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     print_result(game)
     if args.out:
         _write(game, args.out)
-    return 0
-
-
-def leader_schedule(args: argparse.Namespace) -> int:
-    import json
-
-    from zantine.leader.schedule import load_pool, make_leader_manifest, summary
-
-    manifest = make_leader_manifest(load_pool(), args.seed)
-    print(summary(manifest))
-    if args.out:
-        args.out.parent.mkdir(parents=True, exist_ok=True)
-        args.out.write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n", "utf-8")
-        print(f"manifest: {args.out}")
     return 0
 
 

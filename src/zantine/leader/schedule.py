@@ -3,9 +3,9 @@
 ``make_leader_manifest(pool, master_seed)`` plans the experiment as plain data
 in the manifest format of the lineup scheduler (#55, ``schedule.py``): the same
 top-level keys and game fields (``id``, ``kind``, ``lineup``, ``impostors``,
-``config``, ``index``, ``seed``), plus a ``leader`` field per game. Until #55
-merges it is self-contained here; ``zantine schedule`` / ``zantine run`` wiring
-follows then (``leader_game_setup`` is the leader-aware ``runs.game_setup``).
+``config``, ``index``, ``seed``), plus a ``leader`` field per game. ``zantine
+schedule --experiment leader`` writes it into a run directory; ``zantine run``
+plays it, with ``runs.game_setup`` seating the Leader through ``leader_config``.
 
 **Conditions.** Known or Hidden Leader x Crewmate or Compromised Leader. Every
 game is a Balanced Lobby (5 Models, 2 Seats each) that includes the Leader's
@@ -26,7 +26,7 @@ whose co-player counts are most even (exhaustive search; ties broken by the
 master seed). Impostor positions are drawn from the master seed among the
 non-Leader positions; a Compromised Leader is always one of the two Impostors.
 
-Lineup positions follow #55's ``seat_lineup``: each Model holds 2 consecutive
+Lineup positions follow ``schedule.seat_lineup``: each Model holds 2 consecutive
 positions, each Impostor Model takes its next unused one, and the Leader takes
 its Model's Impostor position (compromised) or first non-Impostor one (crew).
 Which Seat a position fills is decided by the game seed.
@@ -34,44 +34,30 @@ Which Seat a position fills is decided by the game seed.
 
 from __future__ import annotations
 
-import hashlib
 from collections import Counter
 from collections.abc import Sequence
-from dataclasses import replace
 from itertools import combinations
 from typing import Any
 
-from zantine.config import GameConfig, LeaderConfig, condition_name
-from zantine.harness import neutral
-from zantine.harness.pricing import load_models
+from zantine.config import LeaderConfig, condition_name
 from zantine.rng import GameRng
-from zantine.scenario import SCENARIO_VERSION, build_scenario
-from zantine.transcript import SCHEMA_VERSION
+from zantine.schedule import (
+    IMPOSTORS,
+    LOBBY_MODELS,
+    MANIFEST_VERSION,
+    SEATS_PER_MODEL,
+    SEED_DERIVATION,
+    engine_versions,
+    game_seed,
+    lineups,
+    seat_lineup,
+)
 
-MANIFEST_VERSION = 1
-LOBBY_MODELS = 5
-SEATS_PER_MODEL = 2
-IMPOSTORS = 2
+EXPERIMENT = "leader"
 # Games per condition per Leader Model (docs/sample-size.md, v1.4).
 CREW_PER_MODEL = 9
 COMPROMISED_PER_MODEL = 5
 CONDITIONS = ("known_crew", "hidden_crew", "known_compromised", "hidden_compromised")
-# Same derivation as the lineup scheduler (#55), so a game id always gives one seed.
-SEED_DERIVATION = "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >> 1"
-
-
-def load_pool() -> list[str]:
-    return list(load_models())
-
-
-def game_seed(master_seed: int, game_id: str) -> int:
-    digest = hashlib.sha256(f"zantine-run/{master_seed}/{game_id}".encode()).digest()
-    return int.from_bytes(digest[:8], "big") >> 1
-
-
-def lineups(pool: Sequence[str]) -> list[tuple[str, ...]]:
-    """Every Balanced Lobby lineup in canonical order; a lineup's index is its id (as in #55)."""
-    return list(combinations(pool, LOBBY_MODELS))
 
 
 def per_model(compromised: bool) -> int:
@@ -146,7 +132,7 @@ def make_leader_manifest(
         game["seed"] = game_seed(master_seed, game["id"])
     manifest = {
         "manifest_version": MANIFEST_VERSION,
-        "experiment": "leader",
+        "experiment": EXPERIMENT,
         "master_seed": master_seed,
         "seed_derivation": SEED_DERIVATION,
         "pool": list(pool),
@@ -168,24 +154,6 @@ def make_leader_manifest(
     return manifest
 
 
-def engine_versions() -> dict[str, Any]:
-    return {
-        "scenario_version": SCENARIO_VERSION,
-        "transcript_schema": SCHEMA_VERSION,
-        "harness": f"{neutral.HARNESS_NAME}-v{neutral.HARNESS_VERSION}",
-    }
-
-
-def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
-    """Lineup entries and Impostor positions, by the same rule as #55's ``seat_lineup``."""
-    entries = [m for m in game["lineup"] for _ in range(SEATS_PER_MODEL)]
-    impostors: set[int] = set()
-    for model in game["impostors"]:
-        pos = next(i for i, m in enumerate(entries) if m == model and i not in impostors)
-        impostors.add(pos)
-    return entries, impostors
-
-
 def leader_position(game: dict[str, Any]) -> int:
     entries, impostors = seat_lineup(game)
     lead = game["leader"]
@@ -196,28 +164,38 @@ def leader_position(game: dict[str, Any]) -> int:
     return fits[0]
 
 
-def leader_game_setup(
-    manifest: dict[str, Any], game: dict[str, Any], mode: str
-) -> tuple[GameConfig, str]:
-    """The ``GameConfig`` and bot spec for one Leader game (``runs.game_setup`` plus the Leader).
+def leader_config(game: dict[str, Any], seat_order: Sequence[int]) -> dict[str, Any]:
+    """The ``GameConfig.leader`` field for a scheduled Leader game, or {} for any other game.
 
-    The scenario (names, seat order, map) comes from the game seed; Impostor and
-    Leader Seats are wherever that seat order puts their lineup positions.
+    ``seat_order[seat]`` is the lineup position seated at ``seat``
+    (``Scenario.seat_order``), so the Leader sits wherever the seed seats its position.
     """
-    entries, impostor_positions = seat_lineup(game)
-    config = GameConfig(seed=game["seed"], **{**manifest.get("config", {}), **game["config"]})
-    order = build_scenario(config, GameRng(config.seed).fork("scenario")).seat_order
-    lead = game["leader"]
-    config = replace(
-        config,
-        impostor_seats=tuple(s for s, pos in enumerate(order) if pos in impostor_positions),
-        leader=LeaderConfig(
-            seat=order.index(lead["position"]),
+    lead = game.get("leader")
+    if not lead:
+        return {}
+    return {
+        "leader": LeaderConfig(
+            seat=list(seat_order).index(lead["position"]),
             known=lead["known"],
             compromised=lead["compromised"],
-        ),
-    )
-    return config, ",".join(f"{mode}:{model}" for model in entries)
+        )
+    }
+
+
+def check_leader_seating(game: dict[str, Any], header: dict[str, Any]) -> None:
+    """A Leader game's transcript must seat the Leader's Model, in its role, at the Leader Seat."""
+    lead = game.get("leader")
+    if not lead:
+        return
+    leader = (header.get("config") or {}).get("leader") or {}
+    seat = next((s for s in header["seats"] if s["seat"] == leader.get("seat")), None)
+    if (
+        seat is None
+        or seat["controller"].get("model") != lead["model"]
+        or (seat["role"] == "impostor") != lead["compromised"]
+        or leader.get("known") != lead["known"]
+    ):
+        raise RuntimeError(f"{game['id']}: the Leader does not match the schedule")
 
 
 def verify_leader(manifest: dict[str, Any]) -> list[str]:

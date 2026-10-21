@@ -19,22 +19,16 @@ from zantine.judge import KeywordJudge, ScriptedJudge, choice, noul, run_judgmen
 from zantine.judge.batches import NOTE
 from zantine.judge.leader import WINDOW_ROUNDS, instruction_batches, keyword_instruction
 from zantine.leader.analysis import in_play_curve, leader_results, leader_rows
-from zantine.leader.bootstrap import draw_counts, ratio
 from zantine.leader.graphs import write_graphs
-from zantine.leader.schedule import (
-    CONDITIONS,
-    leader_game_setup,
-    load_pool,
-    make_leader_manifest,
-    seat_lineup,
-    verify_leader,
-)
+from zantine.leader.schedule import CONDITIONS, make_leader_manifest, verify_leader
 from zantine.observations import ActionContext, LeaderView, MeetingContext, Statement
 from zantine.rng import GameRng
 from zantine.rules import default_rules
 from zantine.rules.actions import Action, CallMeeting, Kill, Move
 from zantine.runner import new_game, play
+from zantine.runs import check_seating, execute, game_setup, load_manifest
 from zantine.scenario import build_scenario
+from zantine.schedule import load_pool, seat_lineup
 from zantine.seats.base import SeatController
 from zantine.seats.bots import PlaybookBot, ScriptedBot
 
@@ -499,9 +493,9 @@ def test_schedule_problems_are_caught(manifest: dict[str, Any]) -> None:
     assert any("games per Leader Model" in p for p in verify_leader(broken))
 
 
-def test_leader_game_setup_seats_the_leader_model_in_its_role(manifest: dict[str, Any]) -> None:
+def test_game_setup_seats_the_leader_model_in_its_role(manifest: dict[str, Any]) -> None:
     for game in manifest["games"][:12]:
-        config, spec = leader_game_setup(manifest, game, "dry")
+        config, spec = game_setup(manifest, game, "dry")
         entries, _ = seat_lineup(game)
         assert spec == ",".join(f"dry:{m}" for m in entries)
         order = build_scenario(config, GameRng(config.seed).fork("scenario")).seat_order
@@ -511,15 +505,29 @@ def test_leader_game_setup_seats_the_leader_model_in_its_role(manifest: dict[str
         assert config.leader.known == game["leader"]["known"]
 
 
+def test_zantine_schedule_and_run_play_leader_games(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    argv = ["schedule", "--experiment", "leader", "--master-seed", "5", "--round-cap", "6"]
+    assert main([*argv, "--out", str(run_dir)]) == 0
+    manifest = load_manifest(run_dir)
+    assert manifest["experiment"] == "leader" and len(manifest["games"]) == 196
+    report = execute(run_dir, mode="dry", max_games=3)
+    assert len(report.played) == 3
+    for game in manifest["games"][:3]:
+        records = [json.loads(x) for x in (run_dir / "games" / f"{game['id']}.jsonl").open()]
+        header = records[0]
+        check_seating(game, header)  # including the Leader's Model, role and condition
+        lead = header["config"]["leader"]
+        assert lead["known"] == game["leader"]["known"]
+        broken = json.loads(json.dumps(header))
+        broken["config"]["leader"]["known"] = not lead["known"]
+        with pytest.raises(RuntimeError, match="Leader"):
+            check_seating(game, broken)
+    with pytest.raises(SystemExit):
+        main(["schedule", "--experiment", "leader", "--mirror"])
+
+
 # Analysis and graphs ------------------------------------------------------------------------
-
-
-def test_cluster_bootstrap_ratio() -> None:
-    draws = draw_counts(4, 400, GameRng(1))
-    est = ratio([1, 2, 0, 3], [2, 2, 2, 4], draws).to_dict()
-    assert est["estimate"] == 0.6 and est["n_games"] == 4 and est["replicates"] == 400
-    assert est["ci_low"] <= est["estimate"] <= est["ci_high"]
-    assert ratio([0, 0], [0, 0], draw_counts(2, 10, GameRng(1))).to_dict()["estimate"] is None
 
 
 def audited(records: list[dict[str, Any]], judge: Any = None) -> dict[str, Any]:
@@ -642,7 +650,7 @@ def test_leader_report_writes_results_and_graphs(tmp_path: Path) -> None:
     assert json.loads((out / "leader.json").read_text())["games"] == 12
 
 
-def test_cli_play_and_schedule(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_play_with_a_leader(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     out = tmp_path / "g.jsonl"
     argv = ["play", "--seed", "3", "--leader", "hidden", "--leader-seat", "4"]
     assert main([*argv, "--leader-role", "impostor", "--out", str(out)]) == 0
@@ -650,5 +658,3 @@ def test_cli_play_and_schedule(tmp_path: Path, capsys: pytest.CaptureFixture[str
     header = json.loads(out.read_text().splitlines()[0])
     assert header["config"]["leader"] == {"seat": 4, "known": False, "compromised": True}
     assert header["seats"][4]["role"] == "impostor"
-    assert main(["leader-schedule", "--seed", "1", "--out", str(tmp_path / "m.json")]) == 0
-    assert len(json.loads((tmp_path / "m.json").read_text())["games"]) == 196

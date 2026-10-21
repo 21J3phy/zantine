@@ -73,7 +73,7 @@ def test_an_agent_loop_seat_plays_a_full_game() -> None:
     }
     calls = [r["data"] for r in game.transcript.events("harness.call")]
     assert len(calls) == len(client.messages.calls) > 0
-    assert all(c["harness"] == "agent-loop" and c["harness_version"] == 1 for c in calls)
+    assert all(c["harness"] == "agent-loop" and c["harness_version"] == 2 for c in calls)
     assert {c["phase"] for c in calls} >= {"action", "speak", "vote"}
     # The game ran on the agent-loop prompt and tools.
     assert all(c["system"][0]["text"] == agent_loop.SYSTEM_PROMPT for c in client.messages.calls)

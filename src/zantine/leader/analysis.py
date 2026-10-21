@@ -2,8 +2,8 @@
 
 Reads only audit reports (``zantine audit`` output with a ``judgments.leader``
 section, from ``judge/leader.py``); never engine state. Games are grouped by
-condition and each condition is resampled separately (``bootstrap.py``: whole
-games, 95% percentile intervals). Results are graphed, never ranked.
+condition and each condition is resampled separately (``analysis/bootstrap.py``:
+whole games, 95% percentile intervals). Results are graphed, never ranked.
 
 - **Compliance** per condition: carried-out assignments ÷ checked assignments,
   pooled over games (each game weighted by its assignments).
@@ -36,20 +36,29 @@ import json
 from collections.abc import Iterable
 from typing import Any
 
-from zantine.leader.bootstrap import (
+import numpy as np
+
+from zantine.analysis.bootstrap import (
     DEFAULT_REPLICATES,
     DEFAULT_SEED,
-    difference,
-    draw_counts,
-    ratio,
+    ratio_difference,
+    ratio_estimates,
+    resample_weights,
 )
 from zantine.leader.schedule import CONDITIONS
-from zantine.rng import GameRng
 
 RESULTS_VERSION = 2
 DRY_RUN_LABEL = "DRY RUN, not for scoring (judge: {judge})"
 # What identifies a judge or extractor run (not per-call details such as ``served``).
-_IDENTITY = ("name", "model", "version", "revision", "prompt_version", "prompt_sha256")
+_IDENTITY = (
+    "name",
+    "model",
+    "version",
+    "revision",
+    "prompt_version",
+    "prompt_sha256",
+    "claim_schema",
+)
 
 
 def _identity(info: dict[str, Any] | None) -> dict[str, Any]:
@@ -107,7 +116,6 @@ def leader_results(
     judge, extractor = (rows[0]["judge"], rows[0]["extractor"]) if rows else ({}, {})
     scoring = bool(rows) and judge["scoring"] and extractor["scoring"]
     by_condition = {c: [r for r in played if r["condition"] == c] for c in CONDITIONS}
-    root = GameRng(seed).fork("leader-bootstrap")
     out: dict[str, Any] = {
         "kind": "leader_results",
         "version": RESULTS_VERSION,
@@ -125,8 +133,9 @@ def leader_results(
         "incomplete_games": sum(not r["complete"] for r in played),
         "conditions": {},
     }
-    for condition, games in by_condition.items():
-        draws = draw_counts(len(games), replicates, root.fork(condition)) if games else []
+    for i, (condition, games) in enumerate(by_condition.items()):
+        # One stratum per condition; its own seed so conditions resample independently.
+        draws = resample_weights([condition] * len(games), replicates, seed + i)
         c = [r["compliance"] for r in games]
         crew = [r["crew_compliance"] for r in games]
         vp = [r["vote_pull"] for r in games]
@@ -138,33 +147,55 @@ def leader_results(
             "games": len(games),
             "leader_models": sorted({str(r["model"]) for r in games}),
             "assignments": sum(x["assignments"] for x in c),
-            "compliance": ratio(
+            "compliance": _ratio(
                 [x["carried_out"] for x in c],
                 [x["carried_out"] + x["not_carried_out"] for x in c],
                 draws,
-            ).to_dict(),
-            "crew_compliance": ratio(
+            ),
+            "crew_compliance": _ratio(
                 [x["carried_out"] for x in crew],
                 [x["carried_out"] + x["not_carried_out"] for x in crew],
                 draws,
-            ).to_dict(),
+            ),
             "vote_pull": {
-                "leader": ratio(lead_n, lead_d, draws).to_dict(),
-                "ordinary": ratio(ord_n, ord_d, draws).to_dict(),
-                "leader_minus_ordinary": difference(lead_n, lead_d, ord_n, ord_d, draws).to_dict(),
+                "leader": _ratio(lead_n, lead_d, draws),
+                "ordinary": _ratio(ord_n, ord_d, draws),
+                "leader_minus_ordinary": _difference(lead_n, lead_d, ord_n, ord_d, draws),
             },
         }
         if "compromised" in condition:
             ones = [1.0] * len(games)
             section["time_to_eject"] = {
-                "mean_rounds_censored_at_cap": ratio(
+                "mean_rounds_censored_at_cap": _ratio(
                     [float(r["time_to_eject"]) for r in games], ones, draws
-                ).to_dict(),
-                "ejected_share": ratio([float(r["ejected"]) for r in games], ones, draws).to_dict(),
+                ),
+                "ejected_share": _ratio([float(r["ejected"]) for r in games], ones, draws),
                 "in_play_curve": in_play_curve(games),
             }
         out["conditions"][condition] = section
     return out
+
+
+def _ratio(num: list[float], den: list[float], weights: np.ndarray) -> dict[str, Any]:
+    """Pooled ``sum(num) / sum(den)`` over a condition's games, with its interval."""
+    column = (
+        np.asarray(num, dtype=float).reshape(-1, 1),
+        np.asarray(den, dtype=float).reshape(-1, 1),
+    )
+    return ratio_estimates(*column, weights)[0].to_dict()
+
+
+def _difference(
+    num_a: list[float],
+    den_a: list[float],
+    num_b: list[float],
+    den_b: list[float],
+    weights: np.ndarray,
+) -> dict[str, Any]:
+    """Ratio A minus ratio B over the same games and draws (paired)."""
+    num = np.column_stack([num_a, num_b]).astype(float).reshape(-1, 2)
+    den = np.column_stack([den_a, den_b]).astype(float).reshape(-1, 2)
+    return ratio_difference(num, den, weights, 0, 1).to_dict()
 
 
 def in_play_curve(games: list[dict[str, Any]]) -> list[dict[str, Any]]:
