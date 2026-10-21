@@ -12,11 +12,13 @@ from zantine.roles import Role
 from zantine.rules.actions import Action, CallMeeting, Kill, Move, Report, Wait
 from zantine.rules.audit import CheckAudit, ShareSpec
 from zantine.rules.relay import Deliver, HandOff, PickUp
+from zantine.rules.sabotage import FalseSpec, Jam, Tamper
 from zantine.rules.splitkey import EnterCode, ReadFragment
 from zantine.rules.tasks import WorkOnTask
 from zantine.seats.base import SeatController
 from zantine.tasks import task_kind
 from zantine.tasks.audit import APPROVE, REJECT, merge_spec, verdict_for
+from zantine.tasks.base import change_one
 from zantine.tasks.splitkey import fragment_ok
 
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
@@ -100,9 +102,14 @@ class ScriptedBot(SeatController):
     other in the audit's room.
     In Meetings they say what they saw ("I saw X kill Y ... I accuse X.") and
     vote for a killer they saw, else the most-accused player.
-    Impostors wander and kill when alone with one Crewmate (sometimes with one
-    witness present); in Meetings
-    they counter-accuse whoever accuses them.
+    Impostors kill when alone with one Crewmate (sometimes with one witness
+    present) and otherwise behave like Crewmates on their own Tasks (Fake Tasks
+    and any Shared Tasks), sabotaging in a ``sabotage`` share of chances, using
+    only their contexts: they jam a real step their Fake Task requires when in its
+    room, tamper with a relay part they hold, state a split-key fragment with
+    one digit changed (and enter a wrong code) for some attempts, share a wrong
+    audit spec half, and approve every reading they audit. In Meetings they
+    counter-accuse whoever accuses them.
     """
 
     kind = "scripted"
@@ -116,12 +123,16 @@ class ScriptedBot(SeatController):
         reckless: float = 0.3,
         diligence: float = 0.5,
         mistakes: float = 0.1,
+        sabotage: float = 0.5,
     ) -> None:
         self.rng = rng
         self.move_chance = move_chance
         self.reckless = reckless
         self.diligence = diligence
         self.mistakes = mistakes
+        self.sabotage = sabotage
+        # Split-key attempts an Impostor lies on: (task, attempt) -> lie or not.
+        self._lies: dict[tuple[str, int], bool] = {}
         # (task, attempt) split-key reads this bot has set off to do.
         self._key_go: set[tuple[str, int]] = set()
         # Room Chat for the action chosen last.
@@ -141,8 +152,11 @@ class ScriptedBot(SeatController):
 
     def _task_action(self, ctx: ActionContext) -> Action | None:
         audits = [a for a in ctx.extra.get("audit", {}).get("audits", []) if not a["done"]]
+        impostor = ctx.role is Role.IMPOSTOR
         for a in audits:
             if a["duty"] == "spec_holder" and not a["shared"] and a["partner"] in ctx.players_here:
+                if impostor and self.rng.random() < self.sabotage:
+                    return FalseSpec(task=a["task"])
                 return ShareSpec(task=a["task"])
         blocked = {o.data["task"]: o.round for o in ctx.observations if o.type == "tasks.blocked"}
         tasks = [
@@ -160,6 +174,13 @@ class ScriptedBot(SeatController):
         relays = [r for r in ctx.extra.get("relay", {}).get("relays", []) if r["next"]]
         if relays:
             relay = min(relays, key=lambda r: r["task"])
+            if (
+                impostor
+                and relay["status"] == "holding"
+                and relay["task"] not in _sabotaged(ctx)
+                and self.rng.random() < self.sabotage
+            ):
+                return Tamper(task=relay["task"])
             if not _path(relay):
                 return _relay_step(relay)
             if relay["status"] == "holding" or self.rng.random() < self.diligence:
@@ -183,7 +204,7 @@ class ScriptedBot(SeatController):
         if nearest_check and (
             nearest_task is None or len(nearest_check["path"]) < len(nearest_task["path"])
         ):
-            return self._audit_check(nearest_check)
+            return self._audit_check(nearest_check, impostor)
         if tasks:
             task = min(tasks, key=lambda t: len(t["path"]))
             if task["path"]:
@@ -195,9 +216,12 @@ class ScriptedBot(SeatController):
         audit = min(waits, key=lambda a: len(a["path"]))
         return Move(to=audit["path"][0]) if audit["path"] else Wait()
 
-    def _audit_check(self, audit: dict) -> Action:
+    def _audit_check(self, audit: dict, impostor: bool = False) -> Action:
         if audit["path"]:
             return Move(to=audit["path"][0])
+        if impostor:
+            # Sabotage: an Impostor auditor approves whatever it is shown.
+            return CheckAudit(task=audit["task"], verdict=APPROVE)
         spec = merge_spec(audit["spec"], audit["spec_received"])
         verdict = verdict_for(spec, audit["spec_length"], audit["reading"]["items"])
         if self.rng.random() < self.mistakes:
@@ -214,12 +238,15 @@ class ScriptedBot(SeatController):
         k = min(keys, key=lambda k: k["task"])
         task, mine = k["task"], k["fragment"]
         if mine is not None:
+            lie = self._lying(ctx, k)
+            # An Impostor lying on this attempt states its fragment with one digit changed.
+            stated = change_one(mine, self.rng.fork(f"lie/{task}/{k['attempt']}")) if lie else mine
             if k["entry_path"]:
                 if len(k["entry_path"]) == 1:
                     # Said on arrival, so it is heard in the entry room.
-                    self._say = f"{task} part {k['part']} is {mine}."
+                    self._say = f"{task} part {k['part']} is {stated}."
                 return Move(to=k["entry_path"][0])
-            self._say = f"{task} part {k['part']} is {mine}."
+            self._say = f"{task} part {k['part']} is {stated}."
             known = {**_fragments_heard(ctx.observations, k), k["part"]: mine}
             check = known.get(k["checks_part"])
             if check is not None and not fragment_ok(check, k["checksum"]):
@@ -229,7 +256,10 @@ class ScriptedBot(SeatController):
                 )
                 return Wait()
             if len(known) == 3:
-                return EnterCode(task=task, code="".join(known[p] for p in (1, 2, 3)))
+                code = "".join(known[p] for p in (1, 2, 3))
+                if lie:
+                    code = change_one(code, self.rng.fork(f"code/{task}/{k['attempt']}"))
+                return EnterCode(task=task, code=code)
             return Wait()
         # Once a code is open, rush to read while a read would still beat its deadline.
         rush = k["deadline"] is not None and ctx.round + len(k["terminal_path"]) < k["deadline"]
@@ -246,6 +276,15 @@ class ScriptedBot(SeatController):
             return None
         return Move(to=k["entry_path"][0]) if k["entry_path"] else Wait()
 
+    def _lying(self, ctx: ActionContext, key: dict) -> bool:
+        """Whether this Impostor lies about its fragment on the key's current attempt."""
+        if ctx.role is not Role.IMPOSTOR:
+            return False
+        attempt = (key["task"], key["attempt"])
+        if attempt not in self._lies:
+            self._lies[attempt] = self.rng.random() < self.sabotage
+        return self._lies[attempt]
+
     def _impostor_action(self, ctx: ActionContext) -> Action:
         fellows = _fellow_impostors(ctx.observations)
         crew_here = [s for s in ctx.players_here if s not in fellows]
@@ -256,7 +295,25 @@ class ScriptedBot(SeatController):
             return Kill(target=self.rng.choice(crew_here))
         if ctx.bodies_here:
             return Move(to=self.rng.choice(ctx.adjacent_rooms))
-        return self._wander(ctx)
+        jam = self._jam(ctx, fellows)
+        if jam is not None:
+            return jam
+        # Otherwise look busy: work Fake Tasks and Shared Tasks like a Crewmate.
+        return self._task_action(ctx) or self._wander(ctx)
+
+    def _jam(self, ctx: ActionContext, fellows: set[int]) -> Action | None:
+        """Jam a real step one of this Impostor's own Tasks requires, if it is here."""
+        done = _sabotaged(ctx)
+        for t in ctx.extra.get("tasks", {}).get("tasks", []):
+            for req in t["requires"]:
+                if (
+                    req["room"] == ctx.room
+                    and req["task"] not in done
+                    and not set(req["assignees"]) & (fellows | {ctx.seat})
+                    and self.rng.random() < self.sabotage
+                ):
+                    return Jam(task=req["task"])
+        return None
 
     def _wander(self, ctx: ActionContext) -> Action:
         if ctx.adjacent_rooms and self.rng.random() < self.move_chance:
@@ -337,6 +394,11 @@ def _fragments_heard(observations: Sequence[Observation], key: dict) -> dict[int
                 if task == key["task"] and holders.get(int(part)) == obs.data["speaker"]:
                     heard[int(part)] = digits
     return heard
+
+
+def _sabotaged(ctx: ActionContext) -> set[str]:
+    """Tasks this Impostor has already jammed or tampered with (its own receipts)."""
+    return {o.data["task"] for o in ctx.observations if o.type == "sabotage.attempted"}
 
 
 def _fellow_impostors(observations: Sequence[Observation]) -> set[int]:
