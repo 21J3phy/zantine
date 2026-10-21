@@ -15,7 +15,7 @@ interface FilterApi {
   /** True when the figure hides anything. */
   filtered: (fig: string) => boolean;
   reset: (fig: string) => void;
-  /** Per-figure Pareto frontier toggle. */
+  /** Per-figure Pareto line, shown until it is turned off. */
   paretoOn: (fig: string) => boolean;
   togglePareto: (fig: string) => void;
 }
@@ -47,7 +47,7 @@ const update = (prev: Record<string, Hidden>, fig: string, change: (h: Hidden) =
 
 export function FilterProvider({ children }: { children: ReactNode }) {
   const [hidden, setHidden] = useState<Record<string, Hidden>>({});
-  const [pareto, setPareto] = useState<Set<string>>(new Set());
+  const [paretoOff, setParetoOff] = useState<Set<string>>(new Set());
   const toggle = useCallback(
     (fig: string, id: string) =>
       setHidden((prev) => update(prev, fig, (h) => ({ ...h, models: flip(h.models, id) }))),
@@ -69,7 +69,7 @@ export function FilterProvider({ children }: { children: ReactNode }) {
   );
   const togglePareto = useCallback(
     (fig: string) =>
-      setPareto((prev) => {
+      setParetoOff((prev) => {
         const next = new Set(prev);
         if (next.has(fig)) next.delete(fig);
         else next.add(fig);
@@ -90,10 +90,10 @@ export function FilterProvider({ children }: { children: ReactNode }) {
       toggleEffort,
       filtered: (fig) => get(fig).models.size + get(fig).efforts.size > 0,
       reset,
-      paretoOn: (fig) => pareto.has(fig),
+      paretoOn: (fig) => !paretoOff.has(fig),
       togglePareto,
     };
-  }, [hidden, toggle, toggleEffort, reset, pareto, togglePareto]);
+  }, [hidden, toggle, toggleEffort, reset, paretoOff, togglePareto]);
   return <FilterContext.Provider value={api}>{children}</FilterContext.Provider>;
 }
 

@@ -44,7 +44,7 @@ export function DesignMatrix(p: ChartProps) {
       <text className="panel-title" x={x0 + cols * CM + CM} y={y0 - 12} textAnchor="middle">
         Impostor
       </text>
-      <Grid x={x0} y={y0} nx={cols} ny={MODELS.length} />
+      <Grid x={x0} y={y0} nx={cols} ny={MODELS.length} v />
       {BLOCK.map((_, c) => (
         <text key={c} className="tick" x={x0 + c * CM + CM / 2} y={y0 + MODELS.length * CM + 14} textAnchor="middle">
           {c + 1}

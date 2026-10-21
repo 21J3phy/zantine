@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { LABS, modelOf } from '../data/models';
+import { LABS, modelOf, tint } from '../data/models';
 import { CM } from '../lib/units';
 import { fmt, type CmAxis } from './scale';
 
@@ -26,13 +26,36 @@ export function Svg({ w, h, label, children }: { w: number; h: number; label: st
   );
 }
 
-/** Gridlines on every centimetre of the plot; they coincide with the canvas grid. */
-export function Grid({ x, y, nx, ny, base }: { x: number; y: number; nx: number; ny: number; base?: 'left' | 'bottom' }) {
+/**
+ * Hairline gridlines on the labelled ticks: horizontal every `every` cm, counted up from the bottom as
+ * YTicks counts; vertical ones (every `vEvery` cm from the left, as XTicks counts) only where asked.
+ */
+export function Grid({
+  x,
+  y,
+  nx,
+  ny,
+  base,
+  every = 1,
+  h = true,
+  v = false,
+  vEvery = every,
+}: {
+  x: number;
+  y: number;
+  nx: number;
+  ny: number;
+  base?: 'left' | 'bottom';
+  every?: number;
+  h?: boolean;
+  v?: boolean;
+  vEvery?: number;
+}) {
   const lines: ReactNode[] = [];
-  for (let i = 0; i <= nx; i++)
-    lines.push(<line key={`v${i}`} className="grid" x1={x + i * CM} x2={x + i * CM} y1={y} y2={y + ny * CM} />);
-  for (let j = 0; j <= ny; j++)
-    lines.push(<line key={`h${j}`} className="grid" x1={x} x2={x + nx * CM} y1={y + j * CM} y2={y + j * CM} />);
+  if (v) for (let i = 0; i <= nx; i += vEvery) lines.push(<line key={`v${i}`} className="grid" x1={x + i * CM} x2={x + i * CM} y1={y} y2={y + ny * CM} />);
+  if (h)
+    for (let j = 0; j <= ny; j++)
+      if ((ny - j) % every === 0) lines.push(<line key={`h${j}`} className="grid" x1={x} x2={x + nx * CM} y1={y + j * CM} y2={y + j * CM} />);
   return (
     <g>
       {lines}
@@ -120,25 +143,21 @@ export function AxisTitle({ x, y, children, anchor = 'start' }: { x: number; y: 
   );
 }
 
-/** A faint word across the plot so screenshots keep the warning. */
-export function Watermark({ x, y, w, h, text = 'Simulated data' }: { x: number; y: number; w: number; h: number; text?: string }) {
-  const size = Math.max(16, Math.min(44, w / 9));
-  return (
-    <text
-      className="watermark"
-      x={x + w / 2}
-      y={y + h / 2 + size / 3}
-      fontSize={size}
-      textAnchor="middle"
-      transform={`rotate(-12 ${x + w / 2} ${y + h / 2})`}
-    >
-      {text}
-    </text>
-  );
+const luminance = (hex: string) => {
+  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+};
+const INK_TEXT = '#12161c';
+const INK_LUM = luminance(INK_TEXT);
+
+/** White or ink text on a fill, whichever has the higher contrast with it. */
+export function inkOn(hex: string) {
+  const l = luminance(hex);
+  return 1.05 / (l + 0.05) >= (l + 0.05) / (INK_LUM + 0.05) ? '#ffffff' : INK_TEXT;
 }
 
-/** Lab color dot (hollow for a Sibling) plus the model name. */
-export function ModelName({ id, x, y, anchor = 'end', size = 12 }: { id: string; x: number; y: number; anchor?: 'start' | 'end'; size?: number }) {
+/** Lab color dot (lightened for a Sibling) plus the model name. */
+export function ModelName({ id, x, y, anchor = 'end', size = 12, text }: { id: string; x: number; y: number; anchor?: 'start' | 'end'; size?: number; text?: string }) {
   const m = modelOf(id);
   const color = LABS[m.lab].color;
   const dotX = anchor === 'end' ? x - 4 : x + 4;
@@ -147,7 +166,7 @@ export function ModelName({ id, x, y, anchor = 'end', size = 12 }: { id: string;
     <g className="model-name">
       <MarkDot x={dotX} y={y} r={4} color={color} hollow={m.tier === 'sibling'} />
       <text x={textX} y={y + 4} textAnchor={anchor} fontSize={size}>
-        {m.short}
+        {text ?? m.short}
       </text>
     </g>
   );
@@ -158,7 +177,7 @@ export function MarkDot({ x, y, r, color, hollow, ring = true }: { x: number; y:
     <g>
       {ring && <circle cx={x} cy={y} r={r + 2} className="ring" />}
       {hollow ? (
-        <circle cx={x} cy={y} r={r - 1} fill="var(--panel)" stroke={color} strokeWidth={2} />
+        <circle cx={x} cy={y} r={r - 1} fill={tint(color)} stroke={color} strokeWidth={2} />
       ) : (
         <circle cx={x} cy={y} r={r} fill={color} />
       )}
@@ -258,7 +277,7 @@ export function Legend({ items, x, y }: { items: { label: string; color: string;
             ) : it.kind === 'dot' ? (
               <circle cx={start + 5} cy={y} r={4} fill={it.color} />
             ) : it.kind === 'ring' ? (
-              <circle cx={start + 5} cy={y} r={3.5} fill="none" stroke={it.color} strokeWidth={2} />
+              <circle cx={start + 5} cy={y} r={3.5} fill={tint(it.color, 0.7)} stroke={it.color} strokeWidth={2} />
             ) : (
               <rect x={start} y={y - 5} width={12} height={10} rx={2} fill={it.color} />
             )}
