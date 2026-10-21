@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
 import { useTip, type TipRow } from '../components/Tooltip';
-import { EFFORTS, EFFORT_LABEL, EFFORT_TAG, LABS, effortOf, entryName, modelOf } from '../data/models';
+import { EFFORTS, EFFORT_LABEL, EFFORT_TAG, LABS, effortOf, entryName, fillOf, modelOf } from '../data/models';
 import { CM } from '../lib/units';
-import { AxisTitle, Legend, Svg, Watermark, localPoint, textWidth, vBarPath, type ChartProps } from './kit';
+import { AxisTitle, Legend, Svg, localPoint, textWidth, vBarPath, type ChartProps, inkOn } from './kit';
+import { ModelBars, ModelStacks } from './modelbars';
 import { fitAxis, type AxisOptions } from './scale';
 import type { Segment } from './bars';
 
@@ -39,17 +40,13 @@ type EntryColumnsProps = ChartProps &
     tickFormat?: (v: number) => string;
     axis?: AxisOptions;
     yTitle: string;
+    /** Column order on a card, where each model shows one column: the highest value first, or the lowest. */
+    order?: 'high-first' | 'low-first';
     simulated?: boolean;
     note?: string;
   };
 
 const effortRank = (id: string) => EFFORTS.indexOf(effortOf(id) ?? 'medium');
-
-/** White or dark text, whichever reads on the fill. */
-function inkOn(hex: string) {
-  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] < 0.3 ? '#ffffff' : '#141b26';
-}
 
 /** Split a model name over two lines at the space that best balances them. */
 const twoLines = (s: string): [string, string] => {
@@ -61,17 +58,30 @@ const twoLines = (s: string): [string, string] => {
   return best;
 };
 
-const EFFORT_NOTE = 'Effort low → high within each model';
-
 /** Model names under groups, as set in the stylesheet (Geist runs narrower than textWidth's 0.56 em). */
 const NAME_FONT = 10.6;
 
 /**
  * Vertical columns, one per model and effort level, grouped by model in fixed order and
  * effort from low to high within each group. Effort tags sit under each column and the model
- * name under its group; alternate groups get a faint band.
+ * name under its group.
  */
 export function EntryColumns(p: EntryColumnsProps) {
+  if (!p.expanded) return <EntryCard {...p} />;
+  return <EntryDetail {...p} />;
+}
+
+/** On a card: one column per model at its highest effort, as Artificial Analysis lays them out. */
+function EntryCard(p: EntryColumnsProps) {
+  const format = p.format ?? ((v: number) => String(v));
+  if (p.mode === 'stack') return <ModelStacks {...p} rows={p.rows} segments={p.segments} />;
+  if (p.mode === 'range')
+    return <ModelBars {...p} rows={p.rows.map((r) => ({ id: r.id, v: r.hi }))} order={p.order ?? 'low-first'} format={format} valueLabel={p.highLabel} />;
+  return <ModelBars {...p} rows={p.rows} order={p.order ?? 'high-first'} format={format} valueLabel={p.yTitle} />;
+}
+
+/** Full screen: every effort level, grouped by model, with 95% intervals. */
+function EntryDetail(p: EntryColumnsProps) {
   const tip = useTip();
   const format = p.format ?? ((v: number) => String(v));
   const ids = (p.rows as { id: string }[]).map((r) => r.id).filter((id) => p.models.includes(id));
@@ -187,20 +197,18 @@ export function EntryColumns(p: EntryColumnsProps) {
   };
 
   const refKeyX = x0 + textWidth(`↑ ${p.yTitle}`, 10.5) + 20;
-  const legendEnd = legendRow ? (p as { segments: Segment[] }).segments.reduce((x, sg) => x + 32 + textWidth(sg.label, 11), x0) : x0;
 
   const marks: ReactNode[] = [];
   for (const id of flat) {
     const m = modelOf(id);
     const color = LABS[m.lab].color;
     const xc = xs[id];
-    const sib = m.tier === 'sibling';
     if (p.mode === 'value') {
       const r = p.rows.find((x) => x.id === id)!;
       const len = axis.pos(r.v) - axis.pos(0);
       marks.push(
         <g key={id}>
-          <path d={vBarPath(xc, Y(0), len, barW)} fill={color} fillOpacity={sib ? 0.3 : 1} stroke={sib ? color : 'none'} strokeWidth={1.5} />
+          <path d={vBarPath(xc, Y(0), len, barW)} fill={fillOf(id)} />
           {r.lo !== undefined && r.hi !== undefined && (
             <g className="whisker">
               <line x1={xc} x2={xc} y1={Y(r.lo)} y2={Y(r.hi)} />
@@ -261,14 +269,10 @@ export function EntryColumns(p: EntryColumnsProps) {
 
   return (
     <Svg w={p.w} h={p.h} label={p.label}>
-      {spans.map((s, i) =>
-        i % 2 === 1 ? <rect key={`b${s.model}`} className="group-band" x={s.x1 - (GAP * u) / 2} y={y0} width={s.x2 - s.x1 + GAP * u} height={ny * CM} /> : null,
-      )}
       {axis.ticks.map((t, i) => (
         <line key={`g${i}`} className="grid" x1={x0} x2={x0 + W} y1={Y(t)} y2={Y(t)} />
       ))}
       <line className="baseline" x1={x0} x2={x0 + W} y1={Y(0)} y2={Y(0)} />
-      {p.simulated && <Watermark x={x0} y={y0} w={W} h={ny * CM} />}
       {marks}
       {p.mode === 'value' && p.refLine && (
         <g>
@@ -290,12 +294,9 @@ export function EntryColumns(p: EntryColumnsProps) {
       {spans.map((s) => {
         const m = modelOf(s.model);
         const cx = (s.x1 + s.x2) / 2;
-        const color = LABS[m.lab].color;
-        const yRule = yBase + (showTags ? 20 : 6);
-        const yName = yBase + (showTags ? 30 : 16);
+        const yName = yBase + (showTags ? 28 : 14);
         return (
           <g key={`n${s.model}`} className="group-name">
-            <line x1={s.x1 + 2} x2={s.x2 - 2} y1={yRule} y2={yRule} stroke={color} strokeWidth={2} />
             {nameMode === 'one' ? (
               <text x={cx} y={yName + 4} textAnchor="middle">
                 {m.short}
@@ -328,11 +329,6 @@ export function EntryColumns(p: EntryColumnsProps) {
         <AxisTitle x={x0} y={y0 - 12}>
           ↑ {p.yTitle}
         </AxisTitle>
-      )}
-      {!showTags && !(legendRow && legendEnd + textWidth(EFFORT_NOTE, 10.5) + 16 > x0 + W) && (
-        <text className="axis-note" x={x0 + W} y={y0 - 12} textAnchor="end">
-          {EFFORT_NOTE}
-        </text>
       )}
       <rect className="hit" x={x0} y={y0 - 4} width={W} height={ny * CM + bottomCm * CM} onPointerMove={onMove} onPointerLeave={tip.hide} />
     </Svg>
