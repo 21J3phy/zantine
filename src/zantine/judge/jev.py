@@ -32,6 +32,7 @@ Live gate: like live Seats, a Jev call needs an explicit flag plus
 from __future__ import annotations
 
 import datetime as dt
+import http.client
 import json
 import os
 import urllib.error
@@ -152,7 +153,13 @@ def http_post(
     payload: dict[str, Any],
     opener: urllib.request.OpenerDirector | None = None,
 ) -> str:
-    """POST JSON with the standard library, never following redirects; returns the body."""
+    """POST JSON with the standard library, never following redirects; returns the body.
+
+    An HTTP error status is a rejection (``status`` set). Any other failure,
+    including one while reading the reply body (truncated, connection reset,
+    timeout), has no status: the request may have been billed, so the judge
+    holds its worst case and the batch takes the normal retry/error path.
+    """
     opener = opener or urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
@@ -165,11 +172,16 @@ def http_post(
             raise ProviderError(
                 f"HTTP {exc.code}: refusing to follow a redirect", fatal=True, status=exc.code
             ) from exc
-        detail = exc.read().decode("utf-8", "replace")[:500]
+        try:
+            detail = exc.read().decode("utf-8", "replace")[:500]
+        except (http.client.HTTPException, OSError):
+            detail = "(error body unreadable)"
         raise ProviderError(
             f"HTTP {exc.code}: {detail}", fatal=exc.code in _FATAL_STATUSES, status=exc.code
         ) from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
+    except (http.client.HTTPException, OSError) as exc:
+        # OSError covers URLError, timeouts and connection resets; HTTPException
+        # covers a truncated body (IncompleteRead) and other protocol errors.
         raise ProviderError(f"{type(exc).__name__}: {exc}", fatal=False) from exc
 
 
