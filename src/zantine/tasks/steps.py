@@ -76,6 +76,11 @@ class SortList(TaskKind):
     def audit_items(self, answer: Answer) -> list[str] | None:
         return _as_list(answer)
 
+    def garble(self, answer: Answer, rng: GameRng) -> Answer:
+        # Text like "12, 34, 56" is a list too: swap two neighbours, not a digit.
+        items = _as_list(answer)
+        return super().garble(items if items is not None else answer, rng)
+
 
 @register_task_kind
 class LookupValue(TaskKind):

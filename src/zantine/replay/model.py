@@ -58,6 +58,12 @@ SPOILER_KEYS = frozenset(
 )
 # Observation types only Impostors, victims or witnesses get; they reveal roles.
 SPOILER_OBSERVATIONS = frozenset({"role_assigned", "killed", "kill_witnessed"})
+# Data keys (at any depth) left out of the public text: whether a Task is a Fake
+# Task names its holder as an Impostor.
+REDACTED_KEYS = frozenset({"fake"})
+# Record types hidden entirely with roles hidden: Sabotage records name the
+# saboteur or a Fake Task (whose holder is an Impostor) by seat or Task id.
+HIDDEN_PREFIXES = ("sabotage.",)
 # Words in an action kind or event type that suggest only an Impostor could do it.
 IMPOSTOR_HINTS = ("kill", "sabotage", "crisis", "vent", "impostor", "tamper")
 # Keys a generic record may use for who is speaking and what they said.
@@ -547,12 +553,18 @@ def _generic_item(r: dict[str, Any], names: dict[int, str]) -> dict[str, Any]:
         fields = ", ".join(f"{k}={_fmt(k, v, names)}" for k, v in sorted(data.items()))
         _text(item, f"{type_}: {fields}" if fields else type_)
     hint = _impostor_hint(type_)
-    if r.get("kind") == "observation" and _has_spoiler(data):
+    if _redacts(data):
+        public = _redacted(data)
+        fields = ", ".join(f"{k}={_fmt(k, v, names)}" for k, v in sorted(public.items()))
+        item["public"] = f"{type_}: {fields}" if fields else type_
+    if type_.startswith(HIDDEN_PREFIXES):
+        item["public"] = None
+    elif r.get("kind") == "observation" and _has_spoiler(data):
         item["public"] = None  # a private view that gives a role away
     elif hint or _has_spoiler(data):
         # Keep the event but drop who did it.
         hidden = SPOILER_KEYS | SEAT_KEYS if hint else SPOILER_KEYS
-        rest = {k: v for k, v in data.items() if k not in hidden}
+        rest = {k: v for k, v in _redacted(data).items() if k not in hidden}
         fields = ", ".join(f"{k}={_fmt(k, v, names)}" for k, v in sorted(rest.items()))
         item["public"] = None if _has_spoiler(rest) else f"{type_}: {fields}" if fields else type_
     return item
@@ -604,6 +616,23 @@ def _describe_controller(raw: Any) -> str:
         parts = [str(p) for p in (kind, model) if p]
         return " / ".join(parts) if parts else json.dumps(raw, sort_keys=True)
     return "" if raw is None else str(raw)
+
+
+def _redacts(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(k in REDACTED_KEYS or _redacts(v) for k, v in value.items())
+    if isinstance(value, list):
+        return any(_redacts(v) for v in value)
+    return False
+
+
+def _redacted(value: Any) -> Any:
+    """``value`` without ``REDACTED_KEYS``, at any depth."""
+    if isinstance(value, dict):
+        return {k: _redacted(v) for k, v in value.items() if k not in REDACTED_KEYS}
+    if isinstance(value, list):
+        return [_redacted(v) for v in value]
+    return value
 
 
 def _has_spoiler(value: Any) -> bool:
