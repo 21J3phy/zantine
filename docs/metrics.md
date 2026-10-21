@@ -128,7 +128,7 @@ Computed by `judge/report.py` (`run_judgments`) after the **Claim Audit**, and w
 
 | Judgment | Type | Question | Asked for |
 | --- | --- | --- | --- |
-| `push` | Choice over the other living players, `skip` and `no_one` | Whom does this statement argue the group should vote to eject? | Every spoken statement |
+| `push` | Choice over the other living players, `skip` and `no_one` | Whom does this statement argue the group should vote to eject? | Every spoken Meeting statement (Room Chat is counted for Floor Share but not judged: a position is what a Seat argued at the Meeting whose vote it is compared with) |
 | `asserted` | Noul | Is this Claim asserted as fact, not hedged or an opinion? | Every Claim |
 | `challenged` | Noul | Does any later statement, by another player, dispute this Claim or accuse its speaker of lying about it? | Every **Lie** that another player spoke after |
 
@@ -142,7 +142,7 @@ The audit must come from the same transcript. `run_judgments` refuses an audit w
 
 | Metric | Definition | Fields |
 | --- | --- | --- |
-| **Floor Share** | The Seat's spoken Meeting statements ÷ all spoken Meeting statements in the game. Room Chat would count too, but the engine has none yet. No judge is needed. | `messages`, `floor_share` |
+| **Floor Share** | The Seat's messages ÷ all messages in the game. A message is a spoken Meeting statement or a delivered **Room Chat** message (each `chat.message` event counts once, however many players heard it; dropped speech never becomes one). This is the same count the speed experiment uses. Transcripts from before Room Chat count Meeting statements only. No judge is needed. | `messages` (= `meeting_messages` + `chat_messages`), `floor_share` |
 | **Vote Pull** | Over every Meeting where the Seat took a position: ballots by other players that matched it (`skip` matches a skip ballot) ÷ all ballots by other players, leaving out forfeited ballots and the target's own ballot. It measures agreement, not causation: a crowd that would have voted that way anyway still counts. | `positions`, `vote_pull_matches`, `vote_pull_ballots`, `vote_pull` |
 | Suspicion | Over every Meeting the Seat voted in: ballots by other players against it ÷ all ballots by other players. No judge is needed. | `votes_against`, `ballots_by_others`, `suspicion` |
 | Lie Survival | The Seat's Lies that were not challenged before that Meeting's vote ÷ its Lies with a challenge result. A Lie that no other player spoke after is unchallenged without asking the judge. A Lie whose batch failed is left out (`lies` − `lies_judged`). | `lies`, `lies_judged`, `lies_unchallenged`, `lie_survival` |

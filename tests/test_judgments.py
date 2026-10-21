@@ -64,7 +64,10 @@ class PassBot(PlaybookBot):
         return self.lines[ctx.pass_index - 1]
 
 
-def vote_game(speech: dict[int, str | list[str]] | None = None) -> list[dict[str, Any]]:
+def vote_game(
+    speech: dict[int, str | list[str]] | None = None,
+    chat: dict[int, dict[int, str]] | None = None,
+) -> list[dict[str, Any]]:
     """Red kills Green in Weapons in Round 2 with Orange watching; Orange reports in Round 3.
 
     A list of speech gives one line per pass.
@@ -82,6 +85,7 @@ def vote_game(speech: dict[int, str | list[str]] | None = None) -> list[dict[str
         kw: dict[str, Any] = {
             "actions": actions.get(seat),
             "votes": {1: VOTES[seat]} if seat in VOTES else None,
+            "chat": (chat or {}).get(seat),
         }
         line = speech.get(seat)
         if isinstance(line, list):
@@ -143,6 +147,33 @@ def test_floor_share_vote_pull_suspicion_and_misdirection() -> None:
         assert (seat(report, s)["pushed_crewmate"], seat(report, s)["misdirections"]) == (1, 1)
         assert seat(report, s)["misdirection_rate"] == 1.0
     assert seat(report, ORANGE)["pushed_crewmate"] == 0
+
+
+def events_of(records: list[dict[str, Any]], type: str) -> list[dict[str, Any]]:
+    return [r["data"] for r in records if r.get("kind") == "event" and r.get("type") == type]
+
+
+def test_floor_share_counts_delivered_room_chat() -> None:
+    """Room Chat messages count once each; speech dropped when its speaker dies doesn't."""
+    records = vote_game(
+        chat={
+            5: {1: "anyone near Weapons?", 2: "heading to Storage"},
+            GREEN: {1: "going to Weapons", 2: "help, Red is here"},
+        }
+    )
+    delivered = events_of(records, "chat.message")
+    dropped = events_of(records, "chat.dropped")
+    assert [d["speaker"] for d in delivered] == [GREEN, 5, 5]  # Round 1 sorted, then Round 2
+    assert [(d["speaker"], d["reason"]) for d in dropped] == [(GREEN, "killed")]
+    report = judged(records, KeywordJudge())
+    total = 12 + 3  # 4 speakers x 3 Meeting passes, plus 3 delivered chat messages
+    assert seat(report, 5)["chat_messages"] == 2 and seat(report, 5)["meeting_messages"] == 0
+    assert seat(report, 5)["floor_share"] == round(2 / total, 6)
+    assert seat(report, GREEN)["messages"] == 1
+    assert seat(report, RED)["floor_share"] == round(3 / total, 6)
+    assert sum(s["messages"] for s in report["seats"]) == total
+    # Chat is not judged: pushes and positions come from Meeting statements only.
+    assert {r["speaker"] for r in report["statements"]} == {RED, BLUE, PINK, ORANGE}
 
 
 def test_skip_positions_match_skip_ballots() -> None:
