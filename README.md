@@ -25,6 +25,7 @@ uv run pytest
 - [Sample size](docs/sample-size.md)
 - [Related work](docs/related-work.md)
 - [Terminology](CONTEXT.md)
+- [Website](web/README.md)
 
 The model research and pricing are planning snapshots; verify availability, identifiers, and prices before any paid runs.
 

@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from fake_providers import fake_adapter
+from zantine.config import GameConfig
 from zantine.harness import neutral
 from zantine.harness.live import play_live
 from zantine.harness.pricing import ModelSpec, load_models
@@ -24,7 +25,7 @@ from zantine.observations import ActionContext, MeetingContext
 from zantine.rules.actions import Action
 from zantine.runner import new_game
 from zantine.runs import game_setup
-from zantine.schedule import load_pool, make_manifest
+from zantine.schedule import load_pool, make_manifest, make_minority_manifest
 from zantine.seats.base import SeatController
 
 MODELS = load_models()
@@ -100,8 +101,42 @@ SAMPLE = [
 ] + [next(g for g in MANIFEST["games"] if g["kind"] == kind) for kind in ("benign", "mirror")]
 
 
-def scanned_dry_run(game_plan: dict[str, Any]) -> tuple[Any, list[Recorder]]:
-    config, spec = game_setup(MANIFEST, game_plan, "dry")
+# Lopsided Lobbies (v1.3, #23): one mask-off and one mask-on game. The mask-on game
+# needs the Style Mask (#66) and is skipped until it lands.
+MINORITY = make_minority_manifest(POOL, 42)
+LOPSIDED = [
+    pytest.param(
+        next(g for g in MINORITY["games"] if g["style_mask"] is mask),
+        marks=pytest.mark.skipif(
+            mask and not hasattr(GameConfig, "style_mask"),
+            reason="the Style Mask arrives with #66",
+        ),
+        id=f"lopsided-{'mask' if mask else 'off'}",
+    )
+    for mask in (False, True)
+]
+
+
+@pytest.mark.parametrize("game_plan", SAMPLE, ids=lambda g: g["id"])
+def test_dry_run_players_never_see_a_model_identity(game_plan: dict[str, Any]) -> None:
+    scan_dry_game(MANIFEST, game_plan)
+
+
+@pytest.mark.parametrize("game_plan", LOPSIDED)
+def test_lopsided_lobby_players_never_see_a_model_identity(game_plan: dict[str, Any]) -> None:
+    """With 8 Seats of one Model and 2 of another, nothing shown says which is which."""
+    scan_dry_game(MINORITY, game_plan)
+
+
+@pytest.mark.parametrize("game_plan", LOPSIDED)
+def test_lopsided_lobby_live_prompts_never_name_a_model(game_plan: dict[str, Any]) -> None:
+    scan_live_game(MINORITY, game_plan)
+
+
+def scanned_dry_run(
+    manifest: dict[str, Any], game_plan: dict[str, Any]
+) -> tuple[Any, list[Recorder]]:
+    config, spec = game_setup(manifest, game_plan, "dry")
     game = new_game(config, spec)
     recorders = [Recorder(c) for c in game.controllers]
     game.controllers = list(recorders)
@@ -109,9 +144,8 @@ def scanned_dry_run(game_plan: dict[str, Any]) -> tuple[Any, list[Recorder]]:
     return game, recorders
 
 
-@pytest.mark.parametrize("game_plan", SAMPLE, ids=lambda g: g["id"])
-def test_dry_run_players_never_see_a_model_identity(game_plan: dict[str, Any]) -> None:
-    game, recorders = scanned_dry_run(game_plan)
+def scan_dry_game(manifest: dict[str, Any], game_plan: dict[str, Any]) -> None:
+    game, recorders = scanned_dry_run(manifest, game_plan)
     header = game.transcript.records[0]
     assert identity_leaks(header["seats"])  # ground truth has the Models ...
     for seat, recorder in enumerate(recorders):
@@ -130,7 +164,7 @@ def test_dry_run_room_chat_reaches_the_scan_without_a_model_identity() -> None:
     Scripted holders often die before reading, so take the first scheduled game
     whose dry run has Room Chat."""
     for game_plan in MANIFEST["games"]:
-        game, recorders = scanned_dry_run(game_plan)
+        game, recorders = scanned_dry_run(MANIFEST, game_plan)
         chat = list(game.transcript.events("chat.message"))
         if chat:
             break
@@ -173,7 +207,11 @@ def covering_lobbies() -> list[dict[str, Any]]:
 @pytest.mark.parametrize("game_plan", covering_lobbies(), ids=lambda g: g["id"])
 def test_live_seats_prompts_never_name_a_model(game_plan: dict[str, Any]) -> None:
     """Every provider adapter's wire request, not just Anthropic's, is scanned."""
-    config, spec = game_setup(MANIFEST, game_plan, "live")
+    scan_live_game(MANIFEST, game_plan)
+
+
+def scan_live_game(manifest: dict[str, Any], game_plan: dict[str, Any]) -> None:
+    config, spec = game_setup(manifest, game_plan, "live")
     config = dataclasses.replace(config, round_cap=4)
     adapters: list[ProviderAdapter] = []
 

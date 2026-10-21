@@ -41,6 +41,8 @@ EPHEMERAL = {"type": "ephemeral"}
 class AnthropicAdapter(ProviderAdapter):
     provider = "anthropic"
     key_env = "ANTHROPIC_API_KEY"
+    # ``output_config.effort``; Fable 5.1 defaults to high, Opus 5.5 to medium.
+    effort_settings = ("low", "medium", "high")
 
     def __init__(self, model: ModelSpec, client: Any) -> None:
         """``client`` is an ``anthropic.Anthropic`` (or a test fake with ``messages.create``)."""
