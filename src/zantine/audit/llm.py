@@ -198,22 +198,46 @@ class OpenAICompatAdapter(ProviderAdapter):
             headers["Authorization"] = f"Bearer {self.api_key}"
         url = self.spec.base_url.rstrip("/") + "/chat/completions"
         body = self.post(url, headers, self.build_payload(request))
-        try:
-            choice = body["choices"][0]
-            text = choice["message"].get("content") or ""
-        except (KeyError, IndexError, TypeError, AttributeError) as exc:
-            raise ProviderError(f"malformed response: {exc!r}", fatal=False) from exc
+        if not isinstance(body, dict):
+            # No usage to trust either: the extractor holds the call's worst case.
+            raise ProviderError("malformed response: not a JSON object", fatal=False)
         usage = parse_usage(body.get("usage"))
-        finish = choice.get("finish_reason")
+        text, finish, problem = _read_choice(body.get("choices"))
         stop = {"stop": "end_turn", "length": "max_tokens"}.get(finish, finish)
         return ProviderResponse(
             tool_calls=(),
             text=text,
             stop_reason=stop,
             usage=usage,
-            response_id=body.get("id"),
-            raw={"model": body.get("model"), "system_fingerprint": body.get("system_fingerprint")},
+            response_id=_str_or_none(body.get("id")),
+            raw={
+                "model": _str_or_none(body.get("model")),
+                "system_fingerprint": _str_or_none(body.get("system_fingerprint")),
+                # Set when the reply's envelope is unusable; its (valid) usage still counts.
+                "malformed": problem,
+            },
         )
+
+
+def _read_choice(choices: Any) -> tuple[str, str | None, str | None]:
+    """``(content, finish_reason, problem)`` from a reply's ``choices``; ``problem`` is
+    None for a well-formed first choice (string or null content and finish reason)."""
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return "", None, "no choices[0] object"
+    choice = choices[0]
+    message = choice.get("message")
+    if not isinstance(message, dict):
+        return "", None, "choices[0].message is not an object"
+    content, finish = message.get("content"), choice.get("finish_reason")
+    if content is not None and not isinstance(content, str):
+        return "", None, f"message.content is a {type(content).__name__}, not a string"
+    if finish is not None and not isinstance(finish, str):
+        return "", None, f"finish_reason is a {type(finish).__name__}, not a string"
+    return content or "", finish, None
+
+
+def _str_or_none(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _origin(url: str) -> tuple[str, str, int | None]:
@@ -391,6 +415,8 @@ class LLMExtractor(ClaimExtractor):
         served = {k: response.raw.get(k) for k in ("model", "system_fingerprint")}
         if served not in self.served:
             self.served.append(served)
+        if response.raw.get("malformed"):
+            raise ExtractionError(f"malformed response: {response.raw['malformed']}")
         if response.stop_reason == "max_tokens":
             raise ExtractionError("output cut off at max_tokens")
         try:

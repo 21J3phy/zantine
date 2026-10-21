@@ -506,3 +506,60 @@ def test_a_reply_without_the_qualifiers_is_malformed() -> None:
     report = run_audit(kill_game({PINK: text}), extractor)
     assert not report["complete"]
     assert not [c for c in report["claims"] if c["speaker"] == PINK]
+
+
+# Malformed reply envelopes ------------------------------------------------------------
+
+
+def envelope(content: Any = '{"claims": []}', finish: Any = "stop") -> dict[str, Any]:
+    return {
+        "id": "chatcmpl-1",
+        "model": "test/open-weights-7b",
+        "choices": [{"message": {"content": content}, "finish_reason": finish}],
+        "usage": dict(USAGE),
+    }
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        envelope(content={"claims": []}),
+        envelope(content=[{"kind": "location"}]),
+        envelope(content=7),
+        envelope(content=True),
+        envelope(finish=["stop"]),
+        envelope(finish=3),
+        envelope(finish={"reason": "stop"}),
+        {**envelope(), "choices": []},
+        {**envelope(), "choices": "none"},
+        {**envelope(), "choices": [{"message": "hi"}]},
+    ],
+)
+def test_malformed_envelopes_are_retried_reported_and_billed(body: dict[str, Any]) -> None:
+    """Bad field types never escape as a traceback: each statement gets one retry, then an
+    error; the audit is incomplete, and the valid usage of every call is still billed."""
+    calls: list[Any] = []
+
+    def post(url: str, headers: dict[str, str], payload: dict[str, Any]) -> Any:
+        calls.append(payload)
+        return json.loads(json.dumps(body))
+
+    ledger = Ledger(5.0)
+    extractor = LLMExtractor(SPEC, ledger, OpenAICompatAdapter(SPEC, post, "sk-test"))
+    report = run_audit(kill_game(), extractor, ledger=ledger)
+    spoken = [s for s in report["statements"] if s["text"].strip()]
+    assert not report["complete"] and report["aborted"] is None
+    assert all("malformed response" in s["error"] for s in spoken)
+    assert len(calls) == len(ledger.records) == 2 * len(spoken)
+    assert all(r.ok and r.cost_usd > 0 for r in ledger.records)
+    assert ledger.spent_usd == pytest.approx(sum(r.cost_usd for r in ledger.records))
+
+
+@pytest.mark.parametrize("body", [[], ["claims"], "text", 3, None])
+def test_a_reply_that_is_not_an_object_holds_the_worst_case(body: Any) -> None:
+    ledger = Ledger(5.0)
+    adapter = OpenAICompatAdapter(SPEC, lambda url, headers, payload: body, "sk-test")
+    report = run_audit(kill_game(), LLMExtractor(SPEC, ledger, adapter), ledger=ledger)
+    assert not report["complete"]
+    assert all(not r.ok for r in ledger.records)
+    assert ledger.spent_usd > 0  # no usage to trust: the worst case of each call is held
