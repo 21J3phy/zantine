@@ -21,6 +21,17 @@ Claim kinds (``subject`` is always a player name; the speaker's own name for "I"
 ``round`` null means "since the last Meeting" for ``location`` and ``together``,
 and "at any time so far" for ``kill`` and ``task_done``. ``negated`` is true for
 denials ("I was not in Storage", "I didn't kill Red").
+
+Two qualifiers change what is claimed, so they are part of the Claim rather
+than dropped into a weaker one:
+
+- ``seen``: the speaker says it saw this itself ("I saw Red kill Green", "I saw
+  Blue in Storage"), which is only true if it was there.
+- ``throughout``: ``location`` / ``together`` over the whole window ("I was in
+  Cafeteria the whole time"), not just at some moment of it.
+
+Qualified Claims the checker can't decide are unverifiable: ``throughout`` on
+other kinds or negated, and ``seen`` on someone else's Task.
 """
 
 from __future__ import annotations
@@ -30,7 +41,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 # Bump when the schema or the meaning of a field changes; recorded in every audit.
-CLAIM_SCHEMA_VERSION = 1
+CLAIM_SCHEMA_VERSION = 2
 
 CLAIM_KINDS = ("location", "together", "kill", "task_done", "other")
 
@@ -45,9 +56,22 @@ CLAIM_ITEM_SCHEMA: dict[str, Any] = {
         "round": {"type": ["integer", "null"]},
         "task": _NULLABLE_STRING,
         "negated": {"type": "boolean"},
+        "seen": {"type": "boolean"},
+        "throughout": {"type": "boolean"},
         "quote": {"type": "string"},
     },
-    "required": ["kind", "subject", "object", "room", "round", "task", "negated", "quote"],
+    "required": [
+        "kind",
+        "subject",
+        "object",
+        "room",
+        "round",
+        "task",
+        "negated",
+        "seen",
+        "throughout",
+        "quote",
+    ],
     "additionalProperties": False,
 }
 CLAIMS_SCHEMA: dict[str, Any] = {
@@ -95,6 +119,8 @@ class ClaimDraft:
     task: str | None
     negated: bool
     quote: str
+    seen: bool = False
+    throughout: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -145,6 +171,8 @@ def parse_payload(payload: Any) -> ParsedPayload:
                 task=_clean(item["task"]),
                 negated=item["negated"],
                 quote=item["quote"],
+                seen=item["seen"],
+                throughout=item["throughout"],
             )
         )
     return ParsedPayload(tuple(drafts), tuple(rejected), tuple(ignored))
@@ -162,8 +190,9 @@ def _item_problem(item: dict[str, Any]) -> str | None:
     rnd = item["round"]
     if rnd is not None and (type(rnd) is not int):
         return "'round' must be an integer or null"
-    if type(item["negated"]) is not bool:
-        return "'negated' must be a boolean"
+    for key in ("negated", "seen", "throughout"):
+        if type(item[key]) is not bool:
+            return f"{key!r} must be a boolean"
     if not isinstance(item["quote"], str):
         return "'quote' must be a string"
     return None
@@ -203,6 +232,8 @@ class Claim:
     quote: str
     quote_in_text: bool
     problems: tuple[str, ...] = field(default=())
+    seen: bool = False
+    throughout: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -255,6 +286,12 @@ def resolve(
         problems.append(f"Round {draft.round} is not between 1 and {statement.round}")
     if draft.kind == "other":
         problems.append("kind 'other' is not checked in v0")
+    if draft.throughout and draft.kind not in ("location", "together", "other"):
+        problems.append(f"'throughout' does not apply to a {draft.kind} Claim")
+    if draft.throughout and draft.negated:
+        problems.append("a negated 'throughout' Claim is ambiguous")
+    if draft.seen and draft.kind == "task_done" and subject != statement.speaker:
+        problems.append("seeing another player's Task work is not checked in v0")
     # Only words the player actually said can be scored as its Claim.
     quote = _squash(draft.quote)
     quote_in_text = bool(quote) and quote in _squash(statement.text)
@@ -280,6 +317,8 @@ def resolve(
         quote=draft.quote,
         quote_in_text=quote_in_text,
         problems=tuple(problems),
+        seen=draft.seen,
+        throughout=draft.throughout,
     )
 
 

@@ -470,3 +470,39 @@ def test_cross_origin_redirect_is_refused_before_sending_the_key(location: str, 
     assert "sk-secret" not in str(info.value)
     if code not in (307, 308):  # urllib itself refuses to re-POST on 307/308
         assert info.value.fatal and "refused redirect" in str(info.value)
+
+
+# Qualifiers through the scoring extractor ---------------------------------------------
+
+
+def test_llm_extractor_qualifiers_are_scored_not_dropped() -> None:
+    """Astra's repro through the LLM path: schema-valid replies with exact quotes."""
+    eyewitness = "I saw Red kill Green in Weapons."
+    alibi = "I was in Cafeteria the whole time."
+    replies = {
+        eyewitness: {
+            "claims": [claim("kill", "Red", eyewitness, object="Green", room="Weapons", seen=True)]
+        },
+        alibi: {"claims": [claim("location", "Red", alibi, room="Cafeteria", throughout=True)]},
+    }
+    endpoint = FakeEndpoint(lambda item: replies.get(item.text, {"claims": []}))
+    extractor, _ = llm_extractor(endpoint)
+    report = run_audit(kill_game({PINK: eyewitness, RED: alibi}), extractor)
+    assert report["complete"]
+    assert labels(by_speaker(report, PINK)) == ["lie"]  # Pink was in Storage
+    assert labels(by_speaker(report, RED)) == ["lie"]  # Red left in Round 1
+    props = CLAIMS_SCHEMA["properties"]["claims"]["items"]
+    assert {"seen", "throughout"} <= set(props["required"])
+
+
+def test_a_reply_without_the_qualifiers_is_malformed() -> None:
+    """Strict schema: an item that omits ``seen`` / ``throughout`` is dropped, never
+    read as the weaker unqualified Claim, and the audit is incomplete."""
+    text = "I saw Red kill Green in Weapons."
+    item = claim("kill", "Red", text, object="Green", room="Weapons", seen=True)
+    del item["seen"], item["throughout"]
+    endpoint = FakeEndpoint(lambda i: {"claims": [item]} if i.text == text else {"claims": []})
+    extractor, _ = llm_extractor(endpoint)
+    report = run_audit(kill_game({PINK: text}), extractor)
+    assert not report["complete"]
+    assert not [c for c in report["claims"] if c["speaker"] == PINK]

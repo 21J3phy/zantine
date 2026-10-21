@@ -70,19 +70,22 @@ def claim(kind: str, subject: str | None, quote: str = "", **fields: Any) -> dic
         "round": fields.get("round"),
         "task": fields.get("task"),
         "negated": fields.get("negated", False),
+        "seen": fields.get("seen", False),
+        "throughout": fields.get("throughout", False),
         "quote": quote,
     }
 
 
-PATTERN_VERSION = "pattern-1"
+PATTERN_VERSION = "pattern-2"
 
 
 class PatternExtractor(ClaimExtractor):
     """Regex extraction of simple first-person sentences; for dry runs, not scoring.
 
-    Understands "I saw X kill Y in R", "X killed Y", "I didn't kill X",
+    Understands "I saw X kill Y in R" (``seen``), "X killed Y", "I didn't kill X",
     "I/X was (not) in R", "I/X was with Y (in R)" and "I did/finished/completed (Task) T12",
-    each optionally followed by "in round N".
+    each optionally followed by "in round N"; "the whole time" after a location or
+    together Claim sets ``throughout``.
     """
 
     def info(self) -> dict[str, Any]:
@@ -98,6 +101,7 @@ class PatternExtractor(ClaimExtractor):
         name = _alternation(item.players)
         room = _alternation(item.rooms)
         rnd = r"(?:\s+(?:in|during)\s+round\s+(?P<round>\d+))?"
+        whole = r"(?P<throughout>\s+the\s+(?:whole|entire)\s+time)?"
 
         def who(m: re.Match[str]) -> str:
             return item.speaker if m["s"].casefold() == "i" else m["s"]
@@ -105,7 +109,7 @@ class PatternExtractor(ClaimExtractor):
         patterns: list[tuple[str, Callable[[re.Match[str]], dict[str, Any]]]] = [
             (
                 rf"\bI saw (?P<s>{name}) kill (?P<o>{name})(?: in (?:the )?(?P<room>{room}))?{rnd}",
-                lambda m: self._make(m, "kill", m["s"], object=m["o"]),
+                lambda m: self._make(m, "kill", m["s"], object=m["o"], seen=True),
             ),
             (
                 rf"\b(?P<s>{name}) killed (?P<o>{name})(?: in (?:the )?(?P<room>{room}))?{rnd}",
@@ -116,12 +120,13 @@ class PatternExtractor(ClaimExtractor):
                 lambda m: self._make(m, "kill", item.speaker, object=m["o"], negated=True),
             ),
             (
-                rf"\b(?P<s>I|{name}) was with (?P<o>{name})(?: in (?:the )?(?P<room>{room}))?{rnd}",
+                rf"\b(?P<s>I|{name}) was with (?P<o>{name})(?: in (?:the )?(?P<room>{room}))?"
+                rf"{rnd}{whole}",
                 lambda m: self._make(m, "together", who(m), object=m["o"]),
             ),
             (
                 rf"\b(?P<s>I|{name}) (?P<neg>was not|wasn't|was never|was) in (?:the )?"
-                rf"(?P<room>{room}){rnd}",
+                rf"(?P<room>{room}){rnd}{whole}",
                 lambda m: self._make(m, "location", who(m), negated=m["neg"].casefold() != "was"),
             ),
             (
@@ -146,6 +151,8 @@ class PatternExtractor(ClaimExtractor):
             fields["room"] = groups["room"]
         if groups.get("round"):
             fields["round"] = int(groups["round"])
+        if groups.get("throughout"):
+            fields["throughout"] = True
         return claim(kind, subject, m.group(0), **fields)
 
 

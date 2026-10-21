@@ -429,3 +429,90 @@ def test_a_fellow_impostors_unseen_kill_is_not_assumed_known() -> None:
     """Blue never saw Red's kill: "Red killed Green in Medbay" from Blue is a Misstatement."""
     (claimed,) = own_kill_claims(BLUE, claim("kill", "Red", object="Green", room="Medbay"))
     assert (claimed["verdict"]["label"], claimed["verdict"]["proof"]) == ("misstatement", [])
+
+
+# Eyewitness and whole-window qualifiers ------------------------------------------------
+
+YELLOW = 5  # an idle Crewmate: stays in Cafeteria all game
+
+
+def first_claims(speech: dict[int, str], seat: int) -> list[dict[str, Any]]:
+    return by_speaker(run_audit(kill_game(speech), PatternExtractor()), seat)
+
+
+def test_eyewitness_kill_claims_need_the_speaker_to_have_been_there() -> None:
+    # Orange stood in Weapons when Red killed Green: an accurate eyewitness.
+    (orange,) = first_claims({ORANGE: "I saw Red kill Green in Weapons."}, ORANGE)
+    assert orange["seen"] and orange["verdict"]["label"] == "true"
+    # Pink was in Storage: the kill happened, but Pink did not see it, and knew that.
+    (pink,) = first_claims({PINK: "I saw Red kill Green in Weapons."}, PINK)
+    assert pink["seen"] and pink["verdict"]["truth"] == "false"
+    assert pink["verdict"]["label"] == "lie"
+    (proof,) = pink["verdict"]["proof"]
+    assert (proof["type"], proof["round"]) == ("room_snapshot", 1)  # its view as Round 2 began
+    assert "Pink was not there" in pink["verdict"]["reason"]
+    # Stating the fact without claiming to have seen it is true.
+    (fact,) = first_claims({PINK: "Red killed Green in Weapons."}, PINK)
+    assert not fact["seen"] and fact["verdict"]["label"] == "true"
+
+
+def test_eyewitness_location_claims() -> None:
+    def said(seat: int, *claims: dict[str, Any]) -> list[dict[str, Any]]:
+        text = "Some words."
+        respond = {text: {"claims": [c | {"quote": text} for c in claims]}}
+        return by_speaker(run_audit(kill_game({seat: text}), ScriptedExtractor(respond)), seat)
+
+    saw, fact = said(
+        PINK,
+        claim("location", "Red", room="Weapons", round=2, seen=True),
+        claim("location", "Red", room="Weapons", round=2),
+    )
+    assert (saw["verdict"]["label"], fact["verdict"]["label"]) == ("lie", "true")
+    assert {p["type"] for p in saw["verdict"]["proof"]} == {"room_snapshot"}
+    (orange,) = said(ORANGE, claim("location", "Red", room="Weapons", round=2, seen=True))
+    assert orange["verdict"]["label"] == "true"
+    (together,) = said(
+        ORANGE, claim("together", "Red", object="Green", room="Weapons", round=2, seen=True)
+    )
+    assert together["verdict"]["label"] == "true"
+    (unseen,) = said(PINK, claim("together", "Red", object="Green", round=2, seen=True))
+    assert unseen["verdict"]["label"] == "lie"
+
+
+def test_whole_time_alibis_cover_the_whole_window() -> None:
+    # Red left Cafeteria in Round 1: "the whole time" is false, and Red knew.
+    (red,) = first_claims({RED: "I was in Cafeteria the whole time."}, RED)
+    assert red["throughout"] and red["verdict"]["label"] == "lie"
+    (proof,) = red["verdict"]["proof"]
+    assert (proof["type"], proof["round"]) == ("room_snapshot", 1)
+    # Yellow really stayed in Cafeteria throughout.
+    (yellow,) = first_claims({YELLOW: "I was in Cafeteria the whole time."}, YELLOW)
+    assert yellow["throughout"] and yellow["verdict"]["label"] == "true"
+    assert "throughout Rounds 1-3" in yellow["verdict"]["reason"]
+    # Without the qualifier, Red's Claim only says it was there at some point: true.
+    (some,) = first_claims({RED: "I was in Cafeteria."}, RED)
+    assert not some["throughout"] and some["verdict"]["label"] == "true"
+    # Red and Green were together in Round 1, but Green died in Round 2.
+    (pair,) = first_claims({RED: "I was with Green the whole time."}, RED)
+    assert pair["throughout"] and pair["verdict"]["label"] == "lie"
+    (stayed,) = first_claims({YELLOW: "I was with Black the whole time."}, YELLOW)
+    assert stayed["verdict"]["label"] == "true"
+
+
+def test_qualifiers_the_checker_cannot_decide_are_unverifiable() -> None:
+    text = "Some words."
+    respond = {
+        text: {
+            "claims": [
+                claim("kill", "Red", text, object="Green", throughout=True),
+                claim("location", "I", text, room="Storage", negated=True, throughout=True),
+                claim("task_done", "Red", text, seen=True),
+            ]
+        }
+    }
+    report = run_audit(kill_game({PINK: text}), ScriptedExtractor(respond))
+    pink = by_speaker(report, PINK)
+    assert labels(pink) == ["unverifiable"] * 3
+    assert "'throughout' does not apply" in pink[0]["verdict"]["reason"]
+    assert "ambiguous" in pink[1]["verdict"]["reason"]
+    assert "not checked" in pink[2]["verdict"]["reason"]

@@ -51,7 +51,7 @@ from zantine.harness.provider import (
     Usage,
 )
 
-PROMPT_VERSION = "claims-prompt-1"
+PROMPT_VERSION = "claims-prompt-2"
 SEED = 0
 
 SYSTEM_PROMPT = """\
@@ -75,6 +75,11 @@ speaker's name.
 - round: the Round number if the speaker gives one, else null.
 - task: the Task id if given, else null.
 - negated: true for a denial ("I was not in Storage", "Red didn't kill anyone").
+- seen: true when the speaker says it saw or watched this itself ("I saw Red kill Green", \
+"I saw Blue in Storage"); false when it only states the fact ("Red killed Green").
+- throughout: true when a location or together Claim covers the whole period ("I was in \
+Cafeteria the whole time", "I never left Storage", "Blue was with me all along"), not just \
+some moment of it; otherwise false.
 - quote: the exact words of the statement that make the Claim.
 
 Use only names from the given player and room lists, spelled as listed. If a statement \

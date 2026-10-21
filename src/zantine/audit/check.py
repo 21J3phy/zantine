@@ -15,13 +15,18 @@ What counts as proof, per kind:
 - ``location`` / ``together``: the speaker's ``room_snapshot`` at every Round
   boundary the Claim covers rules the fact out (it saw the subject elsewhere,
   or stood in the claimed room without the subject; for itself, its own room).
+  For a ``throughout`` Claim one such boundary is enough, and proving it true
+  takes all of them. For a ``seen`` Claim ("I saw Blue in Storage") the fact
+  includes the speaker being there, so any snapshot without the sight rules it out.
 - ``kill``: it saw that victim's kill (``kill_witnessed``); it made that kill
   itself (its valid ``kill`` action) while blaming a player not its fellow
   Impostor; it claims a kill of its own that its own actions rule out (no
   ``kill`` action for that victim, Round and room; its start-of-Round view for
   the room); or it is a Crewmate claiming it killed (``role_assigned``). A denial
   is a Lie when it made or witnessed the kill. A fellow Impostor's unseen kills
-  are never assumed known.
+  are never assumed known. "I saw X kill Y" (``seen``) is true only if the
+  speaker was in the room at the start of that kill's Round; its own snapshot
+  there proves it was elsewhere.
 - ``task_done`` (about itself only, since grades are private): its own records
   for that Task (``tasks.graded`` / ``blocked`` / ``assigned`` / ``reassigned``);
   for a Task it never held, the ``tasks.assigned`` / ``reassigned`` records listing
@@ -30,7 +35,7 @@ What counts as proof, per kind:
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -164,39 +169,96 @@ class _Checker:
 
     # Kinds --------------------------------------------------------------------
 
-    def location(self) -> Verdict:
-        c, rec = self.c, self.rec
-        spots = self.boundaries()
-        hits = [(r, b) for r, b in spots if rec.room_at(c.subject, r, b) == c.room]
+    def present(self, r: int, b: Boundary, room: str | None, *seats: int) -> bool:
+        """Whether all of ``seats`` (and the speaker, for a ``seen`` Claim) were in one
+        room at (r, b), and it was ``room`` when one is given."""
+        if self.c.seen:
+            seats = (*seats, self.speaker)
+        rooms = {self.rec.room_at(s, r, b) for s in seats}
+        here = rooms.pop() if len(rooms) == 1 else None
+        return here is not None and (room is None or here == room)
+
+    def unseen(self, seats: list[int], r: int, b: Boundary) -> dict[str, Any] | None:
+        """The speaker's snapshot showing it did not see ``seats`` together (in the room)."""
+        snap = self.snap(r, b)
+        return snap if snap is not None and self.sees(seats, self.c.room, r, b) is None else None
+
+    def over_window(
+        self,
+        spots: list[tuple[int, Boundary]],
+        hits: list[tuple[int, Boundary]],
+        miss: Callable[[int, Boundary], dict[str, Any] | None],
+        seats: list[int],
+    ) -> tuple[bool, list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+        """The fact (at some boundary of the window, or at every one for ``throughout``)
+        and the speaker's proof that it is false / true. ``miss`` gives the speaker's
+        proof that the fact fails at one boundary."""
+        room = self.c.room
+        if self.c.throughout:
+            holds = bool(spots) and len(hits) == len(spots)
+            knew_true = _all_or_none(self.sees(seats, room, r, b) for r, b in spots)
+            return holds, _first(miss(r, b) for r, b in spots), knew_true
+        knew_true = _first(self.sees(seats, room, r, b) for r, b in hits)
+        return bool(hits), _all_or_none(miss(r, b) for r, b in spots), knew_true
+
+    def describe(
+        self,
+        did: str,
+        did_not: str,
+        spots: list[tuple[int, Boundary]],
+        hits: list[tuple[int, Boundary]],
+    ) -> str:
         when = _rounds_text(self.rounds(since_meeting=True))
+        if self.c.throughout:
+            missed = [s for s in spots if s not in hits]
+            if missed:
+                return f"{did_not} at the {missed[0][1]} of Round {missed[0][0]}"
+            return f"{did} throughout {when}"
         if hits:
-            r, b = hits[0]
-            reason = f"{self.name(c.subject)} was in {c.room} at the {b} of Round {r}"
+            return f"{did} at the {hits[0][1]} of Round {hits[0][0]}"
+        return f"{did_not} in {when}"
+
+    def location(self) -> Verdict:
+        c = self.c
+        spots = self.boundaries()
+        hits = [(r, b) for r, b in spots if self.present(r, b, c.room, c.subject)]
+        subject, speaker = self.name(c.subject), self.name(self.speaker)
+        if c.seen:
+            did, did_not = f"{speaker} saw {subject} in {c.room}", f"{speaker} did not see"
+            did_not += f" {subject} in {c.room}"
         else:
-            reason = f"{self.name(c.subject)} was not in {c.room} in {when}"
-        knew_false = _all_or_none(self.excludes(c.subject, c.room, r, b) for r, b in spots)
-        knew_true = _first(self.sees([c.subject], c.room, r, b) for r, b in hits)
-        return self.verdict(bool(hits), reason, knew_false=knew_false, knew_true=knew_true)
+            did, did_not = f"{subject} was in {c.room}", f"{subject} was not in {c.room}"
+
+        def miss(r: int, b: Boundary) -> dict[str, Any] | None:
+            if c.seen:
+                return self.unseen([c.subject], r, b)
+            return self.excludes(c.subject, c.room, r, b)
+
+        holds, knew_false, knew_true = self.over_window(spots, hits, miss, [c.subject])
+        reason = self.describe(did, did_not, spots, hits)
+        return self.verdict(holds, reason, knew_false=knew_false, knew_true=knew_true)
 
     def together(self) -> Verdict:
-        c, rec = self.c, self.rec
+        c = self.c
         spots = self.boundaries()
-        hits = []
-        for r, b in spots:
-            a, o = rec.room_at(c.subject, r, b), rec.room_at(c.object, r, b)
-            if a is not None and a == o and (c.room is None or a == c.room):
-                hits.append((r, b))
+        hits = [(r, b) for r, b in spots if self.present(r, b, c.room, c.subject, c.object)]
         pair = f"{self.name(c.subject)} and {self.name(c.object)}"
         where = f" in {c.room}" if c.room else ""
-        when = _rounds_text(self.rounds(since_meeting=True))
-        reason = (
-            f"{pair} were together{where} at the {hits[0][1]} of Round {hits[0][0]}"
-            if hits
-            else f"{pair} were never together{where} in {when}"
-        )
-        knew_false = _all_or_none(self.apart(r, b) for r, b in spots)
-        knew_true = _first(self.sees([c.subject, c.object], c.room, r, b) for r, b in hits)
-        return self.verdict(bool(hits), reason, knew_false=knew_false, knew_true=knew_true)
+        if c.seen:
+            speaker = self.name(self.speaker)
+            did = f"{speaker} saw {pair} together{where}"
+            did_not = f"{speaker} did not see {pair} together{where}"
+        else:
+            did, did_not = f"{pair} were together{where}", f"{pair} were not together{where}"
+
+        def miss(r: int, b: Boundary) -> dict[str, Any] | None:
+            if c.seen:
+                return self.unseen([c.subject, c.object], r, b)
+            return self.apart(r, b)
+
+        holds, knew_false, knew_true = self.over_window(spots, hits, miss, [c.subject, c.object])
+        reason = self.describe(did, did_not, spots, hits)
+        return self.verdict(holds, reason, knew_false=knew_false, knew_true=knew_true)
 
     def apart(self, r: int, b: Boundary) -> dict[str, Any] | None:
         c = self.c
@@ -211,7 +273,7 @@ class _Checker:
     def kill(self) -> Verdict:
         c, rec = self.c, self.rec
         rounds = self.rounds(since_meeting=False)
-        matches = [
+        kills = [
             k
             for k in rec.kills
             if k.seq < c.statement_seq
@@ -220,21 +282,47 @@ class _Checker:
             and (c.room is None or k.room == c.room)
             and k.round in rounds
         ]
+        # "I saw X kill Y": only true if the speaker was there (a kill happens in the
+        # room where killer and victim start the Round). Its own kills it saw anyway.
+        eyewitness = c.seen and c.subject != self.speaker
+        matches = [k for k in kills if not eyewitness or self.was_at(k)]
         what = f"{self.name(c.subject)} killed {self.name(c.object)}"
+        if eyewitness:
+            what = (
+                f"{self.name(self.speaker)} saw {self.name(c.subject)} kill {self.name(c.object)}"
+            )
         if matches:
             k = matches[0]
             reason = f"{what} in {k.room} in Round {k.round}"
+        elif eyewitness and kills:
+            k = kills[0]
+            reason = (
+                f"{self.name(c.subject)} killed {self.name(k.victim)} in {k.room} in Round "
+                f"{k.round}, but {self.name(self.speaker)} was not there"
+            )
         else:
             reason = f"no record that {what}" + (f" in {c.room}" if c.room else "")
             if c.claimed_round is not None:
                 reason += f" in Round {c.claimed_round}"
+        knew_false = self.kill_knew_false()
+        if knew_false is None and eyewitness:
+            # It saw no such kill: its own view at the start of each such kill's Round
+            # puts it in another room.
+            knew_false = _all_or_none(self.away_from(k) for k in kills)
         return self.verdict(
             bool(matches),
             reason,
             evidence=[k.seq for k in matches],
-            knew_false=self.kill_knew_false(),
+            knew_false=knew_false,
             knew_true=_first(self.kill_knew_true(k) for k in matches),
         )
+
+    def was_at(self, kill: Any) -> bool:
+        return self.rec.room_at(self.speaker, kill.round, "start") == kill.room
+
+    def away_from(self, kill: Any) -> dict[str, Any] | None:
+        snap = self.snap(kill.round, "start")
+        return snap if snap is not None and snap["data"]["room"] != kill.room else None
 
     def kill_knew_false(self) -> list[dict[str, Any]] | None:
         c, rec = self.c, self.rec
