@@ -181,6 +181,9 @@ def mirror_games(
 
 # Config keys that differ between games by design; everything else must match to pool.
 PER_GAME_CONFIG = ("seed", "impostor_seats")
+# Config fields added after earlier runs, with what a header without them meant:
+# before #37 every game was played under the optional Verification Protocol.
+HISTORICAL_CONFIG = {"verification_protocol": "optional"}
 ENGINE_KEYS = ("scenario_version", "transcript_schema")
 
 
@@ -195,7 +198,11 @@ def setup(g: GameRow) -> dict[str, Any]:
     effective game config (but its seed), the engine versions, and each Seat's
     controller kind and Harness. Effort and the seed are the permitted differences."""
     return {
-        "config": {k: v for k, v in sorted(g.config.items()) if k not in PER_GAME_CONFIG},
+        "config": {
+            k: v
+            for k, v in sorted({**HISTORICAL_CONFIG, **g.config}.items())
+            if k not in PER_GAME_CONFIG
+        },
         "engine": {k: g.engine.get(k) for k in ENGINE_KEYS},
         "seats": sorted({f"{s.controller}/{s.harness}" for s in g.seats}),
     }

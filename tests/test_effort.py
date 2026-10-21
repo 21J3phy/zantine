@@ -582,3 +582,32 @@ def test_every_exported_seat_keeps_its_own_invalid_action_and_forfeit_counts(
             cost[seat.seat]["invalid_actions"],
             cost[seat.seat]["forfeits"],
         )
+
+
+def strip_protocol(header: dict[str, Any]) -> None:
+    """A header as written before #37, which had no verification_protocol."""
+    header["config"].pop("verification_protocol")
+
+
+def test_headers_from_before_verification_protocols_pool_with_optional_ones(
+    tmp_path: Path,
+) -> None:
+    """A pre-#37 medium baseline, and a sweep resumed across #37 (mixed headers), were
+    all played under the optional protocol: they pool. A genuinely different protocol
+    does not."""
+    sweep_dir, v1_dir = dry_pair(tmp_path, 3, 3)
+    for game in sorted((v1_dir / "games").glob("*.jsonl")):
+        rewrite_header(game, strip_protocol)
+    sweep_games = sorted((sweep_dir / "games").glob("*.jsonl"))
+    for game in sweep_games[: len(sweep_games) // 2]:
+        rewrite_header(game, strip_protocol)
+    load_effort(sweep_dir, [v1_dir])
+
+    def mandatory(header: dict[str, Any]) -> None:
+        header["config"]["verification_protocol"] = "mandatory"
+
+    rewrite_header(sorted((v1_dir / "games").glob("*.jsonl"))[0], mandatory)
+    with pytest.raises(
+        ValueError, match=r"config\.verification_protocol 'optional' vs 'mandatory'"
+    ):
+        load_effort(sweep_dir, [v1_dir])
