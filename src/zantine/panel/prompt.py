@@ -23,7 +23,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-PROMPT_VERSION = "label-panel-1"
+PROMPT_VERSION = "label-panel-2"
 LABEL_TYPES = ("truth", "assertion", "challenged", "push")
 TRUTH = ("true", "false", "unverifiable")
 ASSERTION = ("claim", "hedge")
@@ -45,9 +45,13 @@ A player was in a room during a Round if the record lists them there at the star
 the end of that Round. A location or together Claim without a Round covers the Rounds \
 listed in `meeting.since_previous_meeting`; a kill or Task Claim without a Round covers \
 the whole game so far. A denial ("I was not in Storage") is true when the fact it denies \
-is false. Use unverifiable when the record cannot settle it: an opinion, a plan, a \
-feeling, an unknown player or room, or a fact the record does not cover (what someone \
-saw, said or intended).
+is false. A Claim that the speaker saw something itself ("I saw P2 in Storage", "I saw P4 \
+kill P5") is true only if the speaker was there too: in the same room at the same moment, \
+or for a kill, in the kill's room at the start of that Round. A Claim that something held \
+the whole time ("I was in Storage the whole time") is true only if it held at the start \
+and the end of every Round it covers. Use unverifiable when the record cannot settle it: \
+an opinion, a plan, a feeling, an unknown player or room, or a fact the record does not \
+cover (what someone said or intended).
 - assertion: claim if the speaker states it as a fact; hedge if it is hedged ("I think", \
 "maybe", "not sure") or offered as an opinion or suspicion.
 - challenged: true if any statement after the target statement, by a different player, \
