@@ -403,3 +403,16 @@ def test_a_malformed_release_is_reported_not_raised(official: Path, copy: Path) 
     edit_manifest(copy, lambda m: m.pop("pool"))
     result = repro.verify(commitment(official), copy, replay=False)
     assert len(result.problems) == 1 and "malformed" in result.problems[0]
+
+
+def test_experiment_runs_commit_and_verify_too(tmp_path: Path) -> None:
+    """An effort sweep (only Mirror Matches) is an official run too: it commits and verifies."""
+    from zantine.schedule import make_effort_manifest
+
+    run = tmp_path / "effort"
+    create_run(run, make_effort_manifest(POOL, 9, per_level=1))
+    execute(run, mode="dry", max_games=3)
+    _, c = repro.commit(run, allow_incomplete=True)
+    assert c["run"]["experiment"] == "effort"
+    result = repro.release(run, tmp_path / "release")
+    assert result.ok and result.replayed == 3, result.problems

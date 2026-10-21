@@ -172,8 +172,9 @@ def run_info(manifest: dict[str, Any], mode: str | None) -> dict[str, Any]:
     return {
         "games": len(manifest["games"]),
         "pool": manifest["pool"],
-        "blocks": manifest["blocks"],
-        "mirror_per_model": manifest["mirror_per_model"],
+        "experiment": manifest.get("experiment"),  # None for the v1 plan
+        "blocks": manifest.get("blocks"),
+        "mirror_per_model": manifest.get("mirror_per_model"),
         "manifest_version": manifest["manifest_version"],
         "engine": manifest["engine"],
         "config": manifest["config"],

@@ -52,6 +52,13 @@ A manifest's ``seed_domain`` says which derivation it uses: ``run`` (official
 runs; absent in older manifests) gives seeds below 2**63, ``public`` (the Public
 Seed Set, ``repro.py``) hashes a different prefix and sets bit 63, so the two
 can never share a seed.
+
+**Experiments.** A manifest without an ``experiment`` field is the v1 plan
+above (the speed experiment, ``speed.py``, is v1 blocks plus Talk Budgets).
+``make_effort_manifest`` plans the v1.6 effort sweep, and
+``make_minority_manifest`` the v1.3 Minority Disadvantage experiment
+(``"experiment": "minority"``, see its docstring); ``verify`` and ``summary``
+dispatch on that field.
 """
 
 from __future__ import annotations
@@ -89,6 +96,9 @@ EFFORT_PER_LEVEL = 10
 EFFORT_SWEEP_LEVELS = ("low", "high")
 
 Pairing = tuple[str, str]
+
+# The v1.3 Minority Disadvantage plan's ``experiment`` field (absent = the v1 plan).
+MINORITY = "minority"
 
 
 def load_pool() -> list[str]:
@@ -416,6 +426,9 @@ def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:
 
 def verify(manifest: dict[str, Any]) -> list[str]:
     """Every scheduling invariant; returns the problems found (empty = valid)."""
+    # Speed manifests are v1 blocks plus their own checks on top, so they fall through.
+    if manifest.get("experiment") == MINORITY:
+        return verify_minority(manifest)
     if manifest.get("experiment") == EFFORT:
         return verify_effort(manifest)
     pool = manifest["pool"]
@@ -523,6 +536,8 @@ def all_pairings(pool: Sequence[str]) -> list[Pairing]:
 
 
 def summary(manifest: dict[str, Any]) -> str:
+    if manifest.get("experiment") == MINORITY:
+        return minority_summary(manifest)
     if manifest.get("experiment") == EFFORT:
         return (
             f"{len(manifest['games'])} games: effort sweep, {manifest['effort_per_level']} Mirror "
@@ -540,3 +555,191 @@ def summary(manifest: dict[str, Any]) -> str:
 
 def _is_prime(n: int) -> bool:
     return n >= 2 and all(n % k for k in range(2, math.isqrt(n) + 1))
+
+
+# v1.3 Minority Disadvantage: Lopsided Lobbies ------------------------------------------
+
+LOPSIDED = "lopsided"  # game kind
+MAJORITY_SEATS = 8
+MINORITY_SEATS = 2
+GAMES_PER_PAIR = 2
+# Style Mask conditions: every ordered pair is played once in each per wave.
+CONDITIONS = ("off", "mask")
+
+
+def setup_id(pool: Sequence[str], majority: str, minority: str, wave: int) -> str:
+    """The id shared by a setup's mask-off and mask-on games (and the seed source)."""
+    return f"lop-m{pool.index(majority)}-m{pool.index(minority)}-{wave}"
+
+
+def make_minority_manifest(
+    pool: Sequence[str],
+    master_seed: int,
+    *,
+    games_per_pair: int = GAMES_PER_PAIR,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """The v1.3 plan: Lopsided Lobbies for every ordered pair of Models, mask off and on.
+
+    For each ordered pair (majority, minority) of different Models (42 with a pool
+    of 7, so both directions of every pair) and each of ``games_per_pair``
+    **waves**, one *setup* is played twice: once without and once with the Style
+    Mask (``config: {"style_mask": true}``). 7 x 6 x 2 x 2 = 168 games.
+
+    - **Seats**: 8 of the majority Model, 2 of the minority (``lineup`` lists all
+      10 Seats, so ``seat_lineup`` reads it as one Seat per entry).
+    - **Roles**: both Impostors are majority Seats (``impostors`` names the
+      majority Model twice, which ``runs.game_setup`` turns into fixed Impostor
+      Seats). The minority are always Crewmates, so any minority Ejection is wrong.
+    - **Matched seeds**: a setup's two games share one seed, derived from the
+      setup id, so names, seat order, map and Impostor Seats are identical and the
+      Style Mask is the only difference between them. Setups have distinct seeds.
+    - **Order**: each wave is shuffled on its own and waves run in order, so a run
+      stopped after wave 1 holds every ordered pair in both conditions.
+    """
+    if games_per_pair < 1:
+        raise ValueError("games_per_pair must be >= 1")
+    pool = list(pool)
+    if len(set(pool)) != len(pool) or len(pool) < 2:
+        raise ValueError("the Minority Disadvantage plan needs 2+ distinct Models")
+    root = GameRng(master_seed)
+    games: list[dict[str, Any]] = []
+    for wave in range(1, games_per_pair + 1):
+        planned = []
+        for majority in pool:
+            for minority in pool:
+                if majority == minority:
+                    continue
+                setup = setup_id(pool, majority, minority, wave)
+                for condition in CONDITIONS:
+                    mask = condition == "mask"
+                    planned.append(
+                        {
+                            "id": f"{setup}-{condition}",
+                            "block": None,
+                            "kind": LOPSIDED,
+                            "wave": wave,
+                            "setup": setup,
+                            "lineup_id": None,
+                            "majority": majority,
+                            "minority": minority,
+                            "lineup": [majority] * MAJORITY_SEATS + [minority] * MINORITY_SEATS,
+                            "impostors": [majority] * IMPOSTORS,
+                            "style_mask": mask,
+                            "config": {"style_mask": True} if mask else {},
+                            "seed": game_seed(master_seed, setup),
+                        }
+                    )
+        games += root.fork(f"order/wave-{wave}").shuffled(planned)
+    for index, game in enumerate(games):
+        game["index"] = index
+    if len({g["seed"] for g in games}) != len(games) // len(CONDITIONS):
+        raise ValueError("seed collision; choose another master seed")
+    manifest = {
+        "manifest_version": MANIFEST_VERSION,
+        "experiment": MINORITY,
+        "master_seed": master_seed,
+        "seed_derivation": SEED_DERIVATION.replace("<game_id>", "<setup>"),
+        "pool": pool,
+        "games_per_pair": games_per_pair,
+        "majority_seats": MAJORITY_SEATS,
+        "minority_seats": MINORITY_SEATS,
+        "conditions": list(CONDITIONS),
+        "engine": engine_versions(),
+        "config": dict(config or {}),
+        "games": games,
+    }
+    problems = verify(manifest)
+    if problems:
+        raise AssertionError(f"scheduler produced an invalid plan: {problems[:5]}")
+    return manifest
+
+
+def verify_minority(manifest: dict[str, Any]) -> list[str]:
+    """Every invariant of a Minority Disadvantage plan (empty = valid)."""
+    pool = manifest["pool"]
+    games = manifest["games"]
+    per_pair = manifest["games_per_pair"]
+    out: list[str] = []
+    if "style_mask" in manifest.get("config", {}):
+        out.append("the run-wide config must not set style_mask; each game sets its condition")
+    want = len(pool) * (len(pool) - 1) * per_pair * len(CONDITIONS)
+    if len(games) != want:
+        out.append(f"{len(games)} games, expected {want}")
+    if len({g["id"] for g in games}) != len(games):
+        out.append("duplicate game ids")
+    if [g.get("index") for g in games] != list(range(len(games))):
+        out.append("game indexes are not the run order")
+    cells: Counter[tuple[str, str, str]] = Counter()
+    setups: dict[str, list[dict[str, Any]]] = {}
+    waves: dict[int, Counter[tuple[str, str, str]]] = {}
+    for g in games:
+        gid, maj, mino = g["id"], g.get("majority"), g.get("minority")
+        if g.get("kind") != LOPSIDED:
+            out.append(f"{gid}: kind is not {LOPSIDED}")
+            continue
+        if maj not in pool or mino not in pool or maj == mino:
+            out.append(f"{gid}: majority/minority must be two different pool Models")
+            continue
+        if g["lineup"] != [maj] * MAJORITY_SEATS + [mino] * MINORITY_SEATS:
+            out.append(
+                f"{gid}: lineup is not {MAJORITY_SEATS} majority + {MINORITY_SEATS} minority"
+            )
+        if g["impostors"] != [maj] * IMPOSTORS:
+            out.append(f"{gid}: Impostors must be {IMPOSTORS} majority Seats")
+        entries, positions = seat_lineup(g)
+        if len(entries) != MAJORITY_SEATS + MINORITY_SEATS or any(
+            entries[p] != maj for p in positions
+        ):
+            out.append(f"{gid}: an Impostor position is not a majority Seat")
+        if mino in g["impostors"]:
+            out.append(f"{gid}: the minority must always be Crewmates")
+        mask = g.get("style_mask")
+        condition = "mask" if mask is True else "off" if mask is False else None
+        if condition is None:
+            out.append(f"{gid}: style_mask must be true or false")
+            continue
+        if g["config"] != ({"style_mask": True} if mask else {}):
+            out.append(f"{gid}: config does not match its Style Mask condition")
+        setup = (
+            setup_id(pool, maj, mino, g["wave"])
+            if g.get("wave") in range(1, per_pair + 1)
+            else None
+        )
+        if setup is None or g.get("setup") != setup or gid != f"{setup}-{condition}":
+            out.append(f"{gid}: wave, setup or id does not match its pair and condition")
+            continue
+        if g["seed"] != game_seed(manifest["master_seed"], setup):
+            out.append(f"{gid}: seed is not derived from the master seed and the setup")
+        cells[(maj, mino, condition)] += 1
+        setups.setdefault(setup, []).append(g)
+        waves.setdefault(g["wave"], Counter())[(maj, mino, condition)] += 1
+    ordered = [(a, b) for a in pool for b in pool if a != b]
+    expected = {(a, b, c): per_pair for a, b in ordered for c in CONDITIONS}
+    if cells != expected:
+        missing = sorted(set(expected) - {k for k, n in cells.items() if n == per_pair})
+        out.append(f"ordered pairs x conditions not each played {per_pair} times: {missing[:3]}")
+    seeds = [gs[0]["seed"] for gs in setups.values()]
+    if len(set(seeds)) != len(seeds):
+        out.append("two setups share a seed")
+    for setup, gs in setups.items():
+        if sorted(g["style_mask"] for g in gs) != [False, True]:
+            out.append(f"{setup}: needs exactly one mask-off and one mask-on game")
+    for wave, counts in sorted(waves.items()):
+        if counts != {(a, b, c): 1 for a, b in ordered for c in CONDITIONS}:
+            out.append(f"wave {wave}: not every ordered pair once in each condition")
+    order = [g.get("wave") for g in games]
+    if order != sorted(order, key=lambda w: (w is None, w)):
+        out.append("waves are not played in order")
+    return out
+
+
+def minority_summary(manifest: dict[str, Any]) -> str:
+    pool = manifest["pool"]
+    pairs = len(pool) * (len(pool) - 1)
+    return (
+        f"{len(manifest['games'])} games: Lopsided Lobbies ({manifest['majority_seats']} majority "
+        f"vs {manifest['minority_seats']} minority Seats) for {pairs} ordered pairs x "
+        f"{manifest['games_per_pair']} waves x Style Mask off/on; Impostors only on majority "
+        f"Seats; pool of {len(pool)}"
+    )
