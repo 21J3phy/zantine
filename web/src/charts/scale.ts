@@ -104,16 +104,22 @@ export function cmAxis(min: number, max: number, n: number, opts: AxisOptions = 
   };
 }
 
+/** The number a tick label states: "$5" is 5, "62%" is 62, "−0.5" is −0.5. */
+const labelNumber = (label: string) => parseFloat(label.replace(/[−–]/g, '-').replace(/[^0-9.-]/g, ''));
+
 /**
- * Steps whose every multiple the formatter shows exactly: a formatter that rounds to whole Rounds rules
- * out 0.5 and 2.5, one that rounds to whole percent rules out 2.5%. Without this a tick at 62.5% reads "63%".
+ * Steps whose multiples the formatter shows exactly: the number on each label must be the same multiple
+ * of the value it marks. A formatter that rounds to whole Rounds rules out 0.2, 0.5 and 2.5; one that
+ * rounds to whole percent rules out 2.5%. Without this a tick at 62.5% reads "63%".
  */
 export function exactSteps(format: (v: number) => string) {
-  const exact = (t: number) => {
-    const e = 1e-9 * Math.max(1, Math.abs(t));
-    return format(t) === format(t + e) && format(t) === format(t - e);
-  };
-  return NICE.filter((s) => [1, 2, 3, 4, 5].every((k) => exact(+(k * s).toFixed(10))));
+  return NICE.filter((s) => {
+    const ratios = [1, 2, 3, 4, 5, 7].map((k) => {
+      const t = +(k * s).toFixed(10);
+      return labelNumber(format(t)) / t;
+    });
+    return ratios.every((r) => Number.isFinite(r) && r !== 0 && Math.abs(r - ratios[0]) <= 1e-6 * Math.abs(ratios[0]));
+  });
 }
 
 /**

@@ -32,7 +32,6 @@ interface ScatterProps extends ChartProps {
   /** Which way is better on each axis; needed for the Pareto frontier. */
   better?: { x: Better; y: Better };
   quadrants?: { x: number; y: number; labels: [string, string, string, string] };
-  links?: boolean;
   simulated?: boolean;
   sizeNote?: string;
   extraRows?: (id: string) => TipRow[];
@@ -122,26 +121,52 @@ export function Scatter(p: ScatterProps) {
     const plain = placeLabels(labelPts, labelBox, unnamed);
     for (const id of Object.keys(labels)) labels[id] ??= plain[id];
   }
-  // A model whose name found no free spot is still named beside its dot where that does not cover
-  // another name; otherwise the tooltip and the table carry it.
+  // Every model is named, as Artificial Analysis names every release. A name with no free spot next to
+  // its dot moves out in steps, in eight directions, to the nearest place that covers no other name or
+  // dot, with a hairline leading back to the dot; failing that it sits beside the dot anyway.
   const box = (t: { x: number; y: number; anchor: string }, text: string): Box => {
     const w = textWidth(text, 11.5) * 0.9;
     const x = t.anchor === 'start' ? t.x : t.anchor === 'end' ? t.x - w : t.x - w / 2;
     return { x, y: t.y - 11, w, h: 14 };
   };
+  const overlap = (a: Box, b: Box) => a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
   const taken = labelPts.flatMap((l) => (labels[l.id] ? [box(labels[l.id]!, l.text)] : []));
-  const clear = (b: Box) => !taken.some((o) => b.x < o.x + o.w && o.x < b.x + b.w && b.y < o.y + o.h && o.y < b.y + b.h);
+  const dots = marks.map((m) => ({ id: m.id, b: { x: m.px - m.rr - 1, y: m.py - m.rr - 1, w: 2 * m.rr + 2, h: 2 * m.rr + 2 } }));
+  const leaders: { id: string; x1: number; y1: number; x2: number; y2: number }[] = [];
   for (const l of labelPts) {
     if (labels[l.id]) continue;
-    const spots = [
-      { x: l.x + l.r + 5, y: l.y + 4, anchor: 'start' as const },
-      { x: l.x - l.r - 5, y: l.y + 4, anchor: 'end' as const },
-    ].filter((t) => box(t, l.text).x >= x0 && box(t, l.text).x + box(t, l.text).w <= x0 + pw);
-    const spot = spots.find((t) => clear(box(t, l.text)));
-    if (spot) {
-      labels[l.id] = spot;
-      taken.push(box(spot, l.text));
+    let found: { x: number; y: number; anchor: 'start' | 'end' | 'middle' } | null = null;
+    for (let step = 0; step < 6 && !found; step++) {
+      const g = l.r + 5 + step * 12;
+      const spots = [
+        { x: l.x + g, y: l.y + 4, anchor: 'start' as const },
+        { x: l.x - g, y: l.y + 4, anchor: 'end' as const },
+        { x: l.x, y: l.y - g - 3, anchor: 'middle' as const },
+        { x: l.x, y: l.y + g + 11, anchor: 'middle' as const },
+        { x: l.x + g * 0.7, y: l.y - g * 0.7, anchor: 'start' as const },
+        { x: l.x - g * 0.7, y: l.y - g * 0.7, anchor: 'end' as const },
+        { x: l.x + g * 0.7, y: l.y + g * 0.7 + 8, anchor: 'start' as const },
+        { x: l.x - g * 0.7, y: l.y + g * 0.7 + 8, anchor: 'end' as const },
+      ];
+      found =
+        spots.find((t) => {
+          const b = box(t, l.text);
+          return b.x >= x0 && b.x + b.w <= x0 + pw && b.y >= y0 && b.y + b.h <= y0 + ph && !taken.some((o) => overlap(o, b)) && !dots.some((d) => d.id !== l.id && overlap(d.b, b));
+        }) ?? null;
+      if (found && step > 0) {
+        const b = box(found, l.text);
+        const cx = Math.max(b.x, Math.min(l.x, b.x + b.w));
+        const cy = Math.max(b.y, Math.min(l.y, b.y + b.h));
+        const d = Math.hypot(cx - l.x, cy - l.y) || 1;
+        leaders.push({ id: l.id, x1: l.x + ((cx - l.x) / d) * (l.r + 2), y1: l.y + ((cy - l.y) / d) * (l.r + 2), x2: cx, y2: cy });
+      }
     }
+    if (!found) {
+      const right = l.x + l.r + 5 + textWidth(l.text, 11.5) * 0.9 <= x0 + pw;
+      found = { x: right ? l.x + l.r + 5 : l.x - l.r - 5, y: l.y + 4, anchor: right ? 'start' : 'end' };
+    }
+    labels[l.id] = found;
+    taken.push(box(found, l.text));
   }
 
   const onMove = (e: React.PointerEvent<SVGRectElement>) => {
@@ -234,6 +259,9 @@ export function Scatter(p: ScatterProps) {
         const model = modelOf(m.id);
         return <MarkDot key={`d${m.id}`} x={m.px} y={m.py} r={m.rr} color={LABS[model.lab].color} hollow={model.tier === 'sibling'} />;
       })}
+      {leaders.map((l) => (
+        <line key={`ld${l.id}`} className="leader" x1={l.x1} y1={l.y1} x2={l.x2} y2={l.y2} />
+      ))}
       {marks.map((m) => {
         const l = labels[m.id];
         if (!l) return null;

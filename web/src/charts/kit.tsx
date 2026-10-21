@@ -143,6 +143,19 @@ export function AxisTitle({ x, y, children, anchor = 'start' }: { x: number; y: 
   );
 }
 
+const luminance = (hex: string) => {
+  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
+  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+};
+const INK_TEXT = '#12161c';
+const INK_LUM = luminance(INK_TEXT);
+
+/** White or ink text on a fill, whichever has the higher contrast with it. */
+export function inkOn(hex: string) {
+  const l = luminance(hex);
+  return 1.05 / (l + 0.05) >= (l + 0.05) / (INK_LUM + 0.05) ? '#ffffff' : INK_TEXT;
+}
+
 /** Lab color dot (lightened for a Sibling) plus the model name. */
 export function ModelName({ id, x, y, anchor = 'end', size = 12, text }: { id: string; x: number; y: number; anchor?: 'start' | 'end'; size?: number; text?: string }) {
   const m = modelOf(id);

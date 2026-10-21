@@ -13,8 +13,6 @@ interface HighlightProps extends ChartProps {
   format: (v: number) => string;
   /** Tooltip label for the value. */
   valueLabel: string;
-  /** Columns on the card; the full-screen view shows every active entry. */
-  limit?: number;
   simulated?: boolean;
   note?: string;
   /** Extra tooltip rows. */
@@ -25,7 +23,7 @@ interface HighlightProps extends ChartProps {
 
 /**
  * A headline column chart: one column per model and effort setting, sorted, with its value on the cap,
- * its 95% interval, and the name beneath. The card shows the first `limit` columns.
+ * its 95% interval, and the name beneath. Full screen only; a card draws ModelBars.
  */
 export function Highlight(p: HighlightProps) {
   // A card shows each model once, at its highest effort; full screen shows every setting.

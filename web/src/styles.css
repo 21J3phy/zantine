@@ -817,6 +817,11 @@ a {
   fill: #f4f5f6;
 }
 
+.chart .leader {
+  stroke: var(--ink-3);
+  stroke-width: 0.75;
+}
+
 .chart .tick-mark {
   stroke: #b8bec6;
   stroke-width: 1;

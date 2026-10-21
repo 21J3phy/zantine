@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { useTip, type TipRow } from '../components/Tooltip';
 import { EFFORTS, EFFORT_LABEL, EFFORT_TAG, LABS, effortOf, entryName, fillOf, modelOf } from '../data/models';
 import { CM } from '../lib/units';
-import { AxisTitle, Legend, Svg, localPoint, textWidth, vBarPath, type ChartProps } from './kit';
+import { AxisTitle, Legend, Svg, localPoint, textWidth, vBarPath, type ChartProps, inkOn } from './kit';
 import { ModelBars, ModelStacks } from './modelbars';
 import { fitAxis, type AxisOptions } from './scale';
 import type { Segment } from './bars';
@@ -47,12 +47,6 @@ type EntryColumnsProps = ChartProps &
   };
 
 const effortRank = (id: string) => EFFORTS.indexOf(effortOf(id) ?? 'medium');
-
-/** White or dark text, whichever reads on the fill. */
-function inkOn(hex: string) {
-  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] < 0.3 ? '#ffffff' : '#141b26';
-}
 
 /** Split a model name over two lines at the space that best balances them. */
 const twoLines = (s: string): [string, string] => {

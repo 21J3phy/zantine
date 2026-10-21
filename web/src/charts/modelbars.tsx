@@ -1,7 +1,7 @@
 import { useTip, type TipRow } from '../components/Tooltip';
 import { LABS, entryLabel, entryName, fillOf, modelOf, topEntries } from '../data/models';
 import { CM } from '../lib/units';
-import { Svg, localPoint, textWidth, vBarPath, type ChartProps } from './kit';
+import { Svg, inkOn, localPoint, textWidth, vBarPath, type ChartProps } from './kit';
 import { LabLogo } from './logos';
 
 // A figure card's bar chart, laid out as Artificial Analysis lays out its own: one column per model at
@@ -27,12 +27,6 @@ interface ModelBarsProps extends ChartProps {
   max?: number;
   note?: string;
   detail?: (id: string) => TipRow[];
-}
-
-/** White or dark text, whichever reads on the fill. */
-export function inkOn(hex: string) {
-  const c = [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16) / 255).map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
-  return 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] < 0.3 ? '#ffffff' : '#12161c';
 }
 
 /** A round step giving three to five guides up to `max`. */
@@ -122,7 +116,8 @@ export function ModelBars(p: ModelBarsProps) {
   const y0 = 10;
   const base = p.h * CM - tickHeight(rows.map((r) => r.id));
   const vmax = Math.max(0, ...rows.map((r) => r.v));
-  const step = niceStep(p.max ?? vmax);
+  // All zeros (no Invalid Actions at all, say) still needs a scale.
+  const step = niceStep((p.max ?? vmax) || 1);
   const top = p.max ?? Math.max(step, Math.ceil(vmax / step) * step);
   const Y = (v: number) => base - (v / top) * (base - y0);
   const guides = Array.from({ length: Math.round(top / step) + 1 }, (_, i) => i * step);

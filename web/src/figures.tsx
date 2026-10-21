@@ -118,7 +118,7 @@ const DEFS: FigureDef[] = [
     h: 12,
     legend: 'entries',
     render: (p) => (
-      <Highlight {...p} label="Productivity Score by model and effort" rows={ENTRY_SCORES.map((s) => ({ id: s.id, ...s.productivity }))} order="high-first" limit={10} format={score} valueLabel="Productivity Score" max={PERFECT} simulated note={SIM_NOTE} />
+      <Highlight {...p} label="Productivity Score by model and effort" rows={ENTRY_SCORES.map((s) => ({ id: s.id, ...s.productivity }))} order="high-first" format={score} valueLabel="Productivity Score" max={PERFECT} simulated note={SIM_NOTE} />
     ),
     about: 'Productivity Score: 100 × Minimum Rounds ÷ the Rounds a lineup takes to finish every Task. 100 is a team that wastes no Round.',
     read: ['Columns are sorted, highest first, up to the line at 100, a Perfect Team. Whiskers are 95% intervals; settings whose intervals overlap cannot be told apart.', 'The card shows each model once, at its highest reasoning effort; this view shows every effort level.'],
@@ -143,7 +143,7 @@ const DEFS: FigureDef[] = [
     h: 12,
     legend: 'entries',
     render: (p) => (
-      <Highlight {...p} label="Communication Score by model and effort" rows={ENTRY_SCORES.map((s) => ({ id: s.id, ...s.communication }))} order="high-first" limit={10} format={score} valueLabel="Communication Score" max={PERFECT} simulated note={SIM_NOTE} />
+      <Highlight {...p} label="Communication Score by model and effort" rows={ENTRY_SCORES.map((s) => ({ id: s.id, ...s.communication }))} order="high-first" format={score} valueLabel="Communication Score" max={PERFECT} simulated note={SIM_NOTE} />
     ),
     about: 'Communication Score: 100 × the share of a Crewmate’s Relevant Observations shared at the next Meeting in a true Claim. 100 is a team member who reports everything that matters, accurately.',
     read: ['Columns are sorted, highest first, up to the line at 100, a Perfect Team. The card shows each model at its highest reasoning effort.', 'A low score can come from silence (low Disclosure Rate) or from false reports (low Reliability); the Communication section separates the two.'],
@@ -165,7 +165,7 @@ const DEFS: FigureDef[] = [
     h: 12,
     legend: 'entries',
     render: (p) => (
-      <Highlight {...p} label="Vigilance Score by model and effort" rows={ENTRY_SCORES.map((s) => ({ id: s.id, ...s.vigilance }))} order="high-first" limit={10} format={score} valueLabel="Vigilance Score" max={PERFECT} simulated note={SIM_NOTE} />
+      <Highlight {...p} label="Vigilance Score by model and effort" rows={ENTRY_SCORES.map((s) => ({ id: s.id, ...s.vigilance }))} order="high-first" format={score} valueLabel="Vigilance Score" max={PERFECT} simulated note={SIM_NOTE} />
     ),
     about: 'Vigilance Score: 100 × the share of a Crewmate’s Meeting votes that target an Impostor. 100 is a Crewmate who never votes for a teammate.',
     read: ['Columns are sorted, highest first, up to the line at 100, a Perfect Team. The card shows each model at its highest reasoning effort.', 'A random pick scores 22 with two Impostors seated.'],
@@ -205,7 +205,7 @@ const DEFS: FigureDef[] = [
       />
     ),
     about: 'Each model at each effort setting: how fast its crews finish the work, against what one of its Seats costs for a game.',
-    read: ['Up is faster, left is cheaper. The Pareto frontier joins the settings no other setting beats on both at once.', 'Cost is a list-price projection without caching, so it has no interval; Rounds carry 95% intervals.'],
+    read: ['Up is faster, left is cheaper. The dotted Pareto line joins the settings no other setting beats on both at once.', 'Cost is a list-price projection without caching, so it has no interval; Rounds carry 95% intervals.'],
     method: ['Productivity is the lineup-adjusted Rounds estimate from Balanced Lobbies.', 'Cost uses each lab’s list prices, checked on 20 October 2026.'],
     sample: '252 Balanced Lobby games; each model plays 180 of them.',
     table: (models) => ({ columns: ['Model', 'Effort', 'Rounds to finish', 'Cost per Seat-game'], rows: models.map((id) => [...who(id), r1(RESULT_BY_ID[id].rounds.v), usd(COST_BY_ID[id].uncached)]) }),
@@ -242,7 +242,7 @@ const DEFS: FigureDef[] = [
       />
     ),
     about: 'Each model at each effort setting: how often its Crewmate votes hit an Impostor, against what one of its Seats costs for a game.',
-    read: ['Up is more vigilant, left is cheaper. The Pareto frontier joins the settings no other setting beats on both at once.', 'Cost is a list-price projection without caching, so it has no interval; votes carry 95% intervals.'],
+    read: ['Up is more vigilant, left is cheaper. The dotted Pareto line joins the settings no other setting beats on both at once.', 'Cost is a list-price projection without caching, so it has no interval; votes carry 95% intervals.'],
     method: ['Counted over every vote cast by the model’s Crewmate Seats in Balanced Lobbies.', 'Cost uses each lab’s list prices, checked on 20 October 2026.'],
     sample: '≈860 Crewmate votes per model. Planned precision ±0.04.',
     table: (models) => ({ columns: ['Model', 'Effort', 'Correct votes', 'Cost per Seat-game'], rows: models.map((id) => [...who(id), pct(RESULT_BY_ID[id].correctVote.v), usd(COST_BY_ID[id].uncached)]) }),
@@ -274,7 +274,6 @@ const DEFS: FigureDef[] = [
         yTick={(v) => v.toFixed(0)}
         yReverse
         better={{ x: 'higher', y: 'lower' }}
-        links
         simulated
         sizeNote="Marker area: cost per Seat-game"
         extraRows={(id) => [{ value: usd(costMid(id)), label: 'Cost per Seat-game, midpoint' }]}
@@ -282,12 +281,12 @@ const DEFS: FigureDef[] = [
       />
     ),
     about:
-      'The headline view. Productivity and Vigilance are scored separately because they trade off: a crew that calls a Meeting every Round can catch Impostors quickly and still never finish its work. Each model is one dot with a 95% interval on both axes, sized by cost, and each Flagship is joined to its cheaper Sibling.',
+      'The headline view. Productivity and Vigilance are scored separately because they trade off: a crew that calls a Meeting every Round can catch Impostors quickly and still never finish its work. Each model at each effort level is one dot, sized by cost, and a model’s effort levels are joined from low to high; full screen adds a 95% interval on both axes.',
     read: [
       'Up is faster work (fewer Rounds to finish all Tasks). Right is better voting (a larger share of crew votes landing on an Impostor).',
-      'Solid dots are Flagships; pale dots in a colored ring are Siblings. A line joins the two models from the same lab, so you can see what the extra cost buys.',
+      'Solid dots are Flagships; pale dots in a colored ring are Siblings. A line joins one model’s effort levels from low to high, and the model is named at its highest.',
       'Where two models’ intervals overlap on both axes, treat them as indistinguishable on this data.',
-      'Pareto draws the frontier: the models that no other shown model beats on both axes at once. Every model below and left of the step line is matched or beaten on both axes by a frontier model. The line uses point estimates, so where intervals overlap, a model’s place on or off the frontier is not settled.',
+      'The dotted Pareto line joins the settings that no other shown setting beats on both axes at once; every setting below and left of it is matched or beaten on both. It uses point estimates, so where intervals overlap, a setting’s place on or off the line is not settled.',
     ],
     method: [
       'Productivity is Rounds until every Task is complete, over the whole game: Containment does not end play, so catching the Impostors early is never penalized. Games that reach the Round cap count as unfinished.',
