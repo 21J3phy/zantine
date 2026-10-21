@@ -56,9 +56,27 @@ if TYPE_CHECKING:
 NAME = "sabotage"
 # Sabotage kinds, in the order the result lists them.
 KINDS = ("jam", "tamper", "false_spec", "false_verdict", "wrong_code", "false_fragment")
-# A split-key fragment claim: the Task id, then "part N", then three digits, in
-# one sentence (e.g. "T47 part 2 is 315."). Used only to record ground truth.
-_FRAGMENT_CLAIM = re.compile(r"\b(T\d\d)\b[^.;!?\n]*?\bpart\s*(\d)\b[^.;!?\n\d]*?(\d{3})\b")
+# A split-key fragment claim, scored as ground truth only when unambiguous: the
+# affirmative form "T47 part 2 is 315" (or ":" / "=" for "is") in a sentence with
+# no question, negation, condition, hedge or quotation. Anything else is left
+# to the Claim Audit.
+_FRAGMENT_CLAIM = re.compile(r"\b(T\d\d)\s+part\s+(\d)\s*(?:\bis\b|:|=)\s*(\d{3})\b(?!\s*\d)")
+_SENTENCE = re.compile(r"[^.;!?\n]+[.;!?\n]?")
+_NOT_AFFIRMATIVE = re.compile(
+    r"\b(?:not|no|never|isn't|isnt|if|unless|whether|maybe|perhaps|might|could|probably|"
+    r"possibly|wrong|fake|false|lie|lied|lying|said|says|claimed|claims)\b|n't|[\"“”`]",
+    re.IGNORECASE,
+)
+
+
+def fragment_claims(text: str) -> list[tuple[str, int, str]]:
+    """(Task id, part, digits) for each unambiguous affirmative fragment claim in ``text``."""
+    claims: list[tuple[str, int, str]] = []
+    for sentence in _SENTENCE.findall(text):
+        if sentence.rstrip().endswith("?") or _NOT_AFFIRMATIVE.search(sentence):
+            continue
+        claims += [(t, int(p), d) for t, p, d in _FRAGMENT_CLAIM.findall(sentence)]
+    return claims
 
 
 @dataclass
@@ -396,9 +414,19 @@ def resolve_entries(game: Game, rc: RoundContext) -> None:
         return
     b = board(state)
     done_before = rc.scratch.get("tasks.done_before", set())
-    for seat, action in rc.acting(splitkey_rules.EnterCode):
-        task = b.graph.get(action.task)
-        if not state.player(seat).is_impostor or any(r not in done_before for r in task.requires):
+    entries = [
+        (seat, action, b.graph.get(action.task))
+        for seat, action in rc.acting(splitkey_rules.EnterCode)
+        if all(r in done_before for r in b.graph.get(action.task).requires)
+    ]
+    # A simultaneous correct entry completes the Task, so a wrong one then fails nothing.
+    opened = {
+        task.id
+        for _, action, task in entries
+        if task_kind(task.kind).grade(keys[task.id].content, action.code)
+    }
+    for seat, action, task in entries:
+        if not state.player(seat).is_impostor:
             continue
         k = keys[task.id]
         if not task_kind(task.kind).grade(k.content, action.code):
@@ -406,6 +434,7 @@ def resolve_entries(game: Game, rc: RoundContext) -> None:
                 game,
                 "wrong_code",
                 seat,
+                task.id not in opened,
                 task=task.id,
                 attempt=k.attempt,
                 code=normalize_code(action.code),
@@ -434,14 +463,14 @@ def _fragment_claims(game: Game, seat: int, text: str, channel: str, *, holders:
     if not keys or not state.player(seat).is_impostor:
         return
     graph = board(state).graph
-    for task_id, part, digits in _FRAGMENT_CLAIM.findall(text):
+    for task_id, part, digits in fragment_claims(text):
         k = keys.get(task_id)
         if k is None or graph.get(task_id).done:
             continue
         seats = k.holders if holders else graph.get(task_id).assignees
-        if seat not in seats or int(part) != seats.index(seat) + 1:
+        if seat not in seats or part != seats.index(seat) + 1:
             continue
-        true = k.content.inputs["fragments"][int(part) - 1]
+        true = k.content.inputs["fragments"][part - 1]
         # One record per lie: repeating the same wrong digits for the same code is
         # the same Sabotage.
         told = any(

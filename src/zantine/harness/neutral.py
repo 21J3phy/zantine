@@ -72,11 +72,11 @@ each in a set room; some can only be done after another player's Task is complet
 Task takes your whole Round in its room, and only you learn whether your answer was right. \
 Some Tasks are Shared Tasks that several players can only finish together; their briefs \
 explain how. Impostors are given Fake Tasks that look exactly like real ones and are worked \
-the same way, but never count. A Task marked visual is a Visual Task: when one is truly \
-completed, everyone else in its room sees it done; a Fake Task never shows that. Impostors may \
-also secretly sabotage work (garbling a station's next answer, tampering with a relay part, \
-lying about a fragment or a spec half, giving a false audit verdict); nobody is told when \
-they do, so it shows only through grades, checksums, audits and what players saw.
+the same way, but never count. A Task marked visual is a Visual Task: when a Crewmate \
+completes one, everyone else in its room sees it done; an Impostor's work never shows \
+that. Impostors may also secretly sabotage work (garbling a station's next answer, tampering \
+with a relay part, lying about a fragment or a spec half, giving a false audit verdict); nobody \
+is told when they do, so it shows only through grades, checksums, audits and what players saw.
 
 Crisis: an Impostor can spend its action to trigger a Crisis. Everyone is told its two stations \
 and its deadline, but not who triggered it. It is fixed only if, in the same Round, someone works \

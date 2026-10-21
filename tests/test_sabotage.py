@@ -8,6 +8,7 @@ grades. The last section checks that it is otherwise invisible.
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any
 
 import pytest
@@ -16,11 +17,12 @@ from helpers import events, make_game, obs_of
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.harness import agent_loop, neutral
+from zantine.replay import build_view
 from zantine.rng import GameRng
 from zantine.rules.actions import Action, CallMeeting, Wait
 from zantine.rules.audit import CheckAudit, ShareSpec, audit_board, place_audit
 from zantine.rules.relay import Deliver, HandOff, PickUp, part
-from zantine.rules.sabotage import KINDS, FalseSpec, Jam, Tamper
+from zantine.rules.sabotage import KINDS, FalseSpec, Jam, Tamper, fragment_claims
 from zantine.rules.splitkey import EnterCode, ReadFragment, key
 from zantine.rules.tasks import WorkOnTask, board
 from zantine.runner import new_game, play
@@ -645,3 +647,100 @@ def test_an_ejected_impostors_fake_tasks_are_handed_on_like_anyones() -> None:
     step(game, {new: WorkOnTask(task=task.id, answer=answer)})
     assert obs_of(game, 6, "tasks.visual_done")[-1]["seat"] == new
     assert board(game.state).summary()["done"] == 0
+
+
+# Review follow-ups (#74) -----------------------------------------------------------------
+
+
+def test_roles_hidden_replay_redacts_fake_tasks_and_sabotage() -> None:
+    game = started()
+    task, fake = real_step(game), fake_step(game)
+    put(game, task.room, 0, 2)
+    step(game, {0: Jam(task=task.id)})
+    answer = SortList().solve({"inputs": task.content.inputs})
+    put(game, fake.room, 1)
+    step(
+        game,
+        {
+            2: WorkOnTask(task=task.id, answer=answer),
+            1: WorkOnTask(task=fake_step(game, 1).id, answer=[1]),
+        },
+    )
+    put(game, fake.room, 0)
+    step(
+        game,
+        {0: WorkOnTask(task=fake.id, answer=SortList().solve({"inputs": fake.content.inputs}))},
+    )
+    assert sabotage(game, "jam_triggered") and sabotage(game, "fake_task")
+    view = build_view(json.loads(json.dumps(game.transcript.records)))
+    items = [it for frame in view["rounds"] for it in frame["items"]]
+    revealed = " ".join(it["text"] for it in items)
+    assert "jammer=" in revealed and "fake=true" in revealed and "sabotage.fake_task" in revealed
+    public = [it for it in items if it["public"] is not None]
+    for it in public:
+        assert "fake" not in it["public"] and "jammer" not in it["public"], it
+        assert not it["type"].startswith("sabotage."), it
+    fake_ids = {t.id for t in board(game.state).graph if t.fake}
+    generated = next(it for it in items if it["type"] == "tasks.generated")
+    # The Fake Tasks are still listed, exactly like real ones.
+    assert all(i in generated["public"] for i in fake_ids)
+    assert any(it["type"] == "tasks.graded" for it in public)
+
+
+@pytest.mark.parametrize(
+    ("text", "claims"),
+    [
+        ("T45 part 1 is 796.", [("T45", 1, "796")]),
+        ("My T45 part 1 is 796; T45 part 2: 123", [("T45", 1, "796"), ("T45", 2, "123")]),
+        ("T45 part 1 = 796", [("T45", 1, "796")]),
+        ("T45 part 1 is not 796; do not enter 796.", []),
+        ("T45 part 1 isn't 796.", []),
+        ("Is T45 part 1 is 796?", []),
+        ("T45 part 1 is 796?", []),
+        ('Amber said "T45 part 1 is 796".', []),
+        ("Amber claims T45 part 1 is 796.", []),
+        ("If T45 part 1 is 796 we are fine.", []),
+        ("Maybe T45 part 1 is 796.", []),
+        ("T45 part 1 is 7961.", []),
+        ("T45 part 3 from Amber fails my checksum.", []),
+    ],
+)
+def test_only_affirmative_fragment_statements_are_scored(text: str, claims: list[Any]) -> None:
+    assert fragment_claims(text) == claims
+
+
+@pytest.mark.parametrize("channel", ["chat", "meeting"])
+def test_a_true_negation_or_question_is_never_a_false_fragment(channel: str) -> None:
+    game, task, liar = splitkey_game()
+    fragments = read_all(game, task)
+    part_no = task.assignees.index(liar) + 1
+    true = fragments[part_no]
+    other = f"{(int(true[0]) + 1) % 10}{true[1:]}"
+    texts = [
+        f"{task.id} part {part_no} is not {other}; do not enter {other}.",
+        f"Is {task.id} part {part_no} is {other}?",
+        f'Someone said "{task.id} part {part_no} is {other}".',
+    ]
+    if channel == "chat":
+        put(game, task.content.inputs["rooms"]["entry"], *task.assignees)
+        for text in texts:
+            act(game, liar, Wait(), say=text)
+            game.play_round()
+    else:
+        game.controllers[liar].speech[1] = " ".join(texts)
+        step(game, {5 if liar != 5 else 6: CallMeeting()})
+    assert not sabotage(game, "false_fragment")
+
+
+def test_a_wrong_code_beside_a_correct_one_fails_nothing() -> None:
+    game, task, liar = splitkey_game()
+    fragments = read_all(game, task)
+    crew = next(s for s in task.assignees if s != liar)
+    put(game, task.content.inputs["rooms"]["entry"], crew, liar)
+    code = "".join(fragments[p] for p in (1, 2, 3))
+    wrong = ("1" if code[0] != "1" else "2") + code[1:]
+    step(game, {crew: EnterCode(task.id, code), liar: EnterCode(task.id, wrong)})
+    assert task.done
+    [record] = sabotage(game, "wrong_code")
+    assert record["effective"] is False
+    assert game.state.ext["sabotage"].records[-1]["effective"] is False
