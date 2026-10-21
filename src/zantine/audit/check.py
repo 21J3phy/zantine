@@ -34,8 +34,11 @@ What counts as proof, per kind:
   ``audit.closed``; a relay carrier's own progress showing its leg still open.
   When it did complete the Task, the records of when and where (a passing grade
   or ``audit.result``, a spec holder's ``audit.shared`` + ``audit.closed``, a
-  carrier's own handoff or delivery) prove a Claim with another Round or room
-  false. A delivered relay's grade is never told, so a failed delivery is never
+  carrier's own handoff or delivery, a split-key holder's own read of the
+  attempt it is told completed) prove a Claim with another Round or room false.
+  A split-key holder with no completion notice knows the Task is still open; one
+  told it completed, without having read that attempt, is not assumed to know it
+  earned no share. A delivered relay's grade is never told, so a failed delivery is never
   a Lie. A denial is a Lie when such a record shows the completion.
   For a Task it never held, its assignment records list what it does hold;
   ``role_assigned`` for an Impostor with no Task records. "Some Task" needs
@@ -49,7 +52,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from zantine.audit.claims import Claim
-from zantine.audit.record import AUDIT_KIND, BOUNDARIES, RELAY_KIND, Boundary, GameRecord
+from zantine.audit.record import (
+    AUDIT_KIND,
+    BOUNDARIES,
+    RELAY_KIND,
+    SPLITKEY_KIND,
+    Boundary,
+    GameRecord,
+)
 
 TRUE, FALSE, UNVERIFIABLE = "true", "false", "unverifiable"
 REQUIRED = {
@@ -516,6 +526,21 @@ class _Checker:
                 shared = self.own("audit.shared", task=task)
                 return self.ruled_out(closed, lambda o: None, shared) if shared else None
             return None
+        if kind == SPLITKEY_KIND:
+            # The enterer is told its grade; every holder is told when the Task is
+            # completed (and which attempt), and each knows which attempts it read.
+            passed = [o for o in self.own("tasks.graded", task=task) if o["data"].get("correct")]
+            shares = self.splitkey_shares(task)
+            if passed or shares:
+                room = self.rec.task_rooms.get(task)
+                return self.ruled_out(
+                    [*passed, *shares],
+                    lambda o: room if o["type"] == "tasks.graded" else None,
+                    holding,
+                )
+            if self.own("splitkey.completed", task=task):
+                return None  # completed without its read: its share isn't assumed known
+            return holding or None
         # A solo Task: the worker is told the grade of every answer it submits.
         graded = self.own("tasks.graded", task=task)
         passed = [o for o in graded if o["data"].get("correct")]
@@ -523,6 +548,12 @@ class _Checker:
             return graded or holding or None
         room = self.rec.task_rooms.get(task)
         return self.ruled_out(passed, lambda o: room, holding)
+
+    def splitkey_shares(self, task: str) -> list[dict[str, Any]]:
+        """The speaker's completion notices for split-key attempts it read itself."""
+        read = {o["data"]["attempt"] for o in self.own("splitkey.read", task=task)}
+        done = self.own("splitkey.completed", task=task)
+        return [o for o in done if o["data"]["attempt"] in read]
 
     def ruled_out(
         self,
@@ -550,6 +581,17 @@ class _Checker:
             for o in self.own(type):
                 if o["data"].get("correct") and (o["round"], o["data"]["task"]) in done:
                     return [_cite(o)]
+        # A split-key holder who read the completed attempt is told it completed.
+        for o in self.own("splitkey.completed"):
+            task = o["data"]["task"]
+            if (o["round"], task) in done and o in self.splitkey_shares(task):
+                attempt = o["data"]["attempt"]
+                read = [
+                    r
+                    for r in self.own("splitkey.read", task=task)
+                    if r["data"]["attempt"] == attempt
+                ]
+                return [_cite(r) for r in [*read, o]]
         # A spec holder who shared its half is told when the Audit closes.
         for o in self.own("audit.closed"):
             shared = self.own("audit.shared", task=o["data"]["task"])
