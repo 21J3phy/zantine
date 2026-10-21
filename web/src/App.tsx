@@ -5,6 +5,7 @@ import { FigureCard } from './components/FigureCard';
 import { FigureView } from './components/FigureView';
 import { IconDoc, Mark } from './components/icons';
 import { Reader } from './components/Reader';
+import { PAPER_BY_SLUG } from './content/papers';
 import { FIGURE_BY_ID } from './figures';
 import { PAGES, PAGE_BY_ID, PAGE_OF_FIGURE, SHEET_W, type Item } from './layout';
 import { CM, clamp } from './lib/units';
@@ -26,7 +27,7 @@ function parseHash(current?: string): Route {
     const id = h.slice(4);
     return { page: current ?? PAGE_OF_FIGURE[id] ?? HOME, overlay: { kind: 'figure', id } };
   }
-  if (h.startsWith('paper/')) return { page: current ?? 'research', overlay: { kind: 'paper', slug: h.slice(6) } };
+  if (h.startsWith('paper/') && PAPER_BY_SLUG[h.slice(6)]) return { page: current ?? 'research', overlay: { kind: 'paper', slug: h.slice(6) } };
   return { page: current ?? HOME, overlay: { kind: 'none' } };
 }
 

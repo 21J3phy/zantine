@@ -78,7 +78,7 @@ const who = (id: string) => [modelOf(id).name, effortCell(id)];
 const SIM_NOTE = 'Simulated preview data, not a result.';
 /** Scores out of 100, where 100 is a Perfect Team. */
 const score = (v: number) => v.toFixed(0);
-const PERFECT = { v: 100, label: 'Perfect team · 100' };
+const PERFECT = { v: 100, label: 'Perfect Team · 100' };
 /** A value with no sampling interval (a list-price projection). */
 const point = (v: number): Est => ({ v, lo: v, hi: v });
 const costMid = (id: string) => (COST_BY_ID[id].cached + COST_BY_ID[id].uncached) / 2;
@@ -883,8 +883,11 @@ const DEFS: FigureDef[] = [
     render: (p) => <RoundSequence {...p} />,
     about: 'The game is turn-based but simultaneous. Each Round every living player submits one action, seeing only its own room, and all actions resolve together. That removes any advantage from replying first.',
     read: ['Arrows show the order the engine applies within one Round.'],
-    method: ['Actions: move, work on a Task, talk in Room Chat, report a body, call an emergency Meeting. Impostors can also kill (with a cooldown), trigger a Crisis, fake Tasks and sabotage.'],
-    sample: 'Rules as implemented in the open engine.',
+    method: [
+      'Actions in the open engine: move, work on a Task, report a body, call an emergency Meeting. Impostors can also kill (with a cooldown) and trigger a Crisis.',
+      'Planned for v1, not in the engine yet: Room Chat, faked Tasks and sabotage.',
+    ],
+    sample: 'Rules as implemented in the open engine; planned actions are marked.',
     table: () => ({ columns: ['Step', 'What happens'], rows: [['Act', 'Every living Seat chooses one action'], ['Resolve', 'Kills, moves, Meeting requests, Tasks, cooldowns'], ['Check', 'Win conditions and the Round cap'], ['Meeting', '3 discussion passes, secret vote with skip'], ['Ejection', 'Plurality; ties eject nobody; role hidden']] }),
   },
   {

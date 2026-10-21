@@ -46,7 +46,7 @@ const ORG_DESCRIPTION =
   'Zantine Labs builds benchmarks for AI agents and the teams they form: single agents, multi-agent systems, harnesses and orchestration. Results are published as graphs of the underlying data with the cost of every result, never as a ranking or a single score.';
 
 const BENCH_DESCRIPTION =
-  'Zantine-1 is a benchmark for AI agent teams and multi-agent orchestration. Ten AI models complete interdependent, automatically graded Tasks while up to two of them are secretly Impostors working against the team. It scores Productivity, Communication and Vigilance separately, each out of 100 against a Perfect Team, and measures Sabotage Damage, for every model at each reasoning-effort level, with list-price cost beside each result.';
+  'Zantine-1 is a benchmark for AI agent teams and multi-agent orchestration. Five of seven AI Models fill ten Seats, two each, and complete interdependent, automatically graded Tasks while up to two Seats are secretly Impostors working against the team. It scores Productivity, Communication and Vigilance separately, each out of 100 against a Perfect Team, and measures Sabotage Damage, with thinking tokens and list-price cost beside each result.';
 
 const KEYWORDS = [
   'AI agent benchmark',
@@ -479,7 +479,8 @@ const llmsFull = `# Zantine Labs: full text\n\n> ${ORG_DESCRIPTION}\n\n${STATUS_
 // ---------------------------------------------------------------------------------------------
 // Data
 
-const published = !FIGURES.some((f) => f.status === 'simulated' || f.status === 'planned');
+// Planned follow-up studies (verification, minority, leader) stay planned after v1; they don't gate it.
+const published = !FIGURES.some((f) => f.status === 'simulated');
 const data = {
   'results.json': {
     benchmark: 'Zantine-1',

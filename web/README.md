@@ -41,6 +41,7 @@ Vercel runs `npm run build` (see `vercel.json`); `SITE_URL` sets the canonical l
 ## Open items
 
 - `src/data/sim.ts` is invented. The site went public on 20 October 2026 with these simulated numbers and real model names, every figure stamped “Simulated data”, by decision of the project owner. Replace it with v1 results when they exist.
+- Result charts plot every reasoning-effort level, at the owner's request, to preview the layout. The v1 run plays each lab's medium effort only; low and high come from the v1.6 Mirror Match sweep (#26). When real results replace `sim.ts`, v1 figures show medium only, and the effort comparisons wait for v1.6.
 - Re-check model IDs and prices in `src/data/models.ts` against each lab’s docs.
 - The “Work with us” card has no contact address yet.
 - Zodiak is self-hosted from `public/fonts/zodiak/` under the ITF Free Font License. The license allows serving it on our own site, but not sharing the font files through a repository and not modifying, subsetting or converting them, so the files are kept out of git (`.gitignore`). Before building, download Zodiak from Fontshare (https://www.fontshare.com/fonts/zodiak) and put `Zodiak-Variable.woff2`, `Zodiak-VariableItalic.woff2` and `LICENSE-FFL.txt` in that folder. Without them, headings fall back to Iowan Old Style or Georgia.

@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
-import { EFFORTS, ENTRIES, MODELS, type Effort } from '../data/models';
+import { ENTRIES, type Effort } from '../data/models';
 
 /**
  * What each figure shows. Every figure has its own legend, so hiding a model or an effort level
@@ -29,12 +29,20 @@ interface Hidden {
 
 const NONE: Hidden = { models: new Set(), efforts: new Set() };
 
-/** Toggle one key in a set, keeping at least one of `all` switched on. */
-const flip = <T,>(prev: Set<T>, key: T, all: number) => {
+/** Toggle one key in a set. */
+const flip = <T,>(prev: Set<T>, key: T) => {
   const next = new Set(prev);
-  if (next.has(key)) next.delete(key);
-  else if (all - next.size > 1) next.add(key);
+  if (!next.delete(key)) next.add(key);
   return next;
+};
+
+/** A figure must keep at least one entry: a model can be left with only effort levels it lacks. */
+const anyVisible = (h: Hidden) => ENTRIES.some((e) => !h.models.has(e.model.id) && !h.efforts.has(e.effort));
+
+/** Apply a change to one figure's hidden set, unless it would leave the figure empty. */
+const update = (prev: Record<string, Hidden>, fig: string, change: (h: Hidden) => Hidden) => {
+  const next = change(prev[fig] ?? NONE);
+  return anyVisible(next) ? { ...prev, [fig]: next } : prev;
 };
 
 export function FilterProvider({ children }: { children: ReactNode }) {
@@ -42,18 +50,12 @@ export function FilterProvider({ children }: { children: ReactNode }) {
   const [pareto, setPareto] = useState<Set<string>>(new Set());
   const toggle = useCallback(
     (fig: string, id: string) =>
-      setHidden((prev) => {
-        const h = prev[fig] ?? NONE;
-        return { ...prev, [fig]: { ...h, models: flip(h.models, id, MODELS.length) } };
-      }),
+      setHidden((prev) => update(prev, fig, (h) => ({ ...h, models: flip(h.models, id) }))),
     [],
   );
   const toggleEffort = useCallback(
     (fig: string, e: Effort) =>
-      setHidden((prev) => {
-        const h = prev[fig] ?? NONE;
-        return { ...prev, [fig]: { ...h, efforts: flip(h.efforts, e, EFFORTS.length) } };
-      }),
+      setHidden((prev) => update(prev, fig, (h) => ({ ...h, efforts: flip(h.efforts, e) }))),
     [],
   );
   const reset = useCallback(
