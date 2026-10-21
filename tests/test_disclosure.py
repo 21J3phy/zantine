@@ -147,7 +147,7 @@ def task_setup() -> tuple[int, str, str, int]:
     probe = make_game()
     probe.start()
     board = probe.state.ext["tasks"]
-    task = next(t for t in board.graph if not t.requires and t.assignees[0] >= GREEN)
+    task = next(t for t in board.graph if not t.requires and not t.fake and t.assignees[0] >= GREEN)
     worker = task.assignees[0]
     observer = next(s for s in range(GREEN, 10) if s != worker)
     return worker, task.id, task.room, observer
@@ -660,3 +660,17 @@ def test_a_wrong_audit_verdict_is_a_failed_task(verdict: str, failed: bool) -> N
     for m in found:
         assert (m["task"], m["room"], m["worker"]) == (audit_task.id, room, PINK)
         assert game.transcript.records[m["attempt_seq"]]["type"] == "audit.checked"
+
+
+def test_a_wrong_answer_on_a_fake_task_fails_nothing() -> None:
+    """Red (Impostor) answers its Fake Task wrong with Pink beside it: nothing is marked."""
+    probe = make_game(task_dependency_chance=0)
+    probe.start()
+    fake = next(t for t in probe.state.ext["tasks"].graph if t.fake and RED in t.assignees)
+    bots = {RED: PlaybookBot(actions={1: WorkOnTask(task=fake.id, answer="no idea")})}
+    game = make_game(bots=bots, rooms={RED: fake.room, PINK: fake.room}, task_dependency_chance=0)
+    game.play_round()
+    assert events(game, "tasks.graded") == [
+        {"seat": RED, "task": fake.id, "correct": False, "fake": True}
+    ]
+    assert [m for m in events(game, "relevance.marked") if m["kind"] == "task_failed"] == []

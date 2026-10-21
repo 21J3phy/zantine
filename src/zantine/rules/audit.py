@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from zantine.rng import GameRng
 from zantine.rules.actions import Action
 from zantine.rules.registry import GameModule, RoundContext, Rules
-from zantine.rules.tasks import GRADED, TaskBoard, route
+from zantine.rules.tasks import GRADED, TaskBoard, route, shared_task_pool
 from zantine.rules.tasks import NAME as TASKS
 from zantine.tasks import Task, task_kind
 from zantine.tasks.audit import (
@@ -188,7 +188,8 @@ class AuditModule(GameModule):
         if tb is None or game.config.audit_tasks == 0:
             return
         rng = game.rng.fork(NAME)
-        crew = [p.seat for p in state.living() if not p.is_impostor]
+        # Crewmates, or every Seat under Sabotage (an Impostor may audit falsely).
+        crew = [s for s in shared_task_pool(game) if state.player(s).alive]
         rooms = [r for r in state.map.rooms if r != state.map.meeting_room] or list(state.map.rooms)
         targets = [t for t in tb.graph if _auditable(t)]
         n = min(game.config.audit_tasks, len(targets), len(TASK_ID_RANGE) - len(tb.graph))
@@ -426,7 +427,8 @@ def _reading(tb: TaskBoard, sub: Submission) -> dict[str, Any]:
 
 def _auditable(task: Task) -> bool:
     kind = task_kind(task.kind)
-    if task.fake or not kind.auditable:
+    # Fake Tasks can be audited like real ones, so an audit says nothing about roles.
+    if not kind.auditable:
         return False
     items = kind.audit_items(task.content.answer)
     return items is not None and len(items) >= 2

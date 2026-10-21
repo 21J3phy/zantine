@@ -11,11 +11,12 @@ Marking rules (engine side):
   end-of-Round ``room_snapshot`` lists a body and that player, or it saw the
   player make the kill (``kill_witnessed``; the killer stands at the body).
 - ``task_failed``: an attempt at a Task failed this Round (a wrong
-  ``tasks.graded`` answer or relay delivery, or a wrong ``audit.checked``
-  verdict), and one of the Seat's two snapshots of this Round (``start``: its
-  last snapshot before the Round; ``end``: its end-of-Round snapshot) shows it,
-  with the player, in the room where the worker made the attempt. The worker
-  counts, both as a subject and as an observer.
+  ``tasks.graded`` answer, relay delivery or split-key entry, or a wrong
+  ``audit.checked`` verdict; never a Fake Task), and one of the Seat's two
+  snapshots of this Round (``start``: its last snapshot before the Round;
+  ``end``: its end-of-Round snapshot) shows it, with the player, in the room
+  where the worker made the attempt. The worker counts, both as a subject and
+  as an observer.
 
 The third kind, seeing a player somewhere that contradicts that player's
 **Claim**, depends on what was said, so it is computed after the game from the
@@ -40,8 +41,9 @@ if TYPE_CHECKING:
 NAME = "relevance"
 # After the core room snapshots (1000), which this step reads.
 ORDER = 1100
-# Graded attempts at a Task: ``tasks.graded`` (solo steps, relay deliveries) and an
-# Audit's verdict (``audit.checked``); ``correct`` false is a failed Task.
+# Graded attempts at a Task: ``tasks.graded`` (solo steps, relay deliveries, split-key
+# entries) and an Audit's verdict (``audit.checked``); ``correct`` false on a real
+# (not Fake) Task is a failed Task, Sabotage included.
 FAILURE_EVENTS = ("tasks.graded", "audit.checked")
 
 
@@ -111,9 +113,14 @@ def _this_round(game: Game, rnd: int) -> _Seen:
             continue
         elif kind == "observation" and type == "kill_witnessed":
             seen.witnessed.setdefault(r["seat"], []).insert(0, r)
-        elif kind == "event" and type in FAILURE_EVENTS and not r["data"]["correct"]:
+        elif kind == "event" and type in FAILURE_EVENTS and _failed(r["data"]):
             seen.failures.insert(0, r)
     return seen
+
+
+def _failed(data: dict[str, Any]) -> bool:
+    # A Fake Task never counts for anything, so getting one wrong fails nothing.
+    return not data["correct"] and not data.get("fake", False)
 
 
 def _worker(attempt: dict[str, Any]) -> int:
