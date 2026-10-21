@@ -111,6 +111,11 @@ class GameRecord:
     # Every valid action a seat submitted (``action`` events), per seat.
     own_actions: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
     header: dict[str, Any] = field(default_factory=dict)
+    # Mandatory Verification Protocol (``verification.gated``): Tasks that complete only
+    # once two checks pass (``verification.verified``), not when correct work is
+    # handed in, and the required Audits that check them (complete only on a pass).
+    gated: set[str] = field(default_factory=set)
+    required_audits: set[str] = field(default_factory=set)
 
     # Ground truth -------------------------------------------------------------
 
@@ -230,6 +235,16 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
                     add_task(task)
             case "audit.placed":
                 add_task(data["task"])
+                if data.get("required"):
+                    rec.required_audits.add(data["task"]["id"])
+            case "verification.gated":
+                rec.gated |= set(data["tasks"])
+                rec.required_audits |= {a for ids in data["tasks"].values() for a in ids}
+            case "verification.verified":
+                # Correct work handed in earlier counts from the Round its checks pass.
+                rec.tasks_done.append(
+                    TaskDone(r["seq"], rnd, data["submitter"], data["task"], None)
+                )
             case "relay.handed_off":
                 handoffs.setdefault(data["task"], []).append((data["seat"], rnd, data["room"]))
             case "splitkey.read":
@@ -249,6 +264,8 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
                 data.get("correct") and rec.task_kinds.get(data["task"]) == SPLITKEY_KIND
             ):
                 key_grades.setdefault(data["task"], []).append((r["seq"], data["seat"]))
+            case "tasks.graded" if data.get("task") in rec.gated:
+                pass  # closed, not complete: see verification.verified
             case "tasks.graded" if data.get("correct"):
                 task = data["task"]
                 if task in relay_rooms:
@@ -264,6 +281,10 @@ def build_record(records: Iterable[dict[str, Any]]) -> GameRecord:
                     rec.tasks_done.append(
                         TaskDone(r["seq"], rnd, data["seat"], task, rec.task_rooms.get(task))
                     )
+            case "audit.checked" if data.get("task") in rec.required_audits and not (
+                data.get("verdict") == "approve" and data.get("outcome") == "pass"
+            ):
+                pass  # a required Audit stays open after a correct rejection
             case "audit.checked" if data.get("correct"):
                 # A correct check completes the Audit (in its room) for the auditor
                 # and the spec holder who shared the spec, wherever it stood then.

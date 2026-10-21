@@ -244,9 +244,9 @@ NOT_COMPARED = frozenset({"verification", "relevance"})
 # Rule modules that change nothing when their setting is 0, so a header listing them
 # switched off means the same as one from before they existed.
 NEUTRAL_AT_ZERO = {
-    "relay": "relay_tasks",
-    "splitkey": "splitkey_tasks",
-    "chat": "room_chat_budget_chars",
+    "relay": lambda c: c.get("relay_tasks") == 0,
+    "splitkey": lambda c: c.get("splitkey_tasks") == 0,
+    "chat": lambda c: not any(c["seat_room_chat_budgets"]),
 }
 
 
@@ -254,17 +254,26 @@ def effective_conditions(
     config: dict[str, Any], modules: Sequence[str] | None = None
 ) -> dict[str, Any]:
     """How a game was played, apart from its design and protocol: its header config
-    with historical defaults filled in and derived settings made explicit (each
-    Seat's actual Talk Budget, whether it came from talk_budget_chars or a per-Seat
-    override), and, given the header's ``modules``, the rule modules in play (e.g.
-    Sabotage gives Impostors Fake Tasks and Sabotage actions)."""
+    with historical defaults filled in and derived settings made explicit: each
+    Seat's actual Meeting Talk Budget (whether from talk_budget_chars or a per-Seat
+    override) and actual Room Chat budget (``GameConfig.room_chat_budget``: the
+    Meeting budget scaled by room_chat_budget_chars / talk_budget_chars, rounded
+    down), so equivalent encodings compare equal and different budgets do not; and,
+    given the header's ``modules``, the rule modules in play (e.g. Sabotage gives
+    Impostors Fake Tasks and Sabotage actions)."""
     c = {**HISTORICAL_DEFAULTS, **config}
     budgets = c.pop("talk_budgets")
     chars = c.pop("talk_budget_chars", None)
     seats = c.get("num_seats")
     if budgets is None and (chars is None or seats is None):
         raise ValueError("a transcript header has no Talk Budget settings")
-    c["seat_talk_budgets"] = list(budgets) if budgets is not None else [chars] * seats
+    talk = list(budgets) if budgets is not None else [chars] * seats
+    c["seat_talk_budgets"] = talk
+    room_chat = c.pop("room_chat_budget_chars")
+    if room_chat and not chars:
+        raise ValueError("a transcript header has Room Chat but no talk_budget_chars")
+    # As the engine computes it (integer division), whatever the encoding.
+    c["seat_room_chat_budgets"] = [b * room_chat // chars if room_chat else 0 for b in talk]
     if c.get("splitkey_tasks") == 0:
         # A game with no split-key Tasks plays the same whatever their window.
         c.pop("splitkey_window", None)
@@ -272,8 +281,7 @@ def effective_conditions(
         c["modules"] = sorted(
             m
             for m in modules
-            if m not in NOT_COMPARED
-            and not (m in NEUTRAL_AT_ZERO and c.get(NEUTRAL_AT_ZERO[m]) == 0)
+            if m not in NOT_COMPARED and not (m in NEUTRAL_AT_ZERO and NEUTRAL_AT_ZERO[m](c))
         )
     return {k: v for k, v in c.items() if k not in DESIGN_KEYS}
 

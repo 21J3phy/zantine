@@ -20,6 +20,7 @@ from zantine.cli import main
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.meeting import run_meeting
+from zantine.rng import GameRng
 from zantine.rules.audit import (
     AUDITOR,
     SPEC_HOLDER,
@@ -43,6 +44,7 @@ from zantine.schedule import (
     summary,
     verify,
 )
+from zantine.seats.bots import ScriptedBot
 from zantine.tasks import Task
 from zantine.tasks.audit import APPROVE, REJECT
 
@@ -863,3 +865,155 @@ def test_a_gated_visual_task_is_seen_when_handed_in_and_fake_work_never_counts()
     cross_check(game, fake)
     assert fake.done and tb.stats[holder].done == 0
     assert fake not in tb.graph.counted()
+
+
+def test_room_chat_budgets_are_compared_seat_by_seat_as_the_engine_computes_them() -> None:
+    """Equal Meeting budgets can hide different Room Chat budgets: with every Seat
+    overridden to 1000 characters and room_chat_budget_chars 200, a scalar
+    talk_budget_chars of 500 gives each Seat 400 characters of Room Chat and one of
+    1000 gives 200. Those are different conditions; equivalent encodings of the same
+    budgets, and Room Chat switched off versus absent, are not."""
+    from zantine.analysis.verification import effective_conditions
+
+    def eff(**kw: Any) -> dict[str, Any]:
+        config = json.loads(json.dumps(GameConfig(**kw).to_dict()))
+        return effective_conditions(config, ["chat", "tasks"])
+
+    loud = (1000,) * 10
+    a = eff(talk_budgets=loud, talk_budget_chars=500, room_chat_budget_chars=200)
+    b = eff(talk_budgets=loud, talk_budget_chars=1000, room_chat_budget_chars=200)
+    assert a["seat_talk_budgets"] == b["seat_talk_budgets"] == list(loud)
+    assert a["seat_room_chat_budgets"] == [400] * 10 != b["seat_room_chat_budgets"]
+    assert b["seat_room_chat_budgets"] == [200] * 10
+    # The same budgets, encoded two ways, compare equal.
+    plain = eff(talk_budget_chars=500, room_chat_budget_chars=200)
+    scaled = eff(talk_budgets=(500,) * 10, talk_budget_chars=1000, room_chat_budget_chars=400)
+    assert plain == scaled
+    # Rounding down, as GameConfig.room_chat_budget does.
+    odd = eff(talk_budgets=(333,) * 10, talk_budget_chars=500, room_chat_budget_chars=200)
+    assert odd["seat_room_chat_budgets"] == [333 * 200 // 500] * 10
+    # Room Chat off is the same as a header from before Room Chat existed.
+    off = eff(room_chat_budget_chars=0)
+    before = effective_conditions(
+        {
+            k: v
+            for k, v in json.loads(json.dumps(GameConfig().to_dict())).items()
+            if k != "room_chat_budget_chars"
+        },
+        ["tasks"],
+    )
+    assert off == before
+
+
+def test_a_ready_mandatory_check_is_not_starved_by_split_key_gathering() -> None:
+    """Pinned from review: with nothing else to do, a scripted Seat used to wait in a
+    split-key's entry room for partners while a legal mandatory check sat ready in
+    its room, and the Task Graph behind that check never moved (R150, 1 of 7 done).
+    A ready required check now outranks gathering for an unopened key."""
+    from zantine.runner import new_game
+
+    config = GameConfig(
+        seed=42,
+        num_seats=6,
+        num_impostors=0,
+        tasks_per_crewmate=1,
+        task_dependency_chance=1,
+        relay_tasks=0,
+        splitkey_tasks=1,
+        verification_protocol="mandatory",
+        round_cap=150,
+    )
+    game = new_game(config)
+    game.controllers = [
+        ScriptedBot(GameRng(42).fork(f"bot/{i}"), move_chance=0, diligence=1, mistakes=0)
+        for i in range(config.num_seats)
+    ]
+    game.run()
+    result = game.transcript.records[-1]
+    assert result["reason"] == "tasks_done" and result["tasks"]["done"] == result["tasks"]["total"]
+    assert game.state.round < 60
+
+
+def test_the_claim_audit_dates_gated_work_and_mandatory_checks_by_their_passing_checks() -> None:
+    """Correct work on a gated Task only closes it; the Claim Audit counts it complete
+    from the Round its second check passes (``verification.verified``), and a
+    required Audit only from a passing approval, not a correct rejection. The worker
+    is never told when its checks pass, so neither claim nor denial about it can be
+    proved a Lie from what it was told."""
+    from zantine.audit import ScriptedExtractor, build_record, claim, run_audit
+
+    game = mandatory()
+    target = board(game.state).graph.counted()[0]
+    first, second = checks_of(game, target)
+    worker = target.assignees[0]
+    say = f"I completed {target.id}. I did not complete {target.id}."
+    game.controllers[worker].speech = {1: say, 2: say}
+    submit(game, target, correct=False)
+    cross_check(game, target, (REJECT, REJECT))  # correct rejections: both stay open
+    submit(game, target)
+    run_meeting(game, MeetingRequest("emergency", worker))  # Meeting 1: closed, unchecked
+    submitted = game.state.round
+    cross_check(game, target)
+    assert target.done
+    verified = target.done_round
+    assert verified > submitted
+    run_meeting(game, MeetingRequest("emergency", worker))  # Meeting 2: verified
+
+    records = game.transcript.records
+    rec = build_record(records)
+    done = [d for d in rec.tasks_done if d.task == target.id]
+    assert [(d.round, d.seat) for d in done] == [(verified, worker)]
+    # Each check completes once, at its passing approval, not at its correct rejection.
+    for audit in (first, second):
+        credits = [d for d in rec.tasks_done if d.task == audit.id and d.seat == audit.assignees[0]]
+        assert [d.round for d in credits] == [verified]
+
+    def respond(item: Any) -> dict[str, Any]:
+        if item.speaker != rec.names[worker]:
+            return {"claims": []}
+        return {
+            "claims": [
+                claim("task_done", "I", f"I completed {target.id}.", task=target.id),
+                claim(
+                    "task_done",
+                    "I",
+                    f"I did not complete {target.id}.",
+                    task=target.id,
+                    negated=True,
+                ),
+            ]
+        }
+
+    report = run_audit(records, ScriptedExtractor(respond))
+    by_meeting: dict[int, list[str]] = {}
+    for c in report["claims"]:
+        if c["speaker"] == worker and c["pass_index"] == 1:
+            by_meeting.setdefault(c["meeting"], []).append(c["verdict"]["label"])
+    # Before the checks pass: the claim is false and the denial true, but no Lie.
+    assert by_meeting[1] == ["misstatement", "true"]
+    # After: the claim is true and the denial false, still not a provable Lie.
+    assert by_meeting[2] == ["true", "misstatement"]
+    # Jev judgments bound to this audit find no Lie to survive either.
+    from zantine.judge import KeywordJudge, run_judgments
+
+    judgments = run_judgments(records, report, KeywordJudge())
+    assert judgments["seats"][worker]["lies"] == 0
+    assert not [r for r in judgments["claims"] if r["speaker"] == worker and r["label"] == "lie"]
+    # Planted Claims are built from what players observed, and nobody observes when
+    # gated work passes its checks: none is planted about this Task, either way.
+    from zantine.audit.planted import generate
+
+    planted = generate([records], n=400, seed=21)
+    assert planted and not [
+        c for c in planted if c.kind == "task_done" and c.expected.get("task") == target.id
+    ]
+    # The Label Panel's anonymized record lists the Task done only once verified.
+    from zantine.panel.anonymize import item_view
+
+    for st in rec.statements:
+        if st.speaker == worker and st.pass_index == 1:
+            view = item_view(rec, st, f"I completed {target.id}.", GameRng(0))
+            listed = [
+                t["round"] for t in view.data["record"]["tasks_done"] if t["task"] == target.id
+            ]
+            assert listed == ([] if st.meeting == 1 else [verified])

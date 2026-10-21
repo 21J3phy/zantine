@@ -187,11 +187,15 @@ class ScriptedBot(SeatController):
             if relay["status"] == "holding" or self.rng.random() < self.diligence:
                 return Move(to=_path(relay)[0])
             return Wait()
-        key = self._splitkey_action(ctx, gather=not tasks)
-        if key is not None:
-            return key
         checks = [a for a in audits if a["duty"] == "auditor" and a["spec_received"]]
         checks = [a for a in checks if a["reading"] and not _settled(a)]
+        # A ready mandatory check outranks gathering for a split-key nobody has opened
+        # yet (other players' work waits on the check); a key already in progress,
+        # or racing its deadline, still comes first.
+        ready_required = any(a.get("required") for a in checks)
+        key = self._splitkey_action(ctx, gather=not tasks and not ready_required)
+        if key is not None:
+            return key
         waits = [
             a
             for a in audits
