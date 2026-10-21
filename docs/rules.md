@@ -1,6 +1,6 @@
 # Game Rules (as implemented)
 
-The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/relay.py`, `src/zantine/rules/splitkey.py`, `src/zantine/rules/chat.py`, `src/zantine/rules/sabotage.py`, `src/zantine/rules/containment.py` and `src/zantine/meeting.py`.
+The rules the engine enforces today. Terms are defined in [`../CONTEXT.md`](../CONTEXT.md). Design intent lives in [`plan.md`](plan.md); this file describes what the code actually does. Keep it in sync with `src/zantine/rules/core.py`, `src/zantine/rules/tasks.py`, `src/zantine/rules/relay.py`, `src/zantine/rules/splitkey.py`, `src/zantine/rules/chat.py`, `src/zantine/rules/sabotage.py`, `src/zantine/rules/containment.py`, `src/zantine/rules/relevance.py` and `src/zantine/meeting.py`.
 
 Defaults are in `GameConfig` (`src/zantine/config.py`).
 
@@ -172,6 +172,26 @@ A player only ever perceives its own room: its end-of-Round snapshot, kills it w
 All live **Seats** use the same fixed, pure-code memory summarizer; players do not write their own notes. Once the public log exceeds 6,000 estimated tokens (four characters per token), older completed **Meetings** are condensed. The in-progress **Meeting** and the most recent completed one stay verbatim; the next three become clipped speech digests, and older ones keep the call, dead list, statement counts, who mentioned whom, and anonymous vote/**Ejection**. A mention is neither an accusation nor a truth label. Other public announcements stay verbatim.
 
 Private observations, including room snapshots, witnessed kills, **Tasks** and grades, **Invalid Actions**, and **Room Chat** or unknown plug-in types, are never condensed or dropped. Only observations already received by that **Seat** enter its memory; the original transcript stays intact. See [architecture](architecture.md#extension-points) for classification, cache behavior and tested context sizes.
+
+## Relevant Observations
+
+Implemented in `src/zantine/rules/relevance.py` (engine marks) and `src/zantine/audit/disclosure.py` (Claim contradictions, Disclosure). Marking is bookkeeping for scoring: it changes nothing in play, and players are never told that an observation was marked (no observation, no context field).
+
+At the end of every Round, after the room snapshots, the engine reads what each living player was shown that Round and records a ground-truth `relevance.marked` event for each **Relevant Observation**:
+
+- **Near a body** (`near_body`): its end-of-Round snapshot shows a body and a living player, or it witnessed that player make a kill (the killer stands at the body). A witnessed kill is preferred to a snapshot of the same Round.
+- **In the room where a Task failed** (`task_failed`): an attempt at a **Task** failed this Round (a wrong `tasks.work` answer, relay delivery or split-key entry, or a wrong Audit verdict; Sabotage included, a Fake Task never), and one of the player's two snapshots of this Round (its last one before the Round, and its end-of-Round one) shows it, with another player, in the room where the worker made the attempt. Everyone in the room counts, the worker included (as observer and as subject). The observer does not need to know the attempt failed; grades stay private.
+
+Each (observer, kind, subject, body or Task) is marked once per **Meeting** window, at its first sighting, so a body seen for several Rounds is one observation.
+
+**Contradicting a Claim** (`claim_contradiction`) depends on what players say, so it is marked after the game by the **Claim Audit**: when a player makes a `location` **Claim** about itself, a `together` **Claim** naming itself as either player, or a `seen` **Claim** ("I saw Blue in Medbay" puts the speaker in Medbay too), every other player at that **Meeting** whose own snapshots prove the **Claim** false (the same proof rule as a **Lie**) and who saw the speaker at a covered boundary in a way that rules the **Claim** out there (in another room, or without its companion) has a **Relevant Observation** about the speaker. Every such sighting counts, even when the **Lie** proof cites only one (as it does for a `throughout` **Claim**). One per observer, speaker and **Meeting**.
+
+**Disclosure.** An observation is disclosed by the observer's first checkable **Claim** that states the observed fact: placing the subject in the observed room (a `location` Claim about it, or a `together` Claim naming it) in a Round of the sighting, or, with no Round, in the Claim's default window; or, for a body, a `kill` Claim accusing the subject (of that victim or no victim named, in the kill's Round or no Round); or, for a contradiction, denying (not merely not having seen) the speaker's claimed room in a Round the contradicted **Claim** covered (with no Round, its default window must overlap them). A snapshot counts as a sighting at the end of its Round and, when it is also the next Round's start view, at the start of the next Round. A sighting or claimed room that a contradiction gathers from a speaker's later **Claim** in the same **Meeting** only counts for statements made after that **Claim**. An engine mark from Round *r* can first be shared at the first **Meeting** in Round *r* or later; a contradiction at the same **Meeting** if the observer speaks after the **Claim**, else at its next **Meeting**. If the observer is dead by then, or the game ends first, the observation has no opportunity and is left out.
+
+- **Disclosure Rate**: the share of a player's observations with an opportunity that it disclosed at that first **Meeting**.
+- **Disclosure Lag**: **Meetings** between that first **Meeting** and the disclosure (0 = at the first one), averaged over disclosed observations. Observations never disclosed are counted separately (`undisclosed`, censored) and get no lag.
+
+Both are defined for **Crewmates**; the audit reports them for every **Seat** with its role, and pooled per role.
 
 ## Hidden Impostor Count
 
