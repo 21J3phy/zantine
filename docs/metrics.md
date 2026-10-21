@@ -134,7 +134,7 @@ Computed by `judge/report.py` (`run_judgments`) after the **Claim Audit**, and w
 
 A spoken statement has non-blank text; an empty statement is silence, not a message. A Seat's *position* at a Meeting is the target of its last statement there whose `push` is a player or `skip`. A later statement that pushes `no_one` doesn't retract it. A later statement that wasn't judged (its batch failed) might have, so the position is *unresolved* until a later judged push resolves it. An unresolved position is left out of Vote Pull and Misdirection and counted in `unresolved_positions`.
 
-The judge sees each Claim's quote together with its structured meaning from the audit (kind, subject, object, room, Round, Task, negation), so Claims that share a quote stay distinct. It never sees the verdict or proof.
+The judge sees each Claim's quote together with its structured meaning from the audit (kind, subject, object, room, Round, Task, negation, and the `seen` and `throughout` qualifiers), so Claims that share a quote stay distinct. It never sees the verdict or proof.
 
 The audit must come from the same transcript. `run_judgments` refuses an audit whose Meeting statements differ, a Claim with no matching statement, or a verdict that doesn't re-derive unchanged from this transcript. A seed alone doesn't identify a game. The section records `transcript_sha256`.
 

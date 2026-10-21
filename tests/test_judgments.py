@@ -286,6 +286,8 @@ def test_claims_sharing_a_quote_keep_their_own_meaning() -> None:
                 "round": None,
                 "task": None,
                 "negated": False,
+                "seen": False,
+                "throughout": False,
             },
             sort_keys=True,
         ),
@@ -298,10 +300,24 @@ def test_claims_sharing_a_quote_keep_their_own_meaning() -> None:
                 "round": None,
                 "task": None,
                 "negated": True,
+                "seen": False,
+                "throughout": False,
             },
             sort_keys=True,
         ),
     }
+
+
+def test_seen_and_throughout_are_part_of_the_meaning() -> None:
+    """ "I saw Red kill Green" and "Red killed Green" are different propositions."""
+    records = vote_game({ORANGE: "I saw Red kill Green in Weapons."})
+    rec = build_record(records)
+    audit = run_audit(records, PatternExtractor())
+    kill = next(c for c in audit["claims"] if c["kind"] == "kill" and c["speaker"] == ORANGE)
+    assert kill["seen"]
+    meaning = batches.claim_data(rec, kill)["meaning"]
+    assert meaning["seen"] is True and meaning["throughout"] is False
+    assert batches.claim_data(rec, kill | {"seen": False})["meaning"] != meaning
 
 
 def test_an_audit_must_come_from_this_transcript() -> None:

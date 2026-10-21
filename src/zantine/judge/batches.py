@@ -30,7 +30,7 @@ from typing import Any
 from zantine.audit.record import GameRecord, StatementRecord
 from zantine.judge.questions import CHOICE, NOUL, Batch, Question
 
-PROMPT_VERSION = "judgments-2"
+PROMPT_VERSION = "judgments-3"
 # Split a batch above this many questions (each question adds input tokens).
 MAX_QUESTIONS = 64
 SKIP, NO_ONE = "skip", "no_one"
@@ -90,6 +90,10 @@ def cid(index: int) -> str:
 def claim_data(rec: GameRecord, c: dict[str, Any]) -> dict[str, Any]:
     """What a Claim says, as the audit structured it, so Claims sharing a quote stay distinct.
 
+    ``seen`` (the speaker says it witnessed this) and ``throughout`` (over the
+    whole window) are part of the proposition: a later "you couldn't have seen
+    that" challenges a ``seen`` Claim, not the bare fact.
+
     Public fields only: never the verdict, its evidence or its proof.
     """
 
@@ -106,6 +110,9 @@ def claim_data(rec: GameRecord, c: dict[str, Any]) -> dict[str, Any]:
             "round": c["claimed_round"],
             "task": c["task"],
             "negated": c["negated"],
+            # Qualifiers that change the proposition (Claim schema 2).
+            "seen": c.get("seen", False),
+            "throughout": c.get("throughout", False),
         },
     }
 
