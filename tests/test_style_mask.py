@@ -1146,3 +1146,33 @@ def test_a_held_uncertain_call_is_charged_once_and_torn_lines_keep_the_reservati
     lines = path.read_text().splitlines()
     path.write_text("\n".join(lines[:-1]) + "\n" + lines[-1][: len(lines[-1]) // 2])
     assert spent_usd(run_dir) == pytest.approx(worst)
+
+
+# Room Chat ------------------------------------------------------------------------------
+
+
+def test_room_chat_is_masked_like_meeting_speech() -> None:
+    no_tasks = {"tasks_per_crewmate": 0, "relay_tasks": 0, "splitkey_tasks": 0, "audit_tasks": 0}
+    bots = {seat: PlaybookBot() for seat in range(10)}
+    bots[2] = PlaybookBot(chat={1: "**MEET ME HERE!!!** \U0001f6a8"})
+    bots[3] = PlaybookBot(chat={1: "Go to Storage, then Electrical."})
+    flip = ScriptedMasker(
+        lambda it, p: neutralize(it.text).replace(
+            "Storage, then Electrical", "Electrical, then Storage"
+        )
+    )
+    game = make_game(bots=bots, style_mask=True, round_cap=1, **no_tasks)
+    game.style_mask = StyleMask(flip, MeaningCheck(PatternExtractor(), MaskKeywordJudge()))
+    game.play_round()
+    msgs = {e["speaker"]: e for e in events(game, "chat.message")}
+    assert msgs[2]["text"] == "Meet me here." and msgs[2]["original"].startswith("**MEET")
+    assert (msgs[2]["mask"], msgs[2]["masker"]) == ("rewritten", "scripted")
+    # A reversed instruction falls back; listeners hear the original order.
+    assert (msgs[3]["text"], msgs[3]["mask"]) == ("Go to Storage, then Electrical.", "neutralized")
+    for listener in msgs[2]["listeners"]:
+        heard = [o.data["text"] for o in game.observations_of(listener) if o.type == "chat.message"]
+        assert heard == ["Meet me here.", "Go to Storage, then Electrical."]
+    checks = events(game, "style_mask.check")
+    assert {c["channel"] for c in checks} == {"room_chat"} and all("room" in c for c in checks)
+    # The later message was checked against the earlier one, as its listeners heard it.
+    assert game.style_mask.masker.calls[-1][0].earlier[-1][1] == "Meet me here."

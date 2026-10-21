@@ -3,7 +3,8 @@
 ``zantine stylemask eval <transcripts or dirs>`` trains a character n-gram
 classifier (multinomial Naive Bayes, 2- to 4-grams, Laplace smoothing, equal
 class priors; pure Python) to predict which Model wrote each Meeting message,
-once on the ``original`` text and once on the masked ``text`` players saw.
+(Meeting statements and Room Chat), once on the ``original`` text and once
+on the masked ``text`` players saw.
 
 - Labels: the Seat's ``controller`` in the transcript header (the live
   ``model`` id, else the controller ``kind``). A transcript without a Style
@@ -67,14 +68,14 @@ def label_of(controller: dict[str, Any]) -> str:
 
 
 def samples(records: Sequence[dict[str, Any]], game: str) -> list[Sample]:
-    """One ``Sample`` per spoken Meeting statement of one transcript."""
+    """One ``Sample`` per spoken Meeting statement or delivered Room Chat message."""
     header = next(r for r in records if r["kind"] == "header")
     labels = {s["seat"]: label_of(s.get("controller") or {}) for s in header["seats"]}
     names = [s["name"] for s in header["seats"]]
     rooms = list(header.get("map", {}).get("rooms", []))
     out = []
     for r in records:
-        if r["kind"] != "event" or r["type"] != "statement":
+        if r["kind"] != "event" or r["type"] not in ("statement", "chat.message"):
             continue
         d = r["data"]
         original = d.get("original", d["text"])

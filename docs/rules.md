@@ -192,7 +192,7 @@ A **Meeting** starts after the Round's resolution if one was requested and the g
 
 ## Style Mask
 
-An optional per-run condition (`GameConfig.style_mask`, `zantine play --style-mask MASKER`), off by default. With it on, every public message is rewritten in a plain, neutral style before anyone hears it, so players can't tell from the writing which **Model** is speaking (**Hidden Identity**). Today that is every **Meeting** statement; Room Chat will use the same step when it lands.
+An optional per-run condition (`GameConfig.style_mask`, `zantine play --style-mask MASKER`), off by default. With it on, every public message is rewritten in a plain, neutral style before anyone hears it, so players can't tell from the writing which **Model** is speaking (**Hidden Identity**). That is every **Meeting** statement and every **Room Chat** message (Room Chat is cut to its own **Talk Budget** first; `chat.message` events record `original`, `masker` and `mask` the same way).
 
 1. The statement is cut to the **Talk Budget** first, then rewritten by the masker: a fixed, pinned open-weight model (`stylemask/maskers.toml`) in live runs, or the rule-based `neutralize` in dry runs and tests.
 2. **Meaning check:** the original and the rewrite are each read on their own and must agree on everything checked. The rewrite must also be non-empty and fit the speaker's **Talk Budget**.
