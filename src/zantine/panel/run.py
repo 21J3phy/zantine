@@ -292,23 +292,18 @@ def majority(values: Iterable[Any]) -> Any:
 
 
 def canonical_push(unit: Sequence[Any]) -> list[Any]:
-    """One item's push labels with player tokens renamed by first appearance in judge order.
+    """One item's push labels with player tokens renamed by how many judges named them.
 
-    ``skip`` and ``no_one`` keep their meaning; the first player any judge names
-    becomes ``player_1``, the next distinct one ``player_2``, and so on. Agreement
-    within the item is unchanged, and any consistent renaming of the item's tokens
-    gives the same result, so alpha no longer pools display tokens across items.
+    ``skip`` and ``no_one`` keep their meaning. The player most judges named
+    becomes ``player_1``, the next ``player_2``, and so on. Nominal alpha depends
+    only on each item's multiset of values, and that multiset is the same under
+    any renaming of the item's tokens and any order of the judges (tied players
+    have equal counts, so which tied player gets which name doesn't matter).
     """
-    seen: dict[Any, str] = {}
-    out: list[Any] = []
-    for v in unit:
-        if v is None or v in (SKIP, NO_ONE):
-            out.append(v)
-            continue
-        if v not in seen:
-            seen[v] = f"player_{len(seen) + 1}"
-        out.append(seen[v])
-    return out
+    counts = Counter(v for v in unit if v is not None and v not in (SKIP, NO_ONE))
+    ranked = sorted(counts, key=lambda v: (-counts[v], str(v)))
+    names = {v: f"player_{k + 1}" for k, v in enumerate(ranked)}
+    return [names.get(v, v) for v in unit]
 
 
 def report(labels: Mapping[str, Any], *, seed: int | None = None) -> dict[str, Any]:

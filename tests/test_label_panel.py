@@ -4,6 +4,7 @@ stratification, the label/report pipeline, the live gate and the CLI. No network
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 import re
 from pathlib import Path
@@ -1027,3 +1028,67 @@ def test_task_inventory_separates_unknown_from_unfinished_tasks() -> None:
     assert "T20" not in {t["task"] for t in views[1].data["record"]["tasks_done"]}
     # The inventory has no assignments: no player appears in it.
     assert all(set(t) == {"task", "room"} for t in views[0].data["record"]["tasks"])
+
+
+# Review round 2 (Astra) regressions ---------------------------------------------------------
+
+
+def test_judgments_of_a_re_extracted_claim_are_refused() -> None:
+    """Same transcript, ids, speakers and verdicts; different extracted meanings."""
+    from zantine.audit import ScriptedExtractor, claim
+
+    text = "I was in Weapons. Maybe I was not in Medbay."
+    records = game({RED: text})
+    weapons = claim("location", "Red", text, room="Weapons")
+    medbay = claim("location", "Red", text, room="Medbay", negated=True)
+
+    def audit_of(order: list[dict[str, Any]]) -> dict[str, Any]:
+        audit = run_audit(records, ScriptedExtractor({text: {"claims": order}}))
+        audit["judgments"] = run_judgments(records, audit, KeywordJudge())
+        return audit
+
+    first, second = audit_of([weapons, medbay]), audit_of([medbay, weapons])
+    a, b = first["claims"], second["claims"]
+    assert [c["id"] for c in a] == [c["id"] for c in b]
+    assert [c["verdict"]["label"] for c in a] == [c["verdict"]["label"] for c in b]
+    assert [c["speaker"] for c in a] == [c["speaker"] for c in b]
+    assert candidates(records, first) and candidates(records, second)  # unchanged: accepted
+
+    stale = copy.deepcopy(second)
+    stale["judgments"] = first["judgments"]
+    with pytest.raises(ValueError, match="don't match the audit's Claim"):
+        candidates(records, stale)
+
+    unbound = copy.deepcopy(first)
+    for row in unbound["judgments"]["claims"]:
+        row.pop("claim_sha256")
+    with pytest.raises(ValueError, match="don't match the audit's Claim"):
+        candidates(records, unbound)
+
+
+def test_push_agreement_ignores_judge_order() -> None:
+    units = [
+        ["P1", "P1", "P1"],
+        ["P1", "P2", "P2"],
+        *[["skip", "skip", "skip"]] * 5,
+        ["no_one", "no_one", "no_one"],
+        *[["P1", "P1", "skip"]] * 2,
+    ]
+    pipeline = [majority(u) for u in units]
+    labels = _labels_file(units, pipeline)
+    forward = report(labels)
+    backward = copy.deepcopy(labels)
+    backward["judges"] = backward["judges"][::-1]
+    assert report(backward)["labels"]["push"] == forward["labels"]["push"]
+    assert report(backward)["revise"] == forward["revise"]
+    # Every judge order, and token renaming on top, gives the same statistics.
+    for order in itertools.permutations(labels["judges"]):
+        shuffled = copy.deepcopy(labels)
+        shuffled["judges"] = list(order)
+        for k, item in enumerate(shuffled["items"]):
+            if k % 3 == 0:
+                for lab in item["labels"].values():
+                    lab["push"] = {"P1": "P2", "P2": "P1"}.get(lab["push"], lab["push"])
+                p = item["pipeline"]["push"]
+                item["pipeline"]["push"] = {"P1": "P2", "P2": "P1"}.get(p, p)
+        assert report(shuffled)["labels"]["push"] == forward["labels"]["push"]

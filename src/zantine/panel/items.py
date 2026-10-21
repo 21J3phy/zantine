@@ -26,6 +26,7 @@ from zantine.judge.batches import NO_ONE, SKIP
 from zantine.judge.report import (
     JUDGMENTS_SCHEMA_VERSION,
     check_audit_matches,
+    claim_fingerprint,
     transcript_digest,
 )
 from zantine.rng import GameRng
@@ -119,7 +120,11 @@ def _judgments(
     audit: Mapping[str, Any], records: Sequence[Record], rec: GameRecord
 ) -> tuple[list[Mapping[str, Any]], dict[int, Mapping[str, Any]]]:
     """The judgments' Claim rows (in audit order) and push rows, after checking they were
-    made from this transcript and this audit; refuses anything else. Empty if none."""
+    made from this transcript and this audit; refuses anything else. Empty if none.
+
+    Claim ids are positional, so each row is also bound to what was judged: its
+    ``claim_sha256`` (statement, quote and meaning) must match this audit's Claim.
+    """
     j = audit.get("judgments")
     if not j:
         return [], {}
@@ -135,8 +140,15 @@ def _judgments(
     for i, (row, c) in enumerate(zip(rows, claims, strict=True)):
         st = by_seq[c["statement_seq"]]
         own_id = c["id"].rsplit(".c", 1)[0] == f"m{st.meeting}.p{st.pass_index}.o{st.order}"
-        bound = (row.get("index"), row.get("id"), row.get("speaker"), row.get("label"))
-        if not own_id or bound != (i, c["id"], c["speaker"], c["verdict"]["label"]):
+        bound = (
+            row.get("index"),
+            row.get("id"),
+            row.get("speaker"),
+            row.get("label"),
+            row.get("claim_sha256"),
+        )
+        want = (i, c["id"], c["speaker"], c["verdict"]["label"], claim_fingerprint(rec, c))
+        if not own_id or bound != want:
             raise ValueError(f"judgments for Claim {c['id']!r} don't match the audit's Claim {i}")
     pushes: dict[int, Mapping[str, Any]] = {}
     for row in j.get("statements", []):
