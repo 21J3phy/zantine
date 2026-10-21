@@ -10,8 +10,11 @@ marked here: when a Seat *S* makes a positive ``location`` Claim about itself,
 a ``together`` Claim naming itself (as either player), or a ``seen`` Claim
 (which puts *S* where it says it saw something), every other Seat *O*
 at that Meeting whose own record proves the Claim false (``check_claim`` with
-*O* as the knower, the same proof rules as a **Lie**) and whose proof includes
-a snapshot in which *O* saw *S* has a Relevant Observation about *S*. One per
+*O* as the knower, the same proof rules as a **Lie**), and who saw *S* at some
+boundary the Claim covers in a way that rules it out there (*S* in another room,
+or without its companion), has a Relevant Observation about *S*. Every such
+witnessed counterexample is a sighting, not only the one the Lie proof cites
+(that proof is minimal: one boundary for a ``throughout`` Claim). One per
 (observer, speaker, Meeting), dated by the first contradicted Claim.
 
 *When it can be shared.* An engine mark from Round *r* can first be shared at
@@ -175,15 +178,12 @@ def contradiction_marks(rec: GameRecord, claims: list[dict[str, Any]]) -> list[d
         for observer in sorted(rec.names):
             if observer == speaker or not _attended(rec, observer, c["meeting"]):
                 continue
-            verdict = check_claim(dataclasses.replace(claim, speaker=observer), rec)
-            seen = [
-                snap
-                for p in verdict.proof
-                if (snap := _observation(rec, observer, p["seq"])) is not None
-                and snap["type"] == "room_snapshot"
-                and speaker in snap["data"]["players"]
-            ]
-            if not (verdict.lie and seen):
+            if not check_claim(dataclasses.replace(claim, speaker=observer), rec).lie:
+                continue
+            # The Lie proof is minimal (one boundary for ``throughout``), so the
+            # sightings are every witnessed counterexample, not just the cited one.
+            seen = _counterexamples(rec, observer, c)
+            if not seen:
                 continue
             key = (observer, speaker, c["meeting"])
             group = groups.get(key)
@@ -285,6 +285,29 @@ def _self_claim(c: dict[str, Any]) -> dict[str, Any] | None:
     return c if speaker in about_self else None
 
 
+def _counterexamples(rec: GameRecord, observer: int, c: dict[str, Any]) -> list[dict[str, Any]]:
+    """The observer's snapshots, at boundaries the self-Claim covers, that show the
+    speaker and by themselves rule the Claim out at that boundary: the speaker in
+    another room, or (``together``) without its companion."""
+    speaker = c["speaker"]
+    other = c["object"] if c["subject"] == speaker else c["subject"]
+    rounds = (
+        [c["claimed_round"]] if c["claimed_round"] is not None else rec.meeting(c["meeting"]).window
+    )
+    out: list[dict[str, Any]] = []
+    for r in rounds:
+        for b in BOUNDARIES:
+            snap = rec.snapshot(observer, r, b)
+            if snap is None or speaker not in snap["data"]["players"] or snap in out:
+                continue
+            here = snap["data"]["room"]
+            wrong_room = c["room"] is not None and here != c["room"]
+            alone = c["kind"] == "together" and other != observer
+            if wrong_room or (alone and other not in snap["data"]["players"]):
+                out.append(snap)
+    return out
+
+
 def _snapshot_rounds(rec: GameRecord, observer: int, snap: dict[str, Any]) -> list[int]:
     """Every Round a snapshot is a boundary view of: the end of its own Round, the
     start of the next Round, or both."""
@@ -325,10 +348,6 @@ def _contradiction_meeting(rec: GameRecord, observer: int, claim: dict[str, Any]
         return claim["meeting"]
     later = next((m.meeting for m in rec.meetings if m.meeting > claim["meeting"]), None)
     return later if _attended(rec, observer, later) else None
-
-
-def _observation(rec: GameRecord, seat: int, seq: int) -> dict[str, Any] | None:
-    return next((o for o in rec.observations.get(seat, []) if o["seq"] == seq), None)
 
 
 # Matching ---------------------------------------------------------------------

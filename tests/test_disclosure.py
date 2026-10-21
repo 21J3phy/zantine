@@ -572,3 +572,59 @@ def test_statement_errors_are_reported_per_seat() -> None:
     assert seat(report, ORANGE)["statement_errors"] == 3
     assert seat(report, ORANGE)["undisclosed"] == 2
     assert seat(report, PINK)["statement_errors"] == 0
+
+
+@pytest.mark.parametrize(
+    ("red_moves", "pink_moves", "red", "red_claim", "pink"),
+    [
+        # Pink's first counterexample is an absence (Cafeteria without Red); only its
+        # Round-2 end view shows Red, in Weapons.
+        (
+            {1: Move("Weapons")},
+            {2: Move("Weapons")},
+            "I was in Cafeteria throughout round 2.",
+            claim(
+                "location",
+                "I",
+                "I was in Cafeteria throughout round 2.",
+                room="Cafeteria",
+                round=2,
+                throughout=True,
+            ),
+            "Red was in Weapons in round 2.",
+        ),
+        # Several witnessed counterexamples; Pink discloses one that isn't the first.
+        (
+            {1: Move("Weapons"), 2: Move("Navigation")},
+            {1: Move("Weapons"), 2: Move("Navigation")},
+            "I was in Medbay the whole time.",
+            claim(
+                "location",
+                "I",
+                "I was in Medbay the whole time.",
+                room="Medbay",
+                throughout=True,
+            ),
+            "Red was in Navigation in round 2.",
+        ),
+    ],
+)
+def test_every_witnessed_counterexample_to_a_throughout_claim_is_a_sighting(
+    red_moves: dict[int, Action],
+    pink_moves: dict[int, Action],
+    red: str,
+    red_claim: dict[str, Any],
+    pink: str,
+) -> None:
+    bots = {
+        RED: PlaybookBot(actions=red_moves, speech={1: red}),
+        PINK: PlaybookBot(actions=pink_moves, speech={1: pink}),
+        CALLER: PlaybookBot(actions={3: CallMeeting()}),
+    }
+    game = make_game(bots=bots)
+    for _ in range(3):
+        game.play_round()
+    report = audit_with(game, {red: [red_claim]})
+    (obs,) = [o for o in report["observations"] if o["observer"] == PINK]
+    assert (obs["kind"], obs["subject"]) == ("claim_contradiction", RED)
+    assert (obs["status"], obs["lag"]) == ("disclosed", 0)
