@@ -1,8 +1,8 @@
 import type { ReactNode } from 'react';
 import { useTip } from '../components/Tooltip';
-import { LABS, MODEL_BY_ID } from '../data/models';
+import { LABS, MODEL_BY_ID, fillOf } from '../data/models';
 import { CM } from '../lib/units';
-import { AxisTitle, Legend, ModelName, Svg, Watermark, XTicks, hBarPath, localPoint, textWidth, type ChartProps } from './kit';
+import { AxisTitle, Legend, ModelName, Svg, XTicks, hBarPath, localPoint, textWidth, type ChartProps } from './kit';
 import { cmAxis, fitAxis, type AxisOptions } from './scale';
 
 export interface BarRow {
@@ -69,7 +69,6 @@ export function BarCI(p: BarCIProps) {
       {axis.ticks.map((t) => (
         <line key={t} className="grid" x1={x0 + axis.pos(t)} x2={x0 + axis.pos(t)} y1={y0} y2={y0 + rows.length * pitch * CM} />
       ))}
-      {p.simulated && <Watermark x={x0} y={y0} w={nx * CM} h={rows.length * pitch * CM} />}
       {p.refLine && (
         <g>
           <line className="refline" x1={x0 + axis.pos(p.refLine.v)} x2={x0 + axis.pos(p.refLine.v)} y1={y0 - 4} y2={y0 + rows.length * pitch * CM} />
@@ -79,21 +78,13 @@ export function BarCI(p: BarCIProps) {
         </g>
       )}
       {rows.map((r, i) => {
-        const m = MODEL_BY_ID[r.id];
-        const color = LABS[m.lab].color;
         const yc = y0 + (i + 0.5) * pitch * CM;
         const len = axis.pos(r.v) - base;
         const hiX = x0 + axis.pos(r.hi ?? r.v);
         return (
           <g key={r.id}>
             <ModelName id={r.id} x={x0 - 8} y={yc} />
-            <path
-              d={hBarPath(x0 + base, yc, len, thick)}
-              fill={color}
-              fillOpacity={m.tier === 'sibling' ? 0.3 : 1}
-              stroke={m.tier === 'sibling' ? color : 'none'}
-              strokeWidth={1.5}
-            />
+            <path d={hBarPath(x0 + base, yc, len, thick)} fill={fillOf(r.id)} />
             {r.lo !== undefined && r.hi !== undefined && (
               <g className="whisker">
                 <line x1={x0 + axis.pos(r.lo)} x2={hiX} y1={yc} y2={yc} />
@@ -285,7 +276,6 @@ export function Stacked(p: ChartProps & { label: string; rows: StackRow[]; segme
           </g>
         );
       })}
-      {p.simulated && <Watermark x={x0} y={y0} w={nx * CM} h={rows.length * pitch * CM} />}
       {showAxis && (
         <>
           <g className="tick">

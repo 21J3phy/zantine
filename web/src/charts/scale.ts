@@ -4,7 +4,7 @@ import { CM } from '../lib/units';
 // tick sits on a centimetre line, so chart gridlines coincide with the canvas
 // grid. The value per centimetre is the smallest "nice" step that fits the data.
 
-const NICE: number[] = [];
+export const NICE: number[] = [];
 for (let e = -4; e <= 6; e++) for (const m of [1, 2, 2.5, 5]) NICE.push(m * 10 ** e);
 
 export interface CmAxis {
@@ -102,6 +102,38 @@ export function cmAxis(min: number, max: number, n: number, opts: AxisOptions = 
     labelEvery,
     decimals,
   };
+}
+
+/**
+ * Steps whose every multiple the formatter shows exactly: a formatter that rounds to whole Rounds rules
+ * out 0.5 and 2.5, one that rounds to whole percent rules out 2.5%. Without this a tick at 62.5% reads "63%".
+ */
+export function exactSteps(format: (v: number) => string) {
+  const exact = (t: number) => {
+    const e = 1e-9 * Math.max(1, Math.abs(t));
+    return format(t) === format(t + e) && format(t) === format(t - e);
+  };
+  return NICE.filter((s) => [1, 2, 3, 4, 5].every((k) => exact(+(k * s).toFixed(10))));
+}
+
+/**
+ * A linear axis fitted to the data, as Artificial Analysis scales its charts: the range runs from a round
+ * tick below the data to one above it, with about one tick every 80 px, each shown exactly by `format`.
+ */
+export function fitLinear(min: number, max: number, px: number, opts: { format?: (v: number) => string; pad?: number; floor?: number; ceil?: number } = {}) {
+  const span = max - min || Math.abs(max) || 1;
+  let lo = min - span * (opts.pad ?? 0.08);
+  let hi = max + span * (opts.pad ?? 0.08);
+  if (opts.floor !== undefined) lo = Math.max(opts.floor, lo);
+  if (opts.ceil !== undefined) hi = Math.min(opts.ceil, hi);
+  const most = Math.min(8, Math.max(3, Math.round(px / 80)));
+  const steps = opts.format ? exactSteps(opts.format) : NICE;
+  const count = (s: number) => Math.ceil(hi / s - 1e-9) - Math.floor(lo / s + 1e-9);
+  const step = steps.find((s) => count(s) <= most) ?? steps[steps.length - 1];
+  const d0 = Math.floor(lo / step + 1e-9) * step;
+  const d1 = Math.max(d0 + step, Math.ceil(hi / step - 1e-9) * step);
+  const ticks = Array.from({ length: Math.round((d1 - d0) / step) + 1 }, (_, i) => +(d0 + i * step).toFixed(10));
+  return { ticks, pos: (v: number) => ((v - d0) / (d1 - d0)) * px };
 }
 
 export function fmt(v: number, decimals: number) {
