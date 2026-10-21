@@ -703,7 +703,13 @@ def test_roles_hidden_replay_redacts_fake_tasks_and_sabotage() -> None:
         ("Maybe T45 part 1 is 796.", []),
         ("T45 part 1 is 7961.", []),
         ("T45 part 3 from Amber fails my checksum.", []),
-        ("T47 part 2 is 315. T47 part 3 from Amber fails my checksum.", [("T47", 2, "315")]),
+        # Any other text in the message leaves the whole message unscored.
+        ("T47 part 2 is 315. T47 part 3 from Amber fails my checksum.", []),
+        ("T45 part 1 = 796!\nT45 part 2 is 123", [("T45", 1, "796"), ("T45", 2, "123")]),
+        ("The string 'example. T45 part 1 is 796.' contains six digits.", []),
+        ('The string "example; T45 part 1 is 796" is odd.', []),
+        ("Quote:\n'T45 part 1 is 796'", []),
+        ('He wrote "hi.\nT45 part 1 is 796." yesterday.', []),
         ("The string 'T45 part 1 is 796' contains six digits.", []),
         ("'T45 part 1 is 796'.", []),
         ("I doubt T45 part 1 is 796.", []),
@@ -729,6 +735,10 @@ def test_a_true_negation_or_question_is_never_a_false_fragment(channel: str) -> 
         f"The string '{task.id} part {part_no} is {other}' contains six digits.",
         f"I doubt {task.id} part {part_no} is {other}.",
         f"Amber thinks {task.id} part {part_no} is {other}.",
+        f"The string 'example. {task.id} part {part_no} is {other}.' contains six digits.",
+        f'The string "example; {task.id} part {part_no} is {other}" is odd.',
+        f"Quote:\n'{task.id} part {part_no} is {other}'",
+        f'He wrote "hi.\n{task.id} part {part_no} is {other}." yesterday.',
     ]
     if channel == "chat":
         put(game, task.content.inputs["rooms"]["entry"], *task.assignees)
