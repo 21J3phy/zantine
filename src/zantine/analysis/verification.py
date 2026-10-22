@@ -289,11 +289,29 @@ def effective_conditions(
 
 
 def conditions(data: RunData, game_id: str) -> dict[str, Any]:
-    """``effective_conditions`` of one game, from its transcript header."""
+    """``effective_conditions`` of one game, from its transcript header. A masked game
+    also carries its Style Mask's pinned identity (``style_mask.setup``: masker and
+    meaning check, with models, revisions and prompts), so games masked by different
+    maskers or checkers are different conditions."""
     path = data.run_dir / "games" / f"{game_id}.jsonl"
     with path.open(encoding="utf-8") as f:
         header = json.loads(f.readline())
-    return effective_conditions(header["config"], header.get("modules"))
+        out = effective_conditions(header["config"], header.get("modules"))
+        if out.get("style_mask"):
+            from zantine.stylemask import pinned_identity
+
+            setup = next(
+                (
+                    r
+                    for r in map(json.loads, filter(str.strip, f))
+                    if r.get("kind") == "event" and r.get("type") == "style_mask.setup"
+                ),
+                None,
+            )
+            if setup is None:
+                raise ValueError(f"{game_id} was played with the Style Mask but records none")
+            out["style_mask_pin"] = pinned_identity(setup["data"])
+    return out
 
 
 def check_conditions(games: Sequence[tuple[RunData, GameRow]]) -> None:

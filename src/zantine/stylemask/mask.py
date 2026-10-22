@@ -157,6 +157,22 @@ class StyleMask:
         return out
 
 
+# What changes while a Style Mask runs (models endpoints served, cost holds): not part
+# of its configured identity.
+RUNTIME_KEYS = frozenset({"served", "usage_estimated", "held"})
+
+
+def pinned_identity(info: Any) -> Any:
+    """A Style Mask's configured identity (``StyleMask.info()`` or a ``style_mask.setup``
+    event): masker and meaning check with their pinned models, revisions and prompts,
+    without runtime fields. Equal pins mean the same masking treatment."""
+    if isinstance(info, dict):
+        return {k: pinned_identity(v) for k, v in sorted(info.items()) if k not in RUNTIME_KEYS}
+    if isinstance(info, list):
+        return [pinned_identity(v) for v in info]
+    return info
+
+
 def dry_style_mask() -> StyleMask:
     """The free, deterministic Style Mask for dry runs and tests.
 

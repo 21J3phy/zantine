@@ -908,3 +908,14 @@ def test_leader_reports_refuse_to_pool_verification_protocols(tmp_path: Path) ->
     del stale["judgments"]["leader"]["treatment"]
     with pytest.raises(ValueError, match="no treatment"):
         leader_rows([stale])
+
+
+def test_style_masked_leader_games_record_their_mask_and_are_not_pooled_with_unmasked() -> None:
+    leader = LeaderConfig(seat=3, known=True, compromised=True)
+    masked = audited(play(GameConfig(seed=2, style_mask=True, leader=leader)).transcript.records)
+    treatment = masked["judgments"]["leader"]["treatment"]
+    assert treatment["style_mask"] is True and treatment["style_mask_pin"]
+    plain = protocol_audit("optional")
+    assert "style_mask_pin" not in plain["judgments"]["leader"]["treatment"]
+    with pytest.raises(ValueError, match="different treatments"):
+        leader_results(leader_rows([masked, plain]), replicates=10)

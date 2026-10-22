@@ -29,7 +29,7 @@ from zantine.stylemask.base import (
     neutralize,
 )
 from zantine.stylemask.check import Meaning, MeaningCheck, MeaningUnavailable
-from zantine.stylemask.mask import MaskResult, StyleMask, dry_style_mask
+from zantine.stylemask.mask import MaskResult, StyleMask, dry_style_mask, pinned_identity
 
 if TYPE_CHECKING:
     from zantine.harness.ledger import Ledger
@@ -48,6 +48,7 @@ __all__ = [
     "build_style_mask",
     "dry_style_mask",
     "neutralize",
+    "pinned_identity",
 ]
 
 

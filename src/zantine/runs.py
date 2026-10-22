@@ -349,7 +349,12 @@ def execute(
     """
     manifest = load_manifest(run_dir)
     _check_versions(manifest, mode)
-    masked = [g["id"] for g in manifest["games"] if g["config"].get("style_mask")]
+    # As game_setup plays it: the run-wide config, then each game's own overrides.
+    masked = [
+        g["id"]
+        for g in manifest["games"]
+        if {**manifest.get("config", {}), **g["config"]}.get("style_mask")
+    ]
     if masked and not hasattr(GameConfig, "style_mask"):
         raise ValueError(
             f"{len(masked)} games need the Style Mask, which this engine lacks "
@@ -522,23 +527,13 @@ def _claim_mode(run_dir: Path, mode: str) -> None:
         _write_atomic(path, json.dumps({"mode": mode}, sort_keys=True) + "\n")
 
 
-_RUNTIME_KEYS = frozenset({"served", "usage_estimated", "held"})
-
-
-def _pinned(info: Any) -> Any:
-    """A Style Mask identity without what changes while it runs (served models, holds)."""
-    if isinstance(info, dict):
-        return {k: _pinned(v) for k, v in sorted(info.items()) if k not in _RUNTIME_KEYS}
-    if isinstance(info, list):
-        return [_pinned(v) for v in info]
-    return info
-
-
 def _claim_style_mask(run_dir: Path, info: dict[str, Any]) -> None:
     """Record the run's Style Mask identity in ``run.json``; refuse a different one later."""
     path = run_dir / RUN
     held = json.loads(path.read_text("utf-8"))
-    pin = _pinned(info)
+    from zantine.stylemask import pinned_identity
+
+    pin = pinned_identity(info)
     if "style_mask" in held and held["style_mask"] != pin:
         raise ValueError(
             f"{run_dir} was played with a different Style Mask (masker, meaning check or "

@@ -409,6 +409,20 @@ def leader_section(
     # documented historical default (config.HISTORICAL_CONFIG).
     played = with_historical_defaults(rec.header.get("config") or {})
     treatment = {k: played.get(k) for k in TREATMENTS}
+    if treatment["style_mask"]:
+        # As in analysis/verification: different maskers or meaning checks are
+        # different conditions, so the mask's pinned identity is part of it.
+        from zantine.stylemask import pinned_identity
+
+        setup = next(
+            (
+                r
+                for r in records
+                if r.get("kind") == "event" and r.get("type") == "style_mask.setup"
+            ),
+            None,
+        )
+        treatment["style_mask_pin"] = None if setup is None else pinned_identity(setup["data"])
     # A Leader still in play is censored at the cap only in a game that was played to
     # its end; in an aborted or truncated transcript its time to eject is unknown.
     if ejection is not None:
