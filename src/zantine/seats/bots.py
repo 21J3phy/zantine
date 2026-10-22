@@ -26,6 +26,19 @@ from zantine.tasks.splitkey import fragment_ok
 # so a run scheduled with one version of the bots is never resumed with another.
 SCRIPTED_BOT_VERSION = 2
 
+
+def scripted_bot_versions(seats: list[dict[str, Any]]) -> list[int | None]:
+    """The scripted-bot versions a game's Seats played as (None: unversioned bots)."""
+    found = set()
+    for seat in seats:
+        c = seat.get("controller") or {}
+        if c.get("kind") == "scripted":
+            found.add(c.get("version"))
+        elif c.get("kind") == "dry":
+            found.add(c.get("plays_as_version"))
+    return sorted(found, key=lambda v: (v is not None, v or 0))
+
+
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
 _ACCUSE = re.compile(r"I accuse (\w+)")
 _EVERYONE_VOTE = re.compile(r"Everyone vote (\w+)")

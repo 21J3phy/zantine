@@ -468,7 +468,10 @@ def stylemask_eval(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             parser.error(f"no such file or directory: {path}")
     if args.permutations < 1:
         parser.error("--permutations must be at least 1")
-    report = evaluate(args.paths, folds=args.folds, permutations=args.permutations)
+    try:
+        report = evaluate(args.paths, folds=args.folds, permutations=args.permutations)
+    except ValueError as exc:
+        parser.error(str(exc))
     print(
         f"style classifier {report['classifier']['name']}: {report['transcripts']} transcripts, "
         f"{report['masked_games']} with a Style Mask"

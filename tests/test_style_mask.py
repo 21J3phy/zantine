@@ -953,6 +953,27 @@ def test_eval_reads_transcripts_and_the_cli_writes_a_report(
     assert "folds by game" in printed and json.loads(out.read_text())["masked_games"] == 2
 
 
+def test_eval_refuses_to_pool_scripted_bot_versions(tmp_path: Path) -> None:
+    """Old and new scripted bots talk differently; one score would blend the two."""
+    from zantine.runner import play
+
+    for seed in (1, 2):
+        play(GameConfig(seed=seed, round_cap=6, style_mask=True)).transcript.write(
+            tmp_path / f"g{seed}.jsonl"
+        )
+    evaluate([tmp_path], folds=2, permutations=2)  # one version: accepted
+    legacy = tmp_path / "g2.jsonl"
+    lines = legacy.read_text("utf-8").splitlines()
+    header = json.loads(lines[0])
+    for seat in header["seats"]:
+        del seat["controller"]["version"]  # written before the bots were versioned
+    legacy.write_text("\n".join([json.dumps(header), *lines[1:]]) + "\n", "utf-8")
+    with pytest.raises(ValueError, match="different scripted-bot versions"):
+        evaluate([tmp_path], folds=2, permutations=2)
+    with pytest.raises(SystemExit):
+        main(["stylemask", "eval", str(tmp_path), "--out", str(tmp_path / "r.json")])
+
+
 # zantine run: live Style Mask games ------------------------------------------------------
 
 
