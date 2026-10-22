@@ -52,6 +52,7 @@ from zantine.harness.ledger import Ledger
 from zantine.harness.live import LiveRun, play_live, require_live
 from zantine.harness.pricing import ModelSpec
 from zantine.harness.provider import ProviderAdapter
+from zantine.leader import schedule as leader
 from zantine.rng import GameRng
 from zantine.scenario import build_scenario
 from zantine.schedule import (
@@ -95,7 +96,8 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
     The scenario (names, seat order, map) comes from the game seed as usual; the
     Impostor Seats are then fixed to wherever the seed seats the lineup entries of
     the scheduled Impostor Models (``schedule.seat_lineup``). A speed-experiment
-    game also gets its per-Seat Talk Budgets (``speed.talk_config``). A game with
+    game also gets its per-Seat Talk Budgets (``speed.talk_config``), and a v1.4
+    Leader game its Leader Seat (``leader.schedule.leader_config``). A game with
     an ``effort`` (the effort sweep) seats every Model at that level.
     """
     if mode not in MODES:
@@ -109,13 +111,14 @@ def game_setup(manifest: dict[str, Any], game: dict[str, Any], mode: str) -> tup
             "(GameConfig.style_mask arrives with #66)"
         )
     config = GameConfig(seed=game["seed"], **overrides)
-    if impostor_positions or game.get("talk"):
+    if impostor_positions or game.get("talk") or game.get("leader"):
         scenario = build_scenario(config, GameRng(config.seed).fork("scenario"))
         seats = tuple(s for s, pos in enumerate(scenario.seat_order) if pos in impostor_positions)
         config = replace(
             config,
             impostor_seats=seats if impostor_positions else config.impostor_seats,
             **speed.talk_config(manifest, game, scenario.seat_order),
+            **leader.leader_config(game, scenario.seat_order),
         )
     option = f"?effort={game['effort']}" if game.get("effort") else ""
     return config, ",".join(f"{mode}:{model}{option}" for model in entries)
@@ -132,6 +135,7 @@ def check_seating(game: dict[str, Any], header: dict[str, Any]) -> None:
     effort = game.get("effort")
     if effort is not None and any(s["controller"].get("effort") != effort for s in seats):
         raise RuntimeError(f"{game['id']}: Seats did not play at effort {effort!r}")
+    leader.check_leader_seating(game, header)
 
 
 def planned_setup(manifest: dict[str, Any], game: dict[str, Any]) -> dict[str, Any]:
@@ -641,13 +645,14 @@ def add_commands(sub: Any) -> None:
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
     s.add_argument(
         "--experiment",
-        choices=("v1", speed.EXPERIMENT, EFFORT, MINORITY, VERIFICATION),
+        choices=("v1", speed.EXPERIMENT, EFFORT, MINORITY, VERIFICATION, leader.EXPERIMENT),
         default="v1",
         help="v1 (default); speed: random per-Seat Talk Budget tiers plus a realism check; "
         "effort: the v1.6 effort sweep, Mirror Matches at low and high effort; "
         "minority: v1.3 Lopsided Lobbies, 42 ordered pairs x 2 games x Style Mask off/on "
         f"(168 games); {VERIFICATION}: the v1.1 Verification Protocol experiment "
-        "(docs/sample-size.md)",
+        "(docs/sample-size.md); "
+        "leader: the v1.4 Leader conditions (126 crew-led + 70 Compromised Leader games)",
     )
     s.add_argument(
         "--blocks",
@@ -765,6 +770,11 @@ def _schedule(args: argparse.Namespace) -> int:
             config=config,
         )
         text = summary(manifest)
+    elif args.experiment == leader.EXPERIMENT:
+        if args.mirror or args.blocks is not None:
+            raise ValueError("the leader experiment has no blocks or Mirror Matches")
+        manifest = leader.make_leader_manifest(load_pool(), master_seed, config=config)
+        text = leader.summary(manifest)
     else:
         blocks = 12 if args.blocks is None else args.blocks
         manifest = make_manifest(

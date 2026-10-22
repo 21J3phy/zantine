@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 from zantine import repro, runs
 from zantine.analysis import report
-from zantine.config import GameConfig
+from zantine.config import GameConfig, LeaderConfig
 from zantine.engine import Game
 from zantine.harness.pricing import EFFORT_LEVELS
 from zantine.roles import Team
@@ -44,6 +44,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=int,
         default=GameConfig.num_impostors,
         help="number of Impostors, 0 to 2 (0 = Benign Match)",
+    )
+    p.add_argument(
+        "--leader",
+        choices=("known", "hidden"),
+        help="v1.4 Leader condition: a Known Leader (everyone is told who leads) or a Hidden "
+        "Leader (only the Leader is told). Only prompt lines change.",
+    )
+    p.add_argument("--leader-seat", type=int, default=0, help="the Leader's Seat (default 0)")
+    p.add_argument(
+        "--leader-role",
+        choices=("crewmate", "impostor", "drawn"),
+        default="crewmate",
+        help="force a Crewmate or Compromised (Impostor) Leader, or keep the seeded draw",
     )
     p.add_argument("--out", type=Path, help="write the JSONL transcript here")
     p.add_argument("--quiet", action="store_true", help="print only the result line")
@@ -163,6 +176,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     ev.add_argument("--out", type=Path, help="write the JSON report here")
     add_panel_parser(sub)
+    lr = sub.add_parser(
+        "leader-report", help="v1.4 Compliance, time to eject and Vote Pull graphs from audits"
+    )
+    lr.add_argument("audits", type=Path, nargs="+", help="audit JSON files from `zantine audit`")
+    lr.add_argument("--out", type=Path, default=Path("leader-report"), help="output directory")
+    lr.add_argument("--replicates", type=int, default=2000, help="bootstrap replicates")
+    lr.add_argument("--bootstrap-seed", type=int, default=0)
     mo = sub.add_parser("moments", help="find candidate single-game Moments for sharing")
     mo.add_argument("path", type=Path, help="a JSONL transcript or a run dir of transcripts")
     mo.add_argument("--top", type=int, help="keep only the N highest-scoring Moments")
@@ -182,6 +202,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return report.command(parser, args)
     if args.command == "panel":
         return panel(parser, args)
+    if args.command == "leader-report":
+        return leader_report(parser, args)
     if args.command == "moments":
         return moments(parser, args)
     if args.command == "replay":
@@ -198,10 +220,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         return planted(parser, args)
 
     try:
+        leader = None
+        if args.leader:
+            leader = LeaderConfig(
+                seat=args.leader_seat,
+                known=args.leader == "known",
+                compromised={"crewmate": False, "impostor": True}.get(args.leader_role),
+            )
         config = GameConfig(
             seed=args.seed,
             round_cap=args.round_cap,
             num_impostors=args.impostors,
+            leader=leader,
             style_mask=args.style_mask is not None,
         )
         paid_mask = config.style_mask and (
@@ -220,6 +250,56 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.out:
         _write(game, args.out)
     return 0
+
+
+def leader_report(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
+    import json
+
+    from zantine.leader.analysis import condition_label, leader_results, leader_rows
+    from zantine.leader.graphs import write_graphs
+
+    reports = []
+    for path in args.audits:
+        if not path.is_file():
+            parser.error(f"no such audit: {path}")
+        reports.append(json.loads(path.read_text("utf-8")))
+    try:
+        rows = leader_rows(reports)
+        if not rows:
+            parser.error("no audit has a Leader section (run `zantine audit` on Leader games)")
+        results = leader_results(rows, replicates=args.replicates, seed=args.bootstrap_seed)
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.out.mkdir(parents=True, exist_ok=True)
+    (args.out / "leader.json").write_text(json.dumps(results, indent=1) + "\n", "utf-8")
+    graphs = write_graphs(results, args.out)
+    if results["label"]:
+        print(results["label"])
+    excluded = results["excluded_games"]
+    print(
+        f"{results['games']} played Leader games ({results['incomplete_games']} with incomplete "
+        f"judgments; left out: {excluded['aborted']} aborted, {excluded['truncated']} truncated)"
+    )
+    for condition, c in results["conditions"].items():
+        line = f"  {condition_label(condition):<28} {c['games']:>3} games  Compliance "
+        line += _ci(c["compliance"])
+        if "time_to_eject" in c:
+            line += "  time to eject " + _ci(c["time_to_eject"]["mean_rounds_censored_at_cap"], 1)
+        print(line)
+    print(f"report: {args.out / 'leader.json'}; graphs: {', '.join(p.name for p in graphs)}")
+    return 0
+
+
+def _ci(e: dict[str, Any], digits: int | None = None) -> str:
+    if e["estimate"] is None:
+        return "-"
+
+    def f(v: float) -> str:
+        return f"{v:.0%}" if digits is None else f"{v:.{digits}f}"
+
+    if e["ci_low"] is None:
+        return f(e["estimate"])
+    return f"{f(e['estimate'])} [{f(e['ci_low'])}, {f(e['ci_high'])}]"
 
 
 def replay(parser: argparse.ArgumentParser, transcript: Path, out: Path | None) -> int:
@@ -789,6 +869,10 @@ def print_timeline(game: Game) -> None:
     names = game.state.roster()
     impostors = [p.name for p in game.state.players if p.is_impostor]
     print(f"seed {game.config.seed}; Impostors: {', '.join(impostors) or 'none'}")
+    leader = game.config.leader
+    if leader is not None:
+        known = "Known" if leader.known else "Hidden"
+        print(f"{known} Leader: {names[leader.seat]} ({game.state.player(leader.seat).role.value})")
     for r in game.transcript.events():
         line = _describe(r["type"], r["data"], names)
         if line:

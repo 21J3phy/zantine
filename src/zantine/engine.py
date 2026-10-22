@@ -7,7 +7,13 @@ from typing import TYPE_CHECKING, Any
 
 from zantine.config import GameConfig
 from zantine.meeting import run_meeting
-from zantine.observations import ActionContext, MeetingContext, Observation, Statement
+from zantine.observations import (
+    ActionContext,
+    LeaderView,
+    MeetingContext,
+    Observation,
+    Statement,
+)
 from zantine.rng import GameRng
 from zantine.roles import Team
 from zantine.rules import Rules, default_rules
@@ -71,6 +77,8 @@ class Game:
         self.transcript = Transcript()
         self.meeting_rng = self.rng.fork("meeting-order")
         self._observations: dict[int, list[Observation]] = {p.seat: [] for p in players}
+        # What each seat was told about the Leader (``leader_assigned``), if anything.
+        self._leader_views: dict[int, LeaderView] = {}
         self._started = False
         self._finished = False
 
@@ -195,7 +203,21 @@ class Game:
                 fellow_impostors=fellows,
                 impostor_count=self.config.impostor_count_text,
             )
+        self._tell_leader()
         emit_room_snapshots(self)
+
+    def _tell_leader(self) -> None:
+        """v1.4: the Leader is told it leads; with a Known Leader, so is everyone else.
+
+        Only prompt text changes: the Leader gets no extra action, vote or information.
+        """
+        leader = self.config.leader
+        if leader is None:
+            return
+        for p in self.state.players:
+            if p.seat == leader.seat or leader.known:
+                self.observe(p.seat, "leader_assigned", leader=leader.seat, known=leader.known)
+                self._leader_views[p.seat] = LeaderView(seat=leader.seat, known=leader.known)
 
     def run(self) -> GameState:
         self.start()
@@ -366,6 +388,7 @@ class Game:
             impostor_count=self.config.impostor_count_text,
             retry_reason=retry_reason,
             extra=self._extra(player.seat),
+            leader=self._leader_views.get(player.seat),
         )
 
     def meeting_context(
@@ -393,6 +416,7 @@ class Game:
             impostor_count=self.config.impostor_count_text,
             retry_reason=retry_reason,
             extra=self._extra(seat),
+            leader=self._leader_views.get(seat),
         )
 
 

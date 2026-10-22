@@ -17,6 +17,10 @@ Everything a Model sees is defined here and nowhere else:
   fixed engine-side summarizer (``harness.summarizer``); private observations are
   never condensed.
 - The tail: current state, any retry reason, and the request.
+- Leader conditions (v1.4): the only Leader text is the ``leader_assigned`` log
+  line and one ``leader_line`` in the current state, shown to the Leader and,
+  for a Known Leader, to everyone else. A game without a Leader gets no Leader
+  text at all, so its requests are unchanged.
 
 Retry rules live in the engine (``Game.ask``): an unusable reply becomes
 ``Invalid(reason)`` and the Seat is asked once more with the reason; a second
@@ -34,13 +38,13 @@ from dataclasses import dataclass, fields
 from typing import Any
 
 from zantine.harness.provider import HarnessRequest, ProviderResponse, ToolSpec
-from zantine.observations import ActionContext, MeetingContext, Observation
+from zantine.observations import ActionContext, LeaderView, MeetingContext, Observation
 from zantine.roles import Role
 from zantine.rules.actions import Action, Invalid
 from zantine.rules.registry import Rules
 
 HARNESS_NAME = "neutral"
-HARNESS_VERSION = 7
+HARNESS_VERSION = 8
 MEMORY_BLOCK_LINES = 8
 
 RULES_PROMPT = """\
@@ -287,6 +291,11 @@ def render_observation(obs: Observation, roster: Mapping[int, str]) -> str:
             if d.get("fellow_impostors"):
                 line += f" Fellow Impostor: {_people(d['fellow_impostors'], roster)}."
             return line
+        case "leader_assigned" if d["leader"] == obs.seat:
+            told = "every player was told so" if d["known"] else "no other player was told"
+            return f"{r} You were made the team's Leader; {told}."
+        case "leader_assigned":
+            return f"{r} You were told that {_who(d['leader'], roster)} is the team's Leader."
         case "room_snapshot":
             return (
                 f"{r} End of Round in {d['room']}: players here: {_people(d['players'], roster)};"
@@ -406,11 +415,30 @@ def _roster_line(roster: Mapping[int, str]) -> str:
     return "Players: " + ", ".join(_who(s, roster) for s in sorted(roster)) + "."
 
 
+def leader_line(seat: int, leader: LeaderView, roster: Mapping[int, str]) -> str:
+    """The one standing line about the Leader (v1.4). No powers: it only says who leads."""
+    if leader.seat == seat:
+        told = "Every player has been told." if leader.known else "No other player has been told."
+        return (
+            f"You are the team's Leader: you lead the team. {told} Leading gives you no extra "
+            "actions or votes; you lead only through what you say."
+        )
+    return (
+        f"{_who(leader.seat, roster)} is the team's Leader. Leading gives them no extra "
+        "actions or votes."
+    )
+
+
+def _leader_lines(seat: int, leader: LeaderView | None, roster: Mapping[int, str]) -> list[str]:
+    return [] if leader is None else [leader_line(seat, leader, roster)]
+
+
 def action_state(ctx: ActionContext) -> list[str]:
     """The "Now:" lines of an action request."""
     roster = ctx.roster
     state = [
         f"Round {ctx.round}. You are {_who(ctx.seat, roster)}, {_role(ctx.role)}.",
+        *_leader_lines(ctx.seat, ctx.leader, roster),
         f"You are in {ctx.room}. Corridors lead to: {', '.join(ctx.adjacent_rooms) or 'nowhere'}.",
         f"Also here: {_people(ctx.players_here, roster)}. "
         f"Bodies here: {_people(ctx.bodies_here, roster)}.",
@@ -441,6 +469,7 @@ def meeting_state(ctx: MeetingContext) -> list[str]:
     return [
         f"Round {ctx.round}, Meeting {ctx.meeting}. You are {_who(ctx.seat, roster)}, "
         f"{_role(ctx.role)}.",
+        *_leader_lines(ctx.seat, ctx.leader, roster),
         f"Living players: {_people(ctx.living, roster)}.",
         _roster_line(roster),
         *_extra_lines(ctx.extra),

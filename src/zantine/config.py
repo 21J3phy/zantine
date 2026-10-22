@@ -18,6 +18,8 @@ HISTORICAL_CONFIG: dict[str, Any] = {
     "verification_protocol": "optional",
     # Before the Style Mask (#36), every message was broadcast unmasked.
     "style_mask": False,
+    # Before Leader conditions (#24), no game had a Leader.
+    "leader": None,
 }
 
 
@@ -27,6 +29,32 @@ def with_historical_defaults(config: dict[str, Any]) -> dict[str, Any]:
     Only absent fields are filled; a recorded value (e.g. ``"mandatory"``) is kept.
     """
     return {**HISTORICAL_CONFIG, **config}
+
+
+@dataclass(frozen=True)
+class LeaderConfig:
+    """A v1.4 Leader condition (issue #24). The Leader has no extra powers: only
+    prompt lines differ (see ``docs/rules.md``, "Leader").
+
+    ``known``: every other player is told who leads (Known Leader), or only the
+    Leader is told (Hidden Leader). ``compromised``: True forces the Leader to be
+    an Impostor (Compromised Leader), False forces a Crewmate, None keeps
+    whatever the normal Impostor draw gives.
+    """
+
+    seat: int
+    known: bool
+    compromised: bool | None = None
+
+    @property
+    def condition(self) -> str | None:
+        """``known_crew``, ``hidden_crew``, ``known_compromised`` or ``hidden_compromised``."""
+        return None if self.compromised is None else condition_name(self.known, self.compromised)
+
+
+def condition_name(known: bool, compromised: bool) -> str:
+    """One of the four v1.4 Leader conditions."""
+    return f"{'known' if known else 'hidden'}_{'compromised' if compromised else 'crew'}"
 
 
 @dataclass(frozen=True)
@@ -93,8 +121,12 @@ class GameConfig:
     # Fixed Impostor seats (tests, and scheduled runs: runs.game_setup). None = drawn
     # from the seed.
     impostor_seats: tuple[int, ...] | None = None
+    # v1.4 Leader condition; None = no Leader (v1). A dict is accepted (manifests, JSON).
+    leader: LeaderConfig | None = None
 
     def __post_init__(self) -> None:
+        if isinstance(self.leader, dict):
+            object.__setattr__(self, "leader", LeaderConfig(**self.leader))
         if not 0 <= self.num_impostors <= self.max_impostors:
             raise ValueError(
                 f"num_impostors must be between 0 and max_impostors {self.max_impostors}"
@@ -134,6 +166,18 @@ class GameConfig:
             self.talk_budgets is None or len(self.talk_tiers) != self.num_seats
         ):
             raise ValueError("talk_tiers needs talk_budgets and one tier per Seat")
+        leader = self.leader
+        if leader is not None:
+            if not 0 <= leader.seat < self.num_seats:
+                raise ValueError(f"bad leader seat {leader.seat!r}")
+            if leader.compromised and self.num_impostors == 0:
+                raise ValueError("a Compromised Leader needs at least one Impostor")
+            if (
+                self.impostor_seats is not None
+                and leader.compromised is not None
+                and (leader.seat in self.impostor_seats) != leader.compromised
+            ):
+                raise ValueError("impostor_seats contradict the Leader's forced role")
 
     def talk_budget(self, seat: int) -> int:
         """Seat ``seat``'s Talk Budget in characters per Meeting pass. Any later

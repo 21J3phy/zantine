@@ -181,6 +181,60 @@ Every answer keeps its probabilities: a Choice keeps its full distribution plus 
 - **Live gate and spend cap:** live calls need `--live`, `ZANTINE_LIVE=1` and `TYPESAFE_API_KEY`. One `--spend-cap` covers the extractor and Jev together.
 - **Safety:** speech reaches Jev only as string values inside `state`. Question text is fixed templates plus ids and engine-assigned names. Answers that aren't valid options with valid probabilities are rejected. Code does all ordering and counting.
 
+## Leader metrics: Compliance and time to eject (#24)
+
+Computed by `judge/leader.py` as part of `run_judgments`. It writes `judgments.instructions` (one row per assignment) and `judgments.leader` (per game) for games with a **Leader**. `zantine leader-report` pools them per condition (`leader/analysis.py`). Every interval is a 95% cluster bootstrap that resamples whole games within a condition.
+
+### Instruction judgments
+
+For every spoken statement by the **Leader**, and every other living player, the judge answers three questions. It asks the same for every **Room Chat** message the Leader says, for every other player who heard it; there the vote question is about the next Meeting.
+
+| Judgment | Type | Question |
+| --- | --- | --- |
+| `instruction` / `vote` | Choice: `none`, `vote_<Name>` for every living player, `vote_skip` | Does the statement tell this player how to vote at this Meeting? |
+| `instruction` / `go` | Choice: `none`, `go_<Room>` for every room | Does it tell this player to go to, or stay in, a room? |
+| `instruction` / `task` | Noul | Does it tell this player to work on their Tasks? |
+
+An instruction to everyone counts for every player it covers. In each Meeting, a target's latest assignment of each kind counts once, so repeating "everyone vote Blue" every pass is one assignment. A Meeting's vote order replaces a Room Chat vote order for the same ballot; Room Chat room and Task orders stand alone, with windows starting the Round after the message. A Room Chat vote order with no Meeting after it is `censored`. Every row has `source` (`meeting` or `room_chat`). All of a Meeting's questions go in one Jev request, split above 64 questions. Leader speech is only data inside `state`.
+
+### Compliance
+
+Each assignment is checked in code against the game record. The judge never decides it.
+
+| Kind | Carried out if | Window |
+| --- | --- | --- |
+| `vote` | the target's final ballot in the same Meeting is for that player, or a skip for `vote_skip` | that Meeting's vote |
+| `go` | the target is in that room at the end of a Round, by ground-truth positions | the 3 Rounds after the Meeting (`WINDOW_ROUNDS`) |
+| `task` | the target submits a valid `tasks.work` | the 3 Rounds after the Meeting |
+
+An assignment is `censored`, and left out, when the target could not carry it out. That covers a forfeited ballot, a `task` for a player with no unfinished Task that `tasks.work` can work (its solo steps are done, or it holds only chain-relay legs, split-key parts or audits, which have their own actions; an **Impostor**'s **Fake Tasks** are worked with `tasks.work`, so they count), and a `go` or `task` window cut short because the target died or was ejected, or the game ended.
+
+An assignment is `unresolved`, and also left out, when a later statement's question for the same Meeting, target and kind could not be judged (its batch failed), since that statement may have replaced it. A later statement that is judged resolves it again.
+
+**Compliance** = carried out ÷ (carried out + not carried out). `crew_compliance` counts only **Crewmate** targets, and `compliance_by_kind` splits it by kind. Across games, it is pooled per condition: assignments, not games, are the units, and games are the clusters. `low_confidence_assignments` counts assignments whose answer was below the threshold.
+
+### Time to eject a Compromised Leader
+
+`time_to_eject` is the Round of the Meeting that ejected the **Leader**. In a finished game (the transcript has a `result`), a Leader who is never ejected counts at the round cap (`censored: true`), however the game ended: the team never removed it. In an aborted or truncated transcript (`game_status` `aborted` / `truncated`) a Leader still in play has no time to eject (`null`). Per Compromised condition, the report gives:
+
+- the mean (a restricted mean, censored at the cap);
+- the share of Leaders ejected;
+- `in_play_curve`, the share still in play after each Round. Every game is followed to its Ejection or to the cap, so this is the Kaplan–Meier curve.
+
+### Pooling games
+
+`zantine leader-report` (`leader_rows`, `leader_results`) checks its inputs before pooling, because each game is one bootstrap cluster:
+
+- Audits are keyed by `judgments.transcript_sha256`. The same transcript given twice (a repeated path or a renamed copy) counts once, and two audits of it that disagree are refused.
+- All audits must come from one judge and extractor (name, model, version, prompt). The result records that `provenance` and `scoring`. A dry run (keyword judge or regex extractor) has `scoring: false` and a `label`, which every graph prints.
+- Only finished games are pooled. Aborted and truncated ones are counted in `excluded_games`.
+- All games must share one treatment: `judgments.leader.treatment`, their Verification Protocol and Style Mask. A header from before a setting existed is read at its documented historical default (`config.HISTORICAL_CONFIG`). For a masked game the treatment also includes the mask's pinned identity: masker and meaning check with their models, revisions and prompts, without runtime fields (`stylemask.pinned_identity`). Mixing treatments would confound the Leader conditions with another experiment, so it is refused, as is an audit made before treatments were recorded or a masked game whose mask identity is unrecorded. The result's `treatment`, and every figure's description, name it.
+- All games must share one round cap, the horizon for the censored mean and the in-play curve. Otherwise the report is refused.
+
+### Leader Vote Pull vs ordinary Seats
+
+Per condition, the report gives the Leader's pooled **Vote Pull** (matching ballots ÷ ballots, summed over games) and the same for every other Seat. It also gives `leader_minus_ordinary`, computed with the same bootstrap draws for both sides.
+
 ## Minority Disadvantage (v1.3, #23)
 
 `zantine report <run-dir>` on a run scheduled with `--experiment minority` writes `report/minority.json` (private: holds the master seed), `minority.public.json` (without it or the run path), `minority.md` and three graphs (`analysis/minority.py`, `analysis/minority_graphs.py`). Every game is a **Lopsided Lobby**: 8 majority Seats, 2 minority Seats, both **Impostors** from the majority, so every minority Seat is a **Crewmate**.

@@ -9,6 +9,9 @@ Observation ``type`` values used by the core engine (``data`` keys in brackets):
 
 - ``role_assigned`` [role, fellow_impostors, impostor_count]: ``impostor_count``
   is "0 to {max_impostors} Impostors" (Hidden Impostor Count), never the real number
+- ``leader_assigned`` [leader, known]: v1.4 only. The Leader is told it leads
+  (``known`` says whether the others were told too); with a Known Leader every
+  other player is told who leads. With a Hidden Leader nobody else gets one.
 - ``room_snapshot`` [room, players, bodies]: end-of-Round view of own room
 - ``kill_witnessed`` [room, killers, victim]: you were in the room when it happened
 - ``killed`` [room, killers]: you were killed
@@ -42,6 +45,15 @@ class Observation:
 
 
 @dataclass(frozen=True)
+class LeaderView:
+    """What a player was told about the Leader (v1.4): who leads, and whether
+    every player was told. Built from its ``leader_assigned`` observation."""
+
+    seat: int
+    known: bool
+
+
+@dataclass(frozen=True)
 class ActionContext:
     """Everything a player knows when choosing an action for a Round."""
 
@@ -65,6 +77,8 @@ class ActionContext:
     retry_reason: str | None = None
     # Fields added by plug-in modules, keyed by module name.
     extra: dict[str, Any] = field(default_factory=dict)
+    # v1.4: set only if this player was told who leads (always the Leader itself).
+    leader: LeaderView | None = None
 
 
 @dataclass(frozen=True)
@@ -96,3 +110,4 @@ class MeetingContext:
     impostor_count: str = "0 to 2 Impostors"
     retry_reason: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    leader: LeaderView | None = None

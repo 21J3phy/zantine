@@ -20,6 +20,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from typing import Any
 
+from zantine.judge.leader import keyword_instruction
 from zantine.judge.questions import CHOICE, NOUL, Batch, Question
 
 
@@ -89,6 +90,8 @@ class KeywordJudge(Judge):
     - asserted: no for hedges ("I think", "maybe", ...), else yes.
     - challenged: yes if a later statement by another player calls something a
       lie, says "not true" / "wrong" / a denial, or accuses the speaker.
+    - instruction: per kind, the last "vote X", "go to <Room>" or "do your Tasks" in
+      a sentence that starts with "Everyone" or the target's name (``judge/leader.py``).
     """
 
     def info(self) -> dict[str, Any]:
@@ -124,6 +127,10 @@ class KeywordJudge(Judge):
                 for s in state["later_statements"]
             )
             return noul(0.9 if hit else 0.1)
+        if kind == "instruction":
+            text = _statement(state, q.about["statement"])["text"]
+            pick = keyword_instruction(text, q.about["target_name"], q.about["kind"], q.options)
+            return noul(0.9 if pick else 0.1) if q.kind == NOUL else choice(q.options, pick)
         raise ValueError(f"unknown judgment {kind!r}")
 
 

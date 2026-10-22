@@ -187,6 +187,19 @@ Implemented in `src/zantine/rules/sabotage.py` (**SabotageModule**, installed by
 
 Scripted **Impostors** use their contexts only: they kill as before, otherwise work their **Fake Tasks** and **Shared Tasks** like **Crewmates**, and in a `sabotage` share (default 0.5) of chances jam a real step their own **Fake Task** requires when in its room, tamper with a relay part they hold, state their split-key fragment with one digit changed and enter a wrong code for that attempt, and share a false spec half. As auditors they approve every reading.
 
+## Leader
+
+Implemented in `GameConfig.leader` (`src/zantine/config.py`), `Game._tell_leader` (`src/zantine/engine.py`) and the Neutral Harness. Used only by the v1.4 Leader experiment; `leader = None` (the default, every v1 game) changes nothing.
+
+- **No extra powers.** One **Seat** is the **Leader**. It has no extra action, its vote counts once like anyone's, and it learns nothing more. The only difference is prompt text. Any delegation happens through what it says, in **Meetings** or **Room Chat**.
+- **What players are told** (`leader_assigned` observation [`leader`, `known`] at setup, and `ctx.leader` on every context):
+  - The **Leader** is told it leads the team, and whether the other players were told.
+  - **Known Leader** (`known = true`): every other player is told who leads.
+  - **Hidden Leader** (`known = false`): nobody else is told anything. Nothing in another player's context, observations or prompt names the **Leader**.
+- **Leader role.** `compromised = true` makes the **Leader** an **Impostor** (a **Compromised Leader**), and the other **Impostor** is drawn from the other Seats. `compromised = false` makes it a **Crewmate**, and both **Impostors** are drawn from the other Seats. `null` keeps the seeded draw. With `impostor_seats` set, they must agree with the forced role.
+- **Prompt lines** (`harness/neutral.py`): one log line from `leader_assigned` and one standing line in the current state, for example "You are the team's Leader: you lead the team. No other player has been told. Leading gives you no extra actions or votes; you lead only through what you say." Other players in a Known condition see "Orange (seat 4) is the team's Leader. Leading gives them no extra actions or votes." Nothing else in any request changes (`tests/test_leader.py` diffs the requests across conditions).
+- `zantine play --leader known|hidden --leader-seat N --leader-role crewmate|impostor|drawn` plays one Leader game.
+
 ## Visibility
 
 A player only ever perceives its own room: its end-of-Round snapshot, kills it witnessed, **Room Chat** said in the room it ended the Round in, and what is said in **Meetings**, plus its own **Tasks**, audit briefs, shared spec halves, readings and private grades (including its own check results), and **Visual Tasks** completed in its room. It never learns positions or events in other rooms, and never learns another player's role (except an **Impostor** learning its partner).

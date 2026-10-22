@@ -531,6 +531,10 @@ def verify(manifest: dict[str, Any]) -> list[str]:
         return verify_minority(manifest)
     if manifest.get("experiment") == EFFORT:
         return verify_effort(manifest)
+    if manifest.get("experiment") == "leader":
+        from zantine.leader.schedule import verify_leader  # imports this module
+
+        return verify_leader(manifest)
     if manifest.get("experiment") == VERIFICATION:
         return _verify_experiment(manifest)
     return _verify_plan(manifest)
