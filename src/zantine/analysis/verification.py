@@ -236,6 +236,7 @@ HISTORICAL_DEFAULTS: dict[str, Any] = {
     "room_chat_budget_chars": 0,  # #72: 0 = no Room Chat, as before it existed
     "splitkey_tasks": 0,  # #72: no split-key Tasks before them
     "visual_task_chance": 0,  # #74: no Visual Tasks before them
+    "leader": None,  # #24: no Leader (every v1 game)
 }
 # Rule modules left out of the comparison: ``verification`` (the protocol is the
 # treatment, compared separately) and modules that only record ground truth and change
