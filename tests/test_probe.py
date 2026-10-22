@@ -465,3 +465,27 @@ def test_a_call_that_costs_more_than_its_reservation_stops_the_probe(big_from_ca
     worst = grok.worst_case_cost(probe.probe_request().text_size())
     excess = ledger.records[-1].cost_usd - worst
     assert ledger.spent_usd <= ledger.spend_cap_usd + excess
+
+
+def test_a_possibly_billed_xai_failure_stops_the_probe() -> None:
+    """A timeout after a good call may have billed unbounded reasoning: stop there."""
+    import httpx
+    import openai
+
+    fake: OpenAIFake
+
+    def respond(params: dict[str, Any]) -> Any:
+        if fake.responses.calls[:-1]:
+            return openai.APITimeoutError(request=httpx.Request("POST", "https://x.test"))
+        reply = xai_reply(("wait", {}), input_tokens=6000, cached=5000, output_tokens=40)
+        u = reply.usage
+        u.total_tokens = u.input_tokens + u.output_tokens + u.output_tokens_details.reasoning_tokens
+        grok = model_spec("grok-4.7")
+        cost = PER_TOKEN * (1000 * grok.input + 5000 * grok.cached_input + 1540 * grok.output)
+        u.cost_in_usd_ticks = round(cost * 1e10)
+        return reply
+
+    fake = OpenAIFake(respond)
+    findings = probe.probe_model(XAIAdapter(model_spec("grok-4.7"), fake), Ledger(5))
+    assert len(fake.responses.calls) == 2
+    assert findings[-1].check == "stopped" and "may have been billed" in findings[-1].detail

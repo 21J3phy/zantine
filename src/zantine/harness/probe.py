@@ -59,6 +59,8 @@ CLIENT_METHOD = {
     "google": ("models", "generate_content"),
 }
 RESPONSES_API = frozenset({"openai", "xai", "meta"})
+# Labs whose output cap may leave reasoning out, so no reservation bounds a call.
+UNBOUNDED_REASONING = frozenset({"xai"})
 
 # max_output_tokens for the output-cap check: low enough that medium-effort
 # reasoning on a game turn usually runs past it.
@@ -359,6 +361,12 @@ class _Probe:
             # No HTTP status: the call may still have been billed; keep its worst case.
             if exc.status is None and reserved:
                 self.ledger.hold(reserved[0])
+                if self.provider in UNBOUNDED_REASONING:
+                    # Its bill is unknown and may exceed the reservation held for it,
+                    # so this counts as the one call that may overspend.
+                    raise _Halt(
+                        f"{phase} failed and may have been billed past its reservation ({exc})"
+                    ) from exc
             raise
         record = self.ledger.records[-1]
         usage = _usage(tap.reply, self.provider)
