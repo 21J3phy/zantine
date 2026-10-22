@@ -14,7 +14,11 @@ VERIFICATION_PROTOCOLS = ("none", "optional", "mandatory")
 VERIFICATION_RULES_VERSION = 1
 # Config fields added after earlier runs, with what a header without them meant:
 # before #37 every game was played under the optional Verification Protocol.
-HISTORICAL_CONFIG: dict[str, Any] = {"verification_protocol": "optional"}
+HISTORICAL_CONFIG: dict[str, Any] = {
+    "verification_protocol": "optional",
+    # Before the Style Mask (#36), every message was broadcast unmasked.
+    "style_mask": False,
+}
 
 
 def with_historical_defaults(config: dict[str, Any]) -> dict[str, Any]:
