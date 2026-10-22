@@ -68,7 +68,9 @@ def test_gemini_thoughts_and_cache_accounting() -> None:
         "total_token_count": 1250,
     }
     assert readings(u, gemini=True) == (False, True)
-    assert readings(u | {"total_token_count": 1050}, gemini=True) == (True, True)
+    # Thoughts inside candidates (which must then be at least as large).
+    inside = u | {"candidates_token_count": 250, "total_token_count": 1250}
+    assert readings(inside, gemini=True) == (True, True)
     # Cached tokens on top of the prompt count: 1000 + 600 + 50 + 200.
     assert readings(u | {"total_token_count": 1850}, gemini=True) == (False, False)
     assert readings(u | {"total_token_count": 1251}, gemini=True) == (None, None)
@@ -338,3 +340,37 @@ def test_a_missing_counter_is_unknown_not_zero() -> None:
 def test_visible_output_over_the_cap_proves_nothing_about_reasoning() -> None:
     assert probe.output_cap_scope((512, 0), "max_tokens", 256, False)[0] == UNSURE
     assert probe.output_cap_scope((300, 200), "max_tokens", 256, False)[0] == UNSURE
+
+
+def test_a_part_larger_than_its_container_is_no_reading() -> None:
+    # 200 reasoning tokens can't sit inside 50 output tokens, nor 800 cached inside 500 input.
+    reasoning = probe.responses_counts(usage(1000, 50, 1050, cached=800, reasoning=200))
+    assert reasoning.fits() == frozenset()  # 1050 = 1000 + 50 only with the impossible split
+    cached = probe.responses_counts(usage(500, 50, 550, cached=800, reasoning=0))
+    assert all(not c for _, c in cached.fits())
+
+
+def test_an_xai_bill_above_our_prices_counts_against_the_cap_and_stops_the_probe() -> None:
+    grok = model_spec("grok-4.7")
+
+    def respond(params: dict[str, Any]) -> Any:
+        reply = xai_reply(("wait", {}), input_tokens=6000, cached=5000, output_tokens=40)
+        u = reply.usage
+        u.total_tokens = u.input_tokens + u.output_tokens + u.output_tokens_details.reasoning_tokens
+        u.cost_in_usd_ticks = 800_000_000  # $0.08, far above our prices
+        return reply
+
+    fake = OpenAIFake(respond)
+    ledger = Ledger(2)
+    findings = by_check(probe.probe_model(XAIAdapter(grok, fake), ledger))
+    assert findings["xai_billed_cost"].verdict == NO
+    assert findings["stopped"].verdict == probe.FAILED
+    assert len(fake.responses.calls) == 1  # no call after the bill disproved our prices
+    assert ledger.spent_usd == pytest.approx(0.08)
+
+
+def test_a_model_listed_twice_is_refused(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    monkeypatch.setenv("ZANTINE_LIVE", "1")
+    with pytest.raises(SystemExit):
+        main(["probe", "--models", "gpt-6.1-sol,gpt-6.1-sol", "--live"])
+    assert "listed twice" in capsys.readouterr().err

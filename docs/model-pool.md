@@ -61,7 +61,7 @@ It sends the real Neutral Harness request for one Seat (about 5K tokens) plus a 
 |---|---|---|
 | `serves_request` | all | the API accepts our request: Muse Wonder's ID and `store` on Meta, `parameters_json_schema` and `generateContent` on Google |
 | `reasoning_accounting`, `cached_in_input` | OpenAI, xAI, Meta | reasoning inside (OpenAI, Meta) or on top of (xAI) `output_tokens`, and `cached_tokens` inside `input_tokens`, from `total_tokens` |
-| `xai_billed_cost` | xAI | our normalization and prices reproduce `cost_in_usd_ticks`, on a fresh and a cached call (a bill neither reading matches is `contradicted`: check the prices) |
+| `xai_billed_cost` | xAI | our normalization and prices reproduce `cost_in_usd_ticks`, on a fresh and a cached call. A bill above our price counts against the cap at its own amount; a bill neither reading matches is `contradicted` and stops that Model's probe, since its reservations are priced from `models.toml` |
 | `thoughts_accounting`, `cached_in_prompt` | Google | thoughts outside `candidates_token_count`; cached inside `prompt_token_count` |
 | `cache_read` | all | a repeated prompt is cached at our prompt size |
 | `cache_write_field` | Meta | whether Meta reports cache-write tokens |

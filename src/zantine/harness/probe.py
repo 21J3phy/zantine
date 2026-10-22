@@ -205,6 +205,9 @@ class Counts:
             return READINGS  # nothing to check against
         found = set()
         for h, c in READINGS:
+            # A part can't be larger than the count it sits inside.
+            if (h and (self.hidden or 0) > self.out) or (c and (self.cached or 0) > self.inp):
+                continue
             terms = [self.inp, self.out]
             unknown = False
             for outside, value in ((not c, self.cached), (not h, self.hidden)):
@@ -273,7 +276,7 @@ def generated(counts: Counts, readings: frozenset[Reading]) -> tuple[int, int] |
     if hidden_inside is None:
         return None
     visible = counts.out - counts.hidden if hidden_inside else counts.out
-    return visible, counts.hidden
+    return (visible, counts.hidden) if visible >= 0 else None
 
 
 def output_cap_scope(
@@ -318,6 +321,10 @@ def provider_cost_match(ours: float, theirs: float | None, alternative: float) -
 # The probe -------------------------------------------------------------------------
 
 
+class _Halt(Exception):
+    """Stop probing this Model: further calls could not be capped safely."""
+
+
 class _Probe:
     def __init__(self, adapter: ProviderAdapter, ledger: Ledger, request: HarnessRequest) -> None:
         self.adapter = adapter
@@ -352,6 +359,11 @@ class _Probe:
             if exc.status is None and reserved:
                 self.ledger.hold(reserved[0])
             raise
+        # A lab that bills each call itself (xAI) may charge more than our prices say;
+        # the higher figure is what counts against the cap.
+        billed = response.raw.get("provider_cost_usd")
+        if billed is not None and billed > self.ledger.records[-1].cost_usd:
+            self.ledger.hold(billed - self.ledger.records[-1].cost_usd)
         return response, _usage(tap.reply, self.provider), tap.reply
 
     def counts(self, usage: dict[str, Any]) -> Counts:
@@ -371,6 +383,9 @@ class _Probe:
                 step()
             except SpendCapReached as exc:
                 self.add("spend_cap", "", FAILED, str(exc))
+                break
+            except _Halt as exc:
+                self.add("stopped", "", FAILED, f"no further calls: {exc}")
                 break
             except ProviderError as exc:
                 self.add(
@@ -418,6 +433,9 @@ class _Probe:
             detail,
             usage=usage,
         )
+        if verdict == CONTRADICTED:
+            # Reservations are priced from models.toml, which the bill just disproved.
+            raise _Halt("xAI's bill disagrees with our prices, so reservations can't be trusted")
 
     def _cache_read(self) -> None:
         # The first call wrote (or warmed) the prefix; an identical call should read it.
@@ -600,6 +618,8 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
 
     pool = load_models()
     ids = sorted(pool) if args.models == "all" else [m for m in args.models.split(",") if m]
+    if len(set(ids)) != len(ids):
+        parser.error("a Model is listed twice; each gets one probe and one spend cap")
     unknown = [m for m in ids if m not in pool]
     if unknown:
         parser.error(f"unknown model(s) {', '.join(unknown)}; configured: {', '.join(pool)}")
