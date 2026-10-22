@@ -801,6 +801,10 @@ def _run(args: argparse.Namespace) -> int:
         print(f"  {line['game']:<16} {outcome}, ${line['cost_usd']:.4f}")
 
     style_mask = None
+    if args.style_mask is None and (
+        args.mask_extractor != "pattern" or args.mask_judge != "keyword"
+    ):
+        raise ValueError("--mask-extractor and --mask-judge need --style-mask")
     if args.style_mask is not None:
         from zantine.stylemask import build_style_mask
 
