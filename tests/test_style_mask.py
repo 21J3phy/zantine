@@ -1176,3 +1176,13 @@ def test_room_chat_is_masked_like_meeting_speech() -> None:
     assert {c["channel"] for c in checks} == {"room_chat"} and all("room" in c for c in checks)
     # The later message was checked against the earlier one, as its listeners heard it.
     assert game.style_mask.masker.calls[-1][0].earlier[-1][1] == "Meet me here."
+
+
+def test_verification_compares_the_style_mask_as_a_condition() -> None:
+    from zantine.analysis.verification import effective_conditions
+
+    off = GameConfig(seed=1).to_dict()
+    on = GameConfig(seed=1, style_mask=True).to_dict()
+    old = {k: v for k, v in off.items() if k != "style_mask"}  # a header from before #36
+    assert effective_conditions(old) == effective_conditions(off)
+    assert effective_conditions(on) != effective_conditions(off)
