@@ -32,7 +32,8 @@ from typing import Any
 from zantine.config import GameConfig
 from zantine.engine import Game
 from zantine.harness import neutral
-from zantine.harness.ledger import Ledger, SpendCapReached
+from zantine.harness.ledger import CallRecord, Ledger, SpendCapReached
+from zantine.harness.pricing import PER_TOKEN
 from zantine.harness.provider import (
     HarnessRequest,
     ProviderAdapter,
@@ -359,12 +360,58 @@ class _Probe:
             if exc.status is None and reserved:
                 self.ledger.hold(reserved[0])
             raise
-        # A lab that bills each call itself (xAI) may charge more than our prices say;
-        # the higher figure is what counts against the cap.
+        record = self.ledger.records[-1]
+        usage = _usage(tap.reply, self.provider)
+        # Count the most this call can have cost against the cap: tokens the raw total
+        # shows but our normalization left unpriced, and the lab's own bill (xAI) if higher.
+        charge = record.cost_usd + self._unpriced(usage, record, reserved[0])
         billed = response.raw.get("provider_cost_usd")
-        if billed is not None and billed > self.ledger.records[-1].cost_usd:
-            self.ledger.hold(billed - self.ledger.records[-1].cost_usd)
-        return response, _usage(tap.reply, self.provider), tap.reply
+        charge = max(charge, billed or 0.0)
+        if charge > record.cost_usd:
+            self.ledger.hold(charge - record.cost_usd)
+        if self.provider == "xai":
+            self._check_bill(phase, response, usage, record.cost_usd)
+        return response, usage, tap.reply
+
+    def _unpriced(self, usage: dict[str, Any], record: CallRecord, reserved: float) -> float:
+        """Dollars for tokens the raw usage shows but the record didn't price (at the
+        dearest output rate). Without a raw total that can't be ruled out, so the rest
+        of the call's reservation stays held."""
+        if self.provider == "anthropic":  # no total to check; its fields are all priced
+            return 0.0
+        total = self.counts(usage).total
+        if total is None:
+            return max(reserved - record.cost_usd, 0.0)
+        priced = (
+            record.input_tokens
+            + record.cached_input_tokens
+            + record.cache_write_tokens
+            + record.output_tokens
+        )
+        model = self.adapter.model
+        top = max(model.output, model.long_context.output if model.long_context else 0.0)
+        return max(total - priced, 0) * PER_TOKEN * top
+
+    def _check_bill(
+        self, phase: str, response: ProviderResponse, usage: dict[str, Any], ours: float
+    ) -> None:
+        """Every xAI reply carries xAI's own charge; one that our prices can't reproduce
+        stops the probe, since every reservation is priced from models.toml."""
+        visible = _n(usage, "output_tokens") or 0
+        alternative = self.adapter.model.cost(replace(response.usage, output_tokens=visible))
+        verdict, detail = provider_cost_match(
+            ours, response.raw.get("provider_cost_usd"), alternative
+        )
+        if phase in ("serves_request", "cache_read") or verdict == CONTRADICTED:
+            self.add(
+                "xai_billed_cost",
+                "our token normalization and prices reproduce xAI's own charge",
+                verdict,
+                f"{phase}: {detail}",
+                usage=usage,
+            )
+        if verdict == CONTRADICTED:
+            raise _Halt("xAI's bill disagrees with our prices, so reservations can't be trusted")
 
     def counts(self, usage: dict[str, Any]) -> Counts:
         return gemini_counts(usage) if self.provider == "google" else responses_counts(usage)
@@ -416,26 +463,6 @@ class _Probe:
             detail += "; accepted, but the model made no tool call"
         self.add("serves_request", self._serves_assumption(), verdict, detail, usage=usage)
         self.first = (response, usage)
-        if self.provider == "xai":
-            self._xai_cost(response, usage)
-
-    def _xai_cost(self, response: ProviderResponse, usage: dict[str, Any]) -> None:
-        ours = self.ledger.records[-1].cost_usd
-        visible = _n(usage, "output_tokens") or 0
-        alternative = self.adapter.model.cost(replace(response.usage, output_tokens=visible))
-        verdict, detail = provider_cost_match(
-            ours, response.raw.get("provider_cost_usd"), alternative
-        )
-        self.add(
-            "xai_billed_cost",
-            "our token normalization and prices reproduce xAI's own charge",
-            verdict,
-            detail,
-            usage=usage,
-        )
-        if verdict == CONTRADICTED:
-            # Reservations are priced from models.toml, which the bill just disproved.
-            raise _Halt("xAI's bill disagrees with our prices, so reservations can't be trusted")
 
     def _cache_read(self) -> None:
         # The first call wrote (or warmed) the prefix; an identical call should read it.
@@ -454,8 +481,6 @@ class _Probe:
             usage=usage,
             prompt_tokens=size,
         )
-        if self.provider == "xai":
-            self._xai_cost(response, usage)
         if self.first is not None and (self.provider in RESPONSES_API or self.provider == "google"):
             self._settle_accounting(self.first[1], usage)
         if self.provider == "meta":
@@ -555,6 +580,11 @@ class _Probe:
         if n_off > 1:
             detail = f"asked for two calls with the flag off, got {n_off}"
             self.add("parallel_tool_calls", assumption, CONTRADICTED, detail, usage=usage)
+            return
+        if n_off != 1 or off.stop_reason in ("max_tokens", "refusal"):
+            # A cut-off or refused reply (or no call at all) says nothing about the flag.
+            detail = f"flag off: {n_off} call(s), stop {off.stop_reason}; no control needed"
+            self.add("parallel_tool_calls", assumption, INCONCLUSIVE, detail, usage=usage)
             return
         on, control, _ = self.call("parallel_control", request=request, edit=parallel(True))
         n_on = len(on.tool_calls)

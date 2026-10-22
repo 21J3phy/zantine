@@ -374,3 +374,58 @@ def test_a_model_listed_twice_is_refused(monkeypatch: pytest.MonkeyPatch, capsys
     with pytest.raises(SystemExit):
         main(["probe", "--models", "gpt-6.1-sol,gpt-6.1-sol", "--live"])
     assert "listed twice" in capsys.readouterr().err
+
+
+def test_tokens_the_total_shows_but_no_counter_names_still_count_against_the_cap() -> None:
+    """Gemini leaving out thoughts_token_count must not make thinking free."""
+    argon = model_spec("gemini-4-argon")
+
+    def respond(params: dict[str, Any]) -> Any:
+        reply = google_reply(("wait", {}), thoughts=None)
+        reply.usage_metadata.total_token_count += 14_000  # thoughts the reply didn't name
+        return reply
+
+    ledger = Ledger(5)
+    probe.probe_model(GoogleAdapter(argon, GoogleFake(respond)), ledger)
+    recorded = sum(r.cost_usd for r in ledger.records)
+    unpriced = len(ledger.records) * 14_000 * PER_TOKEN * argon.output
+    assert ledger.spent_usd == pytest.approx(recorded + unpriced)
+
+
+def test_any_xai_bill_our_prices_cant_reproduce_stops_the_probe() -> None:
+    """Not only the first two calls: a later mismatch stops it too."""
+    grok = model_spec("grok-4.7")
+    fake: OpenAIFake
+
+    def respond(params: dict[str, Any]) -> Any:
+        reply = xai_reply(("wait", {}), input_tokens=6000, cached=5000, output_tokens=40)
+        u = reply.usage
+        u.total_tokens = u.input_tokens + u.output_tokens + u.output_tokens_details.reasoning_tokens
+        cost = PER_TOKEN * (1000 * grok.input + 5000 * grok.cached_input + 1540 * grok.output)
+        late = len(fake.responses.calls) > 2
+        u.cost_in_usd_ticks = round((0.20 if late else cost) * 1e10)
+        return reply
+
+    fake = OpenAIFake(respond)
+    ledger = Ledger(5)
+    findings = probe.probe_model(XAIAdapter(grok, fake), ledger)
+    assert len(fake.responses.calls) == 3
+    assert [f.check for f in findings][-2:] == ["xai_billed_cost", "stopped"]
+    assert findings[-2].verdict == NO and findings[-2].detail.startswith("output_cap")
+    assert ledger.spent_usd >= 0.20
+
+
+def test_a_cut_off_flag_off_reply_confirms_nothing() -> None:
+    def respond(params: dict[str, Any]) -> Any:
+        if "Probe instruction" not in str(params["input"]):
+            return openai_reply(("wait", {}))
+        if params["parallel_tool_calls"]:
+            return openai_reply(("wait", {}), ("move", {"room": "Medbay"}))
+        return openai_reply(status="incomplete", incomplete="max_output_tokens")
+
+    fake = OpenAIFake(respond)
+    findings = by_check(
+        probe.probe_model(OpenAIAdapter(model_spec("gpt-6.1-sol"), fake), Ledger(5))
+    )
+    assert findings["parallel_tool_calls"].verdict == UNSURE
+    assert not any(c["parallel_tool_calls"] for c in fake.responses.calls)  # no control sent
