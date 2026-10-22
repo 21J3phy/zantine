@@ -154,7 +154,7 @@ page('research', 'Research', () => {
 
 page('reproduce', 'Reproduce', () => {
   heading('reproduce', 'Reproduce', row(3), 'Rerun the method on the open engine, and check that official runs were not cherry-picked.');
-  block('reproduce', 0, row(8, 2), 38, 8);
+  block('reproduce', 0, row(17, 2), 38, 17);
 });
 
 page('glossary', 'Glossary', () => {
