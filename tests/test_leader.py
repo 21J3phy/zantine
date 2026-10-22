@@ -919,3 +919,62 @@ def test_style_masked_leader_games_record_their_mask_and_are_not_pooled_with_unm
     assert "style_mask_pin" not in plain["judgments"]["leader"]["treatment"]
     with pytest.raises(ValueError, match="different treatments"):
         leader_results(leader_rows([masked, plain]), replicates=10)
+
+
+def mask_audit(
+    masker_id: str = "plain",
+    extractor: Any = None,
+    edit: Any = None,
+) -> dict[str, Any]:
+    """A complete masked Known Compromised Leader game with a scripted masker (an
+    identity rewrite), audited; ``edit`` may change the records first."""
+    from zantine.stylemask import MeaningCheck, ScriptedMasker, StyleMask
+    from zantine.stylemask.check import MaskKeywordJudge
+
+    mask = StyleMask(
+        ScriptedMasker(lambda item, problem: item.text, id=masker_id),
+        MeaningCheck(extractor or PatternExtractor(), MaskKeywordJudge()),
+    )
+    leader = LeaderConfig(seat=3, known=True, compromised=True)
+    records = play(GameConfig(seed=2, style_mask=True, leader=leader), style_mask=mask)
+    records = json.loads(json.dumps(records.transcript.records))
+    if edit is not None:
+        records = edit(records)
+    return audited(records)
+
+
+def test_masked_leader_cohorts_compare_the_mask_identity(tmp_path: Path) -> None:
+    # Astra on #68: two maskers (or meaning checks) are two treatments, not one.
+    from zantine.audit import ScriptedExtractor
+
+    plain, comma = mask_audit("plain"), mask_audit("comma")
+    for other in (comma, mask_audit("plain", extractor=ScriptedExtractor({}))):
+        with pytest.raises(ValueError, match="different treatments"):
+            leader_results(leader_rows([plain, other]), replicates=10)
+    paths = [tmp_path / "plain.json", tmp_path / "comma.json"]
+    for path, report in zip(paths, (plain, comma), strict=True):
+        path.write_text(json.dumps(report))
+    with pytest.raises(SystemExit):
+        main(["leader-report", *map(str, paths), "--out", str(tmp_path / "out")])
+
+    # Runtime fields (what served, usage) are not the treatment: these pool.
+    def served(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        for r in records:
+            if r.get("type") == "style_mask.setup":
+                r["data"]["served"] = ["some-model-snapshot"]
+        return records
+
+    twin = mask_audit("plain", edit=served)
+    assert twin["judgments"]["transcript_sha256"] != plain["judgments"]["transcript_sha256"]
+    pooled = leader_results(leader_rows([plain, twin]), replicates=10)
+    assert pooled["games"] == 2 and pooled["treatment"]["style_mask_pin"]
+
+    # A masked game that doesn't record its mask can't be verified, so it's refused.
+    def unrecorded(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [r for r in records if r.get("type") != "style_mask.setup"]
+
+    with pytest.raises(ValueError, match="no mask identity"):
+        leader_rows([mask_audit("plain", edit=unrecorded)])
+    # Unmasked historical games carry no pin and never pool with masked ones.
+    with pytest.raises(ValueError, match="different treatments"):
+        leader_results(leader_rows([plain, protocol_audit(None)]), replicates=10)

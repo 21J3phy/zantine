@@ -28,8 +28,11 @@ Inputs are checked before pooling, since each game is one bootstrap cluster:
   in ``excluded_games``.
 - **One treatment.** Games must share their Verification Protocol and Style
   Mask (``judgments.leader.treatment``, with pre-existing headers read at their
-  historical defaults); mixing them would confound the Leader conditions with
-  another experiment, so it is refused.
+  historical defaults), including, for masked games, the mask's pinned identity
+  (masker and meaning check with their models, revisions and prompts, without
+  runtime fields; ``stylemask.pinned_identity``). Mixing them would confound the
+  Leader conditions with another experiment, so it is refused, as is a masked
+  game whose mask identity is unrecorded.
 - **One round cap.** Time to eject is censored at the cap, so games with
   different caps have no common horizon and are refused.
 """
@@ -89,6 +92,12 @@ def leader_rows(reports: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             raise ValueError(
                 "an audit's Leader section has no treatment (Verification Protocol, Style "
                 "Mask); re-run zantine audit"
+            )
+        treatment = leader["treatment"]
+        if treatment.get("style_mask") and not treatment.get("style_mask_pin"):
+            raise ValueError(
+                "a Style Mask game's audit has no mask identity (no style_mask.setup); "
+                "its treatment can't be verified"
             )
         row = {
             "transcript_sha256": digest,
