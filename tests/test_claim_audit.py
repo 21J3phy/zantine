@@ -697,7 +697,7 @@ def observed_failed_solo_grade(records: list[dict[str, Any]]) -> dict[str, Any] 
             for o in obs
             if o["type"] == "tasks.graded"
             and not o["data"]["correct"]
-            and rec.task_kinds[o["data"]["task"]] not in ("chain_relay", "audit")
+            and rec.task_kinds[o["data"]["task"]] not in ("chain_relay", "audit", "split_key")
             and not any(d.seat == seat and d.task == o["data"]["task"] for d in rec.tasks_done)
             and any(s.speaker == seat and s.seq > o["seq"] for s in rec.statements)
         ),

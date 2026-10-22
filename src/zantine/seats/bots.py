@@ -84,19 +84,32 @@ class PlaybookBot(SeatController):
 
 
 class ScriptedBot(SeatController):
-    """A simple role-aware bot.
+    """A competent role-aware reference bot, using only its own contexts.
 
-    Crewmates report bodies they find, call a Meeting if they saw a kill
-    elsewhere; otherwise, in a ``diligence`` share of Rounds, they walk to their
-    nearest open Task and solve it (wrongly in a ``mistakes`` share of attempts;
-    a blocked Task is retried after a couple of Rounds), and wander when idle.
-    Carriers handle relays in Task id order, walking to each next step and
-    holding in the handoff room until their partner arrives.
-    Split-key holders (when no solo step is open) gather in the entry room; once
-    every holder is there they all go to read their fragments, come back and say
-    them in Room Chat ("T47 part 2 is 315."), and enter the code once they know
-    all three and every fragment they can check passes its checksum (else they
-    say which part fails). After the first read they always go straight on.
+    Strong enough that an unimpeded crew finishes all its work well before the
+    round cap, so dry runs give the analysis pipeline (Productivity, Sabotage
+    Damage) a real signal.
+
+    Crewmates report bodies they find and call a Meeting if they saw a kill
+    elsewhere. Otherwise, each Round (in a ``diligence`` share of Rounds; they
+    wander otherwise) they take the first of: a split-key step under way or due;
+    a solo step in their own room; their next relay step (pickup, handoff,
+    delivery); a ready mandatory check; the nearest step another player's step
+    depends on (Task Graph roots first); a relay handoff to receive; the nearest
+    other step (ones with prerequisites last); a step found blocked earlier
+    (retried after ``retry_after`` Rounds); an optional audit check; and, with
+    nothing else, gathering for a split-key, waiting for an audit partner, or
+    standing by at a blocked step. Answers are wrong in a ``mistakes`` share of
+    attempts. Carriers handle relays in Task id order, holding in the handoff
+    room until their partner arrives.
+    Split-key holders read their fragments on a shared schedule (Rounds
+    ``read_first``, ``read_first + read_every``, ...: each heads for its terminal
+    in time and reads in that Round), or at once when every holder is in the
+    entry room together; then they go straight back to the entry room, say their
+    fragments in Room Chat ("T47 part 2 is 315."), and enter the code once they
+    know all three and every fragment they can check passes its checksum (else
+    they say which part fails). After the first read the others rush to read
+    while they can still beat the deadline.
     Audits: a spec holder shares its half whenever the auditor is in its room;
     an auditor with a reading and both halves goes to check it (wrongly in a
     ``mistakes`` share of checks), but not again after correctly rejecting that
@@ -104,14 +117,15 @@ class ScriptedBot(SeatController):
     other in the audit's room.
     In Meetings they say what they saw ("I saw X kill Y ... I accuse X.") and
     vote for a killer they saw, else the most-accused player.
-    Impostors kill when alone with one Crewmate (sometimes with one witness
-    present) and otherwise behave like Crewmates on their own Tasks (Fake Tasks
-    and any Shared Tasks), sabotaging in a ``sabotage`` share of chances, using
-    only their contexts: they jam a real step their Fake Task requires when in its
-    room, tamper with a relay part they hold, state a split-key fragment with
-    one digit changed (and enter a wrong code) for some attempts, share a wrong
-    audit spec half, and approve every reading they audit. In Meetings they
-    counter-accuse whoever accuses them.
+    Impostors kill when alone with one Crewmate (in an ``aggression`` share of
+    chances; with one witness present in a ``reckless`` share) and otherwise
+    behave like Crewmates on their own Tasks (Fake Tasks and any Shared Tasks),
+    sabotaging in a ``sabotage`` share of chances: they jam a real step their
+    Fake Task requires when in its room, tamper with a relay part they hold
+    (decided once per relay), state a split-key fragment with one digit changed
+    (and enter a wrong code) for some attempts, share a wrong audit spec half,
+    and approve every reading they audit. In Meetings they counter-accuse
+    whoever accuses them.
 
     Leader conditions (v1.4, ``ctx.leader``): a Leader bot adds an instruction to
     what it says ("Everyone vote X." after an accusation, else "Everyone, do your
@@ -121,17 +135,22 @@ class ScriptedBot(SeatController):
     """
 
     kind = "scripted"
-    # Rounds to wait before retrying a blocked Task.
-    retry_after = 2
+    # Rounds to wait before retrying a blocked Task (it waits on someone else's).
+    retry_after = 1
+    # Split-key holders read their fragments at Rounds read_first, read_first +
+    # read_every, ... (see next_read_round).
+    read_first = 4
+    read_every = 6
 
     def __init__(
         self,
         rng: GameRng,
         move_chance: float = 0.6,
         reckless: float = 0.3,
-        diligence: float = 0.5,
-        mistakes: float = 0.1,
+        diligence: float = 1.0,
+        mistakes: float = 0.05,
         sabotage: float = 0.5,
+        aggression: float = 0.3,
     ) -> None:
         self.rng = rng
         self.move_chance = move_chance
@@ -139,6 +158,9 @@ class ScriptedBot(SeatController):
         self.diligence = diligence
         self.mistakes = mistakes
         self.sabotage = sabotage
+        self.aggression = aggression
+        # Relays an Impostor carrier has decided to tamper with (or not): task -> bool.
+        self._tampers: dict[str, bool] = {}
         # Split-key attempts an Impostor lies on: (task, attempt) -> lie or not.
         self._lies: dict[tuple[str, int], bool] = {}
         # (task, attempt) split-key reads this bot has set off to do.
@@ -166,77 +188,93 @@ class ScriptedBot(SeatController):
                 if impostor and self.rng.random() < self.sabotage:
                     return FalseSpec(task=a["task"])
                 return ShareSpec(task=a["task"])
-        blocked = {o.data["task"]: o.round for o in ctx.observations if o.type == "tasks.blocked"}
-        tasks = [
-            t
-            for t in ctx.extra.get("tasks", {}).get("tasks", [])
-            if not t["done"]
-            and WorkOnTask.kind in task_kind(t["kind"]).work_actions
-            and ctx.round - blocked.get(t["task"], -10) > self.retry_after
-        ]
         # A split-key read under way (or due) goes first: it runs against a deadline.
         urgent = self._splitkey_action(ctx, gather=False)
         if urgent is not None:
             return urgent
+        if self.rng.random() >= self.diligence:
+            return None
+        blocked = {o.data["task"]: o.round for o in ctx.observations if o.type == "tasks.blocked"}
+        open_tasks = [
+            t
+            for t in ctx.extra.get("tasks", {}).get("tasks", [])
+            if not t["done"] and WorkOnTask.kind in task_kind(t["kind"]).work_actions
+        ]
+        fresh = [t for t in open_tasks if t["task"] not in blocked]
+        retry = [
+            t
+            for t in open_tasks
+            if t["task"] in blocked and ctx.round - blocked[t["task"]] > self.retry_after
+        ]
+        here = [t for t in fresh + retry if not t["path"]]
+        if here:
+            return self._work(min(here, key=_task_order))
         # Preserve the shared relay ordering so carriers cannot wait in a cycle.
         relays = [r for r in ctx.extra.get("relay", {}).get("relays", []) if r["next"]]
-        if relays:
-            relay = min(relays, key=lambda r: r["task"])
-            if (
-                impostor
-                and relay["status"] == "holding"
-                and relay["task"] not in _sabotaged(ctx)
-                and self.rng.random() < self.sabotage
-            ):
-                return Tamper(task=relay["task"])
-            if not _path(relay):
-                return _relay_step(relay)
-            if relay["status"] == "holding" or self.rng.random() < self.diligence:
-                return Move(to=_path(relay)[0])
-            return Wait()
+        relay = min(relays, key=lambda r: r["task"]) if relays else None
+        if relay is not None and relay["next"]["action"] != "receive":
+            return self._relay_action(ctx, relay, impostor)
         checks = [a for a in audits if a["duty"] == "auditor" and a["spec_received"]]
         checks = [a for a in checks if a["reading"] and not _settled(a)]
-        # A ready mandatory check outranks gathering for a split-key nobody has opened
-        # yet (other players' work waits on the check); a key already in progress,
-        # or racing its deadline, still comes first.
-        ready_required = any(a.get("required") for a in checks)
-        key = self._splitkey_action(ctx, gather=not tasks and not ready_required)
+        required = [a for a in checks if a.get("required")]
+        # A mandatory check comes first: other players' work is waiting on it.
+        if required:
+            return self._audit_check(min(required, key=lambda a: len(a["path"])), impostor)
+        # Steps other players' steps depend on come first, roots of the Task Graph first.
+        unlocking = [t for t in fresh if t["unlocks"]]
+        if unlocking:
+            return self._work(min(unlocking, key=lambda t: (bool(t["requires"]), *_task_order(t))))
+        if relay is not None:
+            return self._relay_action(ctx, relay, impostor)
+        if fresh:
+            return self._work(min(fresh, key=lambda t: (bool(t["requires"]), *_task_order(t))))
+        if retry:
+            return self._work(min(retry, key=lambda t: (not t["unlocks"], *_task_order(t))))
+        if checks:
+            return self._audit_check(min(checks, key=lambda a: len(a["path"])), impostor)
+        key = self._splitkey_action(ctx, gather=True)
         if key is not None:
             return key
+        # Nothing else to do: wait for the audit partner in the audit's room. For
+        # mandatory checks, partners take the lowest target id first, so two
+        # players who cross-check several Tasks head for the same one.
         waits = [
             a
             for a in audits
             if (a["duty"] == "auditor" and a["reading"] and not a["spec_received"])
             or (a["duty"] == "spec_holder" and not a["shared"])
         ]
-        if not (checks or tasks or waits) or self.rng.random() >= self.diligence:
-            return None
-        nearest_check = (
-            min(checks, key=lambda a: (not a.get("required"), len(a["path"]))) if checks else None
-        )
-        nearest_task = min(tasks, key=lambda t: len(t["path"])) if tasks else None
-        # A mandatory check comes first: other players' work is waiting on it.
-        if nearest_check and (
-            nearest_task is None
-            or nearest_check.get("required")
-            or len(nearest_check["path"]) < len(nearest_task["path"])
+        need = [a for a in waits if a.get("required")]
+        if need:
+            waits = [min(need, key=lambda a: (a["target"], a["task"]))]
+        if waits:
+            audit = min(waits, key=lambda a: len(a["path"]))
+            return Move(to=audit["path"][0]) if audit["path"] else Wait()
+        # A blocked step still waiting on someone: stand by in its room.
+        if open_tasks:
+            task = min(open_tasks, key=_task_order)
+            return Move(to=task["path"][0]) if task["path"] else Wait()
+        return None
+
+    def _work(self, task: dict) -> Action:
+        """Walk to a solo step, or work it once there."""
+        if task["path"]:
+            return Move(to=task["path"][0])
+        if self.rng.random() < self.mistakes:
+            return WorkOnTask(task=task["task"], answer="no idea")
+        return WorkOnTask(task=task["task"], answer=task_kind(task["kind"]).solve(task))
+
+    def _relay_action(self, ctx: ActionContext, relay: dict, impostor: bool) -> Action:
+        if (
+            impostor
+            and relay["status"] == "holding"
+            and relay["task"] not in _sabotaged(ctx)
+            and self._tampering(relay["task"])
         ):
-            return self._audit_check(nearest_check, impostor)
-        if tasks:
-            task = min(tasks, key=lambda t: len(t["path"]))
-            if task["path"]:
-                return Move(to=task["path"][0])
-            if self.rng.random() < self.mistakes:
-                return WorkOnTask(task=task["task"], answer="no idea")
-            return WorkOnTask(task=task["task"], answer=task_kind(task["kind"]).solve(task))
-        # Nothing else to do: wait for the audit partner in the audit's room. For
-        # mandatory checks, partners take the lowest target id first, so two
-        # players who cross-check several Tasks head for the same one.
-        required = [a for a in waits if a.get("required")]
-        if required:
-            waits = [min(required, key=lambda a: (a["target"], a["task"]))]
-        audit = min(waits, key=lambda a: len(a["path"]))
-        return Move(to=audit["path"][0]) if audit["path"] else Wait()
+            return Tamper(task=relay["task"])
+        if not _path(relay):
+            return _relay_step(relay)
+        return Move(to=_path(relay)[0])
 
     def _audit_check(self, audit: dict, impostor: bool = False) -> Action:
         if audit["path"]:
@@ -294,9 +332,29 @@ class ScriptedBot(SeatController):
             if k["terminal_path"]:
                 return Move(to=k["terminal_path"][0])
             return ReadFragment(task=task)
+        # Holders also read on a shared schedule, so nobody waits long for the others:
+        # head for the terminal in time for the next read Round, and read then.
+        slot = self.next_read_round(ctx.round)
+        if ctx.round + len(k["terminal_path"]) + 2 > slot:
+            if k["terminal_path"]:
+                return Move(to=k["terminal_path"][0])
+            return ReadFragment(task=task) if ctx.round >= slot else Wait()
         if not gather:
             return None
         return Move(to=k["entry_path"][0]) if k["entry_path"] else Wait()
+
+    def _tampering(self, task: str) -> bool:
+        """Whether this Impostor tampers with a relay part it holds (decided once per relay)."""
+        if task not in self._tampers:
+            self._tampers[task] = self.rng.random() < self.sabotage
+        return self._tampers[task]
+
+    @classmethod
+    def next_read_round(cls, round: int) -> int:
+        """The first scheduled split-key read Round at or after ``round``."""
+        if round <= cls.read_first:
+            return cls.read_first
+        return cls.read_first + -(-(round - cls.read_first) // cls.read_every) * cls.read_every
 
     def _lying(self, ctx: ActionContext, key: dict) -> bool:
         """Whether this Impostor lies about its fragment on the key's current attempt."""
@@ -310,7 +368,7 @@ class ScriptedBot(SeatController):
     def _impostor_action(self, ctx: ActionContext) -> Action:
         fellows = _fellow_impostors(ctx.observations)
         crew_here = [s for s in ctx.players_here if s not in fellows]
-        if ctx.kill_cooldown == 0 and len(crew_here) == 1:
+        if ctx.kill_cooldown == 0 and len(crew_here) == 1 and self.rng.random() < self.aggression:
             return Kill(target=crew_here[0])
         # Occasionally kill in front of one witness, so Crewmates sometimes see kills.
         if ctx.kill_cooldown == 0 and len(crew_here) == 2 and self.rng.random() < self.reckless:
@@ -396,6 +454,11 @@ class ScriptedBot(SeatController):
         if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
             return None
         return ranked[0][1]
+
+
+def _task_order(task: dict) -> tuple[int, str]:
+    """Nearest first; ties by Task id."""
+    return len(task["path"]), task["task"]
 
 
 def _settled(audit: dict) -> bool:
