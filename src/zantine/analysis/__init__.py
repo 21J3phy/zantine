@@ -9,4 +9,5 @@ engine. ``zantine report <run-dir>`` writes ``<run-dir>/report/``. Definitions:
 - ``sabotage.py``: Sabotage Damage, a lineup fixed-effects regression
 - ``report.py``: every estimate, ``metrics.json``, ``progress.md``, the CLI
 - ``graphs.py``: the charts (matplotlib, imported only when drawing)
+- ``verification.py``: the v1.1 Verification Protocol experiment (#37)
 """

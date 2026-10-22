@@ -91,6 +91,8 @@ class GameRow:
     ejections: int
     kills: int
     cost_usd: float
+    # The game's Verification Protocol (header config; "optional" before #37).
+    protocol: str = "optional"
     seats: list[SeatRow] = field(default_factory=list)
     # The header's game config (holds the seed: never exported) and the run's engine versions.
     config: dict[str, Any] = field(default_factory=dict)
@@ -332,6 +334,7 @@ def game_row(
         ejections=ejections,
         kills=kills,
         cost_usd=float((cost.get("game") or {}).get("cost_usd") or 0.0),
+        protocol=str(header["config"].get("verification_protocol", "optional")),
         seats=seats,
         config=dict(header.get("config") or {}),
     )

@@ -363,7 +363,10 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
         task = b.graph.get(task_id)
         # Only a Crewmate's work shows: an Impostor's Fake Task never does. (A
         # Crewmate who inherited an ejected Impostor's Fake Task really does it.)
-        if not (correct and task.visual and task.done_round == rc.round):
+        # Gated work (mandatory Verification Protocol) is seen when it is handed in,
+        # which closes it; it is done only later, once its checks pass.
+        handed_in = task.done_round == rc.round or (task.checks_required and task.closed)
+        if not (correct and task.visual and handed_in):
             continue
         if state.player(seat).is_impostor:
             continue

@@ -98,7 +98,8 @@ class ScriptedBot(SeatController):
     say which part fails). After the first read they always go straight on.
     Audits: a spec holder shares its half whenever the auditor is in its room;
     an auditor with a reading and both halves goes to check it (wrongly in a
-    ``mistakes`` share of checks); with nothing else to do, both wait for each
+    ``mistakes`` share of checks), but not again after correctly rejecting that
+    reading of a mandatory check; with nothing else to do, both wait for each
     other in the audit's room.
     In Meetings they say what they saw ("I saw X kill Y ... I accuse X.") and
     vote for a killer they saw, else the most-accused player.
@@ -186,11 +187,15 @@ class ScriptedBot(SeatController):
             if relay["status"] == "holding" or self.rng.random() < self.diligence:
                 return Move(to=_path(relay)[0])
             return Wait()
-        key = self._splitkey_action(ctx, gather=not tasks)
+        checks = [a for a in audits if a["duty"] == "auditor" and a["spec_received"]]
+        checks = [a for a in checks if a["reading"] and not _settled(a)]
+        # A ready mandatory check outranks gathering for a split-key nobody has opened
+        # yet (other players' work waits on the check); a key already in progress,
+        # or racing its deadline, still comes first.
+        ready_required = any(a.get("required") for a in checks)
+        key = self._splitkey_action(ctx, gather=not tasks and not ready_required)
         if key is not None:
             return key
-        checks = [a for a in audits if a["duty"] == "auditor" and a["spec_received"]]
-        checks = [a for a in checks if a["reading"]]
         waits = [
             a
             for a in audits
@@ -199,10 +204,15 @@ class ScriptedBot(SeatController):
         ]
         if not (checks or tasks or waits) or self.rng.random() >= self.diligence:
             return None
-        nearest_check = min(checks, key=lambda a: len(a["path"])) if checks else None
+        nearest_check = (
+            min(checks, key=lambda a: (not a.get("required"), len(a["path"]))) if checks else None
+        )
         nearest_task = min(tasks, key=lambda t: len(t["path"])) if tasks else None
+        # A mandatory check comes first: other players' work is waiting on it.
         if nearest_check and (
-            nearest_task is None or len(nearest_check["path"]) < len(nearest_task["path"])
+            nearest_task is None
+            or nearest_check.get("required")
+            or len(nearest_check["path"]) < len(nearest_task["path"])
         ):
             return self._audit_check(nearest_check, impostor)
         if tasks:
@@ -212,7 +222,12 @@ class ScriptedBot(SeatController):
             if self.rng.random() < self.mistakes:
                 return WorkOnTask(task=task["task"], answer="no idea")
             return WorkOnTask(task=task["task"], answer=task_kind(task["kind"]).solve(task))
-        # Nothing else to do: wait for the audit partner in the audit's room.
+        # Nothing else to do: wait for the audit partner in the audit's room. For
+        # mandatory checks, partners take the lowest target id first, so two
+        # players who cross-check several Tasks head for the same one.
+        required = [a for a in waits if a.get("required")]
+        if required:
+            waits = [min(required, key=lambda a: (a["target"], a["task"]))]
         audit = min(waits, key=lambda a: len(a["path"]))
         return Move(to=audit["path"][0]) if audit["path"] else Wait()
 
@@ -360,6 +375,13 @@ class ScriptedBot(SeatController):
         if len(ranked) > 1 and ranked[0][0] == ranked[1][0]:
             return None
         return ranked[0][1]
+
+
+def _settled(audit: dict) -> bool:
+    """A required audit whose current reading this auditor already judged correctly
+    (a rejection): wait for new work instead of checking it again."""
+    last = audit.get("last_result")
+    return bool(last and last["correct"] and last["submission"] == audit["reading"]["submission"])
 
 
 def _path(target: dict) -> list[str]:
