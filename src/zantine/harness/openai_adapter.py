@@ -99,6 +99,13 @@ class OpenAIAdapter(ProviderAdapter):
             response = self.client.responses.create(**params)
         except Exception as exc:
             raise _provider_error(exc) from exc
+        if _get(response, "status") == "failed":
+            # A reply that failed server-side has no trustworthy usage; with no HTTP
+            # status, callers hold the call's worst case as possibly billed.
+            error = _get(response, "error")
+            raise ProviderError(
+                f"response failed: {_get(error, 'code')}: {_get(error, 'message')}", fatal=False
+            )
         return normalize(response, reasoning_in_output=self.reasoning_in_output)
 
 

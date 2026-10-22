@@ -49,13 +49,36 @@ Thinking and reasoning tokens are billed at the output price by every lab. Cache
 
 ### Not verified (check before the first paid run)
 
-These come from reading example numbers or are not stated in the docs. The gated smoke test (`ZANTINE_LIVE=1 uv run pytest --live`, $2 cap per Model) plays each Model for real; its transcript (`harness.call` token counts, `provider_cost_usd`) settles most of them.
+These come from reading example numbers or are not stated in the docs. Settle them with the probe before the pilot:
+
+```sh
+ZANTINE_LIVE=1 uv run zantine probe --live --models all --out runs/probe.json   # $2 cap per Model
+```
+
+It sends the real Neutral Harness request for one Seat (about 5K tokens) plus a few variants, 2 to 6 calls per Model, and reads the provider's **raw** usage, so a wrong normalization can't confirm itself. How reasoning and cached tokens are counted is decided jointly: each call admits the readings that reproduce its reported total (a counter the reply leaves out is unknown, not zero), the two identical calls' readings are intersected, and a question is answered only when every remaining reading agrees. Probe calls turn the SDK's own retries off, so each billed request is one metered call; a call lost without an HTTP status, or a reply with status `failed`, keeps its worst case against the cap; the output-cap probe still reserves the Model's full cap; tokens a raw total shows but no counter names are held at the output price (and with no total the whole reservation stays held); a call that costs more than its reservation stops that Model's probe; and reaching the cap keeps the findings so far. If xAI's cap does leave reasoning out (the item below), nothing bounds a Grok call's reasoning in advance, so one call can cost more than its reservation, by its own excess; the probe makes no call after it, nor after a Grok call that failed and may have been billed. Each check ends `confirmed`, `contradicted` (fix the adapter), `observed` (undocumented; the value seen is recorded), `inconclusive` or `failed`; the command exits 1 on any `contradicted` or `failed`. A Model whose key is not set is skipped.
+
+| Check | Models | Settles |
+|---|---|---|
+| `serves_request` | all | the API accepts our request: Muse Wonder's ID and `store` on Meta, `parameters_json_schema` and `generateContent` on Google |
+| `reasoning_accounting`, `cached_in_input` | OpenAI, xAI, Meta | reasoning inside (OpenAI, Meta) or on top of (xAI) `output_tokens`, and `cached_tokens` inside `input_tokens`, from `total_tokens` |
+| `xai_billed_cost` | xAI | our normalization and prices reproduce `cost_in_usd_ticks`, on a fresh and a cached call. Every xAI reply is checked: a bill above our price counts against the cap at its own amount, and a bill neither reading matches is `contradicted` and stops that Model's probe, since its reservations are priced from `models.toml` |
+| `thoughts_accounting`, `cached_in_prompt` | Google | thoughts outside `candidates_token_count`; cached inside `prompt_token_count` |
+| `cache_read` | all | a repeated prompt is cached at our prompt size |
+| `cache_write_field` | Meta | whether Meta reports cache-write tokens |
+| `output_cap_scope` | all but Anthropic | whether `max_output_tokens` (sent as 256) counts reasoning; xAI is assumed not to. Generated tokens come from the raw counts as resolved above, `inconclusive` while unresolved |
+| `default_effort` | OpenAI, xAI, Meta | the effort the reply echoes when none is sent (Astra and Muse: undocumented) |
+| `parallel_tool_calls` | OpenAI, xAI, Meta | asked outright for two calls, does `parallel_tool_calls: false` hold to one; `confirmed` only if the flag-off reply completed with exactly one call and a control call with the flag on does make two |
+| `validated_mode` | Google | whether `function_calling_config.mode: VALIDATED` accepts our tool schemas (the adapter sends `AUTO`) |
+
+The gated smoke test (`ZANTINE_LIVE=1 uv run pytest --live`, $2 cap per Model) then plays each Model through a short game.
 
 - **xAI reasoning tokens outside `output_tokens`.** Not stated; read off xAI's examples (prompt + completion + reasoning = total). If it is wrong, we overcount xAI output, which errs toward the spend cap. Compare `cost_usd` with `provider_cost_usd` in the first live transcript.
 - **xAI `max_output_tokens` caps visible output only, not reasoning.** So the worst-case estimate the spend cap uses for Grok may be low on a long-thinking call; keep some headroom in `--spend-cap`.
 - **Cached tokens inside input on xAI, and reasoning inside output on OpenAI.** Both inferred from the docs' worked examples, not stated outright.
 - **Meta:** the default effort, any cache-write charge, the minimum cacheable prefix, and whether `store` is accepted on its Responses API are not documented. Every code example on dev.meta.ai uses `muse-spark-1.3`, not Muse Wonder. Meta's examples name the key `MODEL_API_KEY`; we use `META_API_KEY` to avoid clashes.
 - **OpenAI:** Astra's default effort, and whether `parallel_tool_calls: false` is honored on these two models, are not stated (we send `medium` explicitly either way).
+- **SDK retries in games (open).** The OpenAI and Anthropic SDKs retry a timed-out or 429/5xx request twice by default, inside one metered call. A timeout the lab still billed, followed by a successful retry, is not counted against the spend cap. Turning retries off would make transient errors cost the Seat an attempt (an Invalid Action), so it is left as a decision.
+- **Google (fixed):** `google-genai` follows `CONTINUATION` replies with more requests by default, which would bill several requests inside one metered call. The adapter sends `automatic_continuation: false`.
 - **Google:** `parameters_json_schema` is checked against the installed `google-genai` SDK, not the web docs. `generateContent` is now labeled "Legacy" next to the newer Interactions API, but it is still served. A single-turn request needs no thought signatures (only the current turn's function calls are checked).
 
 ## Notes

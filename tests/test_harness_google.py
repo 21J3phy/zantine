@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import httpx
 import pytest
 from google import genai
@@ -48,6 +50,40 @@ def test_config_is_valid_for_the_sdk() -> None:
     )
     assert config.thinking_config.thinking_level == types.ThinkingLevel.MEDIUM
     assert config.tools[0].function_declarations[0].parameters_json_schema == SCHEMA
+
+
+def test_one_send_is_one_request_even_on_a_continuation(monkeypatch) -> None:
+    """The real SDK follows CONTINUATION replies by default; that would bill more
+    requests inside one metered call, so the adapter turns it off."""
+    from google import genai
+
+    client = genai.Client(api_key="test-key")
+    requests: list[Any] = []
+
+    def one_request(*, model: str, contents: Any, config: Any) -> types.GenerateContentResponse:
+        requests.append(config)
+        part = types.Part(function_call=types.FunctionCall(name="wait", args={}))
+        return types.GenerateContentResponse(
+            candidates=[
+                types.Candidate(
+                    content=types.Content(role="model", parts=[part]),
+                    # Continues once, so a regression fails here instead of looping.
+                    finish_reason=types.FinishReason.CONTINUATION
+                    if len(requests) == 1
+                    else types.FinishReason.STOP,
+                    continuation_token=b"more" if len(requests) == 1 else None,
+                )
+            ],
+            usage_metadata=types.GenerateContentResponseUsageMetadata(
+                prompt_token_count=100, candidates_token_count=256, total_token_count=356
+            ),
+        )
+
+    monkeypatch.setattr(client.models, "_generate_content", one_request)
+    response = GoogleAdapter(ARGON, client).send(REQUEST)
+    assert len(requests) == 1
+    assert response.stop_reason == "max_tokens"
+    assert response.usage.output_tokens == 256
 
 
 def test_usage_adds_thoughts_to_output_and_splits_cached_input() -> None:
