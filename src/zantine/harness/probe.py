@@ -337,8 +337,6 @@ class _Probe:
         # Readings every call so far admits (intersected call by call).
         self.readings: frozenset[Reading] = READINGS
         self.first: tuple[ProviderResponse, dict[str, Any]] | None = None
-        # The most any call so far has counted against the cap (see ``call``).
-        self.largest_charge = 0.0
 
     def add(self, check: str, assumption: str, verdict: str, detail: str, **evidence: Any) -> None:
         self.findings.append(Finding(self.model, check, assumption, verdict, detail, evidence))
@@ -348,13 +346,6 @@ class _Probe:
     ) -> tuple[ProviderResponse, dict[str, Any], Any]:
         """One metered call; returns the normalized response, raw usage and raw reply."""
         adapter, tap = _variant(self.adapter, **variant)
-        # The Ledger reserves the Model's worst case from its output cap, but a lab whose
-        # cap leaves reasoning out (xAI, as assumed) has no cap on reasoning to price.
-        # So each call must also fit the largest charge seen so far: past the first
-        # call, a run of long-thinking replies is stopped before it crosses the cap.
-        spent, cap = self.ledger.spent_usd, self.ledger.spend_cap_usd
-        if spent + self.largest_charge > cap:
-            raise SpendCapReached(spent, cap, self.largest_charge)
         reserved: list[float] = []
         try:
             response = self.ledger.send(
@@ -378,9 +369,16 @@ class _Probe:
         charge = max(charge, billed or 0.0)
         if charge > record.cost_usd:
             self.ledger.hold(charge - record.cost_usd)
-        self.largest_charge = max(self.largest_charge, charge)
         if self.provider == "xai":
             self._check_bill(phase, response, usage, record.cost_usd)
+        if reserved and charge > reserved[0]:
+            # The Ledger priced this call's worst case from the output cap; a lab whose
+            # cap leaves reasoning out (xAI, as assumed) can bill past it, and then no
+            # later call can be bounded either. So at most this one call overspends.
+            raise _Halt(
+                f"{phase} cost ${charge:.4f}, more than its ${reserved[0]:.4f} worst case; "
+                "later calls can't be bounded"
+            )
         return response, usage, tap.reply
 
     def _unpriced(self, usage: dict[str, Any], record: CallRecord, reserved: float) -> float:

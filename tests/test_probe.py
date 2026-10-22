@@ -431,24 +431,37 @@ def test_a_cut_off_flag_off_reply_confirms_nothing() -> None:
     assert not any(c["parallel_tool_calls"] for c in fake.responses.calls)  # no control sent
 
 
-def test_long_xai_reasoning_is_stopped_after_the_first_call_that_shows_it() -> None:
-    """xAI's cap may leave reasoning out, so no reservation bounds it in advance;
-    each later call must fit the largest charge seen, so the cap holds after one call."""
+@pytest.mark.parametrize("big_from_call", [1, 5])
+def test_a_call_that_costs_more_than_its_reservation_stops_the_probe(big_from_call: int) -> None:
+    """xAI's cap may leave reasoning out, so no reservation bounds a Grok call in
+    advance. The probe stops at the first call that costs more than its reservation,
+    so only that one call can overspend, by its own excess."""
     grok = model_spec("grok-4.7")
+    fake: OpenAIFake
 
     def respond(params: dict[str, Any]) -> Any:
+        big = len(fake.responses.calls) >= big_from_call
+        reasoning = 90_000 if big else 1500
         reply = xai_reply(
-            ("wait", {}), input_tokens=6000, cached=5000, output_tokens=40, reasoning_tokens=62_000
+            ("wait", {}),
+            input_tokens=6000,
+            cached=5000,
+            output_tokens=40,
+            reasoning_tokens=reasoning,
         )
         u = reply.usage
-        u.total_tokens = u.input_tokens + u.output_tokens + u.output_tokens_details.reasoning_tokens
-        cost = PER_TOKEN * (1000 * grok.input + 5000 * grok.cached_input + 62_040 * grok.output)
+        u.total_tokens = u.input_tokens + u.output_tokens + reasoning
+        cost = PER_TOKEN * (
+            1000 * grok.input + 5000 * grok.cached_input + (40 + reasoning) * grok.output
+        )
         u.cost_in_usd_ticks = round(cost * 1e10)
         return reply
 
     fake = OpenAIFake(respond)
     ledger = Ledger(2)
     findings = probe.probe_model(XAIAdapter(grok, fake), ledger)
-    assert ledger.spent_usd <= ledger.spend_cap_usd
-    assert findings[-1].check == "spend_cap"
-    assert len(fake.responses.calls) == int(2 // ledger.records[0].cost_usd)
+    assert len(fake.responses.calls) == big_from_call
+    assert findings[-1].check == "stopped" and "worst case" in findings[-1].detail
+    worst = grok.worst_case_cost(probe.probe_request().text_size())
+    excess = ledger.records[-1].cost_usd - worst
+    assert ledger.spent_usd <= ledger.spend_cap_usd + excess
