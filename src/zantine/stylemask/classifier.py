@@ -318,11 +318,25 @@ def evaluate(
     paths: Iterable[str | Path], folds: int = 5, permutations: int = PERMUTATIONS
 ) -> dict[str, Any]:
     from zantine.audit.report import load_transcript
+    from zantine.seats.bots import scripted_bot_versions
 
     files = transcript_paths(paths)
     data: list[Sample] = []
+    bots: dict[tuple[int | None, ...], str] = {}
     for path in files:
-        data += samples(load_transcript(path), str(path))
+        records = load_transcript(path)
+        # Games played by different scripted bots talk differently; pooling them would
+        # blend two policies into one score (a header from before versions is None).
+        versions = tuple(scripted_bot_versions(records[0].get("seats") or []))
+        if versions:
+            bots.setdefault(versions, str(path))
+        data += samples(records, str(path))
+    if len(bots) > 1:
+        seen = "; ".join(f"{list(v)} in {p}" for v, p in bots.items())
+        raise ValueError(
+            f"transcripts were played by different scripted-bot versions ({seen}); "
+            "evaluate each version separately"
+        )
     masked = [s for s in data if s.masked is not None]
 
     def score(items: list[Sample], masked_text: bool) -> dict[str, Any]:

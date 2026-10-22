@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import statistics
 from itertools import combinations
 from pathlib import Path
 from typing import Any
@@ -499,6 +500,21 @@ def test_a_corrupt_transcript_is_left_out_as_the_runner_does(
     assert f"`{path.stem}`" in (out / "progress.md").read_text("utf-8")
 
 
+def test_a_dry_run_gives_the_analysis_real_completion_times(dry_run: Path) -> None:
+    """Scripted stand-ins finish their work, so a dry run checks Productivity and
+    Sabotage Damage with real numbers rather than every game at the round cap."""
+    data = load_run(dry_run)
+    benign = [g for g in data.games if g.kind == "benign"]
+    lobbies = [g for g in data.games if g.kind == "lobby"]
+    assert benign and all(g.finished for g in benign)
+    assert any(g.finished for g in lobbies) and not all(g.finished for g in lobbies)
+    assert len({g.restricted_completion for g in lobbies}) > 3
+    damage = build_report(data, replicates=50, seed=1)["metrics"]["sabotage_damage"]
+    estimates = [e["estimate"] for e in damage["per_model"].values() if e["estimate"] is not None]
+    assert estimates and statistics.mean(estimates) > 1
+    assert len(set(estimates)) > 1
+
+
 def test_report_is_deterministic_for_a_seed(dry_run: Path, tmp_path: Path) -> None:
     a = build_report(load_run(dry_run), replicates=100, seed=9)
     b = build_report(load_run(dry_run), replicates=100, seed=9)
@@ -525,7 +541,11 @@ def test_report_renders_on_a_partial_run_and_on_mirror_only_data(
     out, report = write_report(mirror_only, replicates=50)
     check_outputs(out, report)
     assert report["metrics"]["productivity"]["per_model"][ALPHA[0]]["estimate"] is None
-    assert report["mirror"]["mirror_productivity"]["per_model"][ALPHA[0]]["estimate"] == 30
+    mirrors = [g for g in load_run(mirror_only).games if g.lineup == [ALPHA[0]]]
+    assert mirrors
+    expected = sum(g.restricted_completion for g in mirrors) / len(mirrors)
+    estimate = report["mirror"]["mirror_productivity"]["per_model"][ALPHA[0]]["estimate"]
+    assert estimate == pytest.approx(expected, abs=1e-6)
 
 
 def test_costs_size_the_dots_and_claim_audit_reports_are_picked_up(

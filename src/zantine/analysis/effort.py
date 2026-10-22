@@ -201,7 +201,11 @@ def setup(g: GameRow) -> dict[str, Any]:
             for k, v in sorted(with_historical_defaults(g.config).items())
             if k not in PER_GAME_CONFIG
         },
-        "engine": {k: g.engine.get(k) for k in ENGINE_KEYS},
+        # Dry Seats play as the scripted bots, so their version matters too.
+        "engine": {
+            k: g.engine.get(k)
+            for k in ENGINE_KEYS + (("scripted_bots",) if game_mode(g) == "dry" else ())
+        },
         "seats": sorted({f"{s.controller}/{s.harness}" for s in g.seats}),
     }
 

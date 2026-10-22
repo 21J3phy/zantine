@@ -68,6 +68,7 @@ from zantine.schedule import (
     make_manifest,
     make_minority_manifest,
     make_verification_manifest,
+    pinned_versions,
     seat_lineup,
     summary,
 )
@@ -580,11 +581,11 @@ def _recover(run_dir: Path, game: dict[str, Any], attempt: int, path: Path, mode
 
 
 def _check_versions(manifest: dict[str, Any], mode: str) -> None:
-    planned, current = manifest["engine"], engine_versions(manifest.get("experiment"))
+    planned = pinned_versions(manifest["engine"], mode)
+    current = pinned_versions(engine_versions(manifest.get("experiment")), mode)
     # A version the current engine pins but the manifest lacks counts as changed:
-    # the run was scheduled before those rules were versioned.
+    # the run was scheduled before those rules (or bots) were versioned.
     keys = planned.keys() | current.keys()
-    keys = keys if mode == "live" else keys - {"harness"}
     changed = [k for k in sorted(keys) if planned.get(k) != current.get(k)]
     if changed:
         was = {k: planned.get(k) for k in changed}

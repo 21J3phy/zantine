@@ -353,6 +353,17 @@ def test_comparison_warns_when_runs_differ() -> None:
     assert len(warnings) == 4 and "checks the pipeline" in warnings[2]
 
 
+@pytest.mark.parametrize(("mode", "warned"), [("live", False), ("dry", True)])
+def test_only_the_pins_a_mode_plays_on_are_compared(mode: str, warned: bool) -> None:
+    """Live Seats never play as the scripted bots, so a new bot version alone doesn't
+    make two live runs incomparable; for dry runs it does."""
+    engine = {"scenario_version": 6, "transcript_schema": 2, "harness": "neutral-v8"}
+    o = {"run": {"pool": ["a"], "engine": engine, "mode": mode}}
+    p = {"run": {"pool": ["a"], "engine": engine | {"scripted_bots": 2}, "mode": mode}}
+    warnings = repro.comparability(o, p)
+    assert any("engine versions differ" in w for w in warnings) == warned
+
+
 # CLI ------------------------------------------------------------------------------------------
 
 

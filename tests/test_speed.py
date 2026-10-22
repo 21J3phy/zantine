@@ -457,7 +457,7 @@ def test_report_survives_estimates_without_finite_replicates(tmp_path: Path) -> 
     run_dir = tmp_path / "sparse"
     create_run(run_dir, speed.make_speed_manifest(POOL, 1))
     execute(run_dir, mode="dry")
-    keep = {"b01-lobby-00", "b01-lobby-03"}
+    keep = {"b01-lobby-01", "b01-lobby-13"}
     for path in (run_dir / "games").glob("*.jsonl"):
         if path.stem not in keep:
             path.unlink()

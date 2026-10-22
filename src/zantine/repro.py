@@ -63,7 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from zantine import runs, schedule
-from zantine.schedule import PUBLIC_SEED_BIT, SEED_DERIVATIONS
+from zantine.schedule import PUBLIC_SEED_BIT, SEED_DERIVATIONS, pinned_versions
 
 COMMITMENT = "commitment.json"
 SECRET = "commitment.secret.json"
@@ -608,8 +608,12 @@ def comparability(official: dict[str, Any], public: dict[str, Any]) -> list[str]
         out.append(f"Model Pools differ: official {o.get('pool')}, public {p.get('pool')}")
     if o.get("engine") is None:
         out.append("official results do not record engine versions; cannot check them")
-    elif o.get("engine") != p.get("engine"):
-        out.append(f"engine versions differ: official {o.get('engine')}, public {p.get('engine')}")
+    else:
+        # Same mode: only the pins that mode plays on (a live run ignores the scripted bots).
+        mode = o.get("mode") if o.get("mode") == p.get("mode") else None
+        ours, theirs = (pinned_versions(r.get("engine") or {}, mode) for r in (o, p))
+        if ours != theirs:
+            out.append(f"engine versions differ: official {ours}, public {theirs}")
     if o.get("mode") != p.get("mode"):
         out.append(
             f"official run is {o.get('mode')}, this run is {p.get('mode')}: "

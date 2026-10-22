@@ -32,6 +32,7 @@ from zantine.runs import (
 )
 from zantine.scenario import build_scenario
 from zantine.schedule import load_pool, make_manifest, seat_lineup
+from zantine.seats.bots import SCRIPTED_BOT_VERSION
 
 POOL = load_pool()
 # Prices that never expire, so these offline tests don't depend on today's date.
@@ -184,6 +185,21 @@ def test_engine_changes_refuse_to_resume(tmp_path: Path) -> None:
     (run_dir / "manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="scenario_version"):
         execute(run_dir, mode="dry")
+
+
+@pytest.mark.parametrize("planned", [None, SCRIPTED_BOT_VERSION - 1])
+def test_a_dry_run_never_resumes_with_other_scripted_bots(tmp_path: Path, planned) -> None:
+    run_dir = schedule(tmp_path)
+    manifest = load_manifest(run_dir)
+    if planned is None:  # scheduled before the bots were versioned
+        del manifest["engine"]["scripted_bots"]
+    else:
+        manifest["engine"]["scripted_bots"] = planned
+    (run_dir / "manifest.json").write_text(json.dumps(manifest))
+    with pytest.raises(ValueError, match="scripted_bots"):
+        execute(run_dir, mode="dry")
+    # Live Seats don't play as the scripted bots, so a live run is unaffected.
+    runs._check_versions(manifest, "live")
 
 
 def test_a_manifest_is_never_replaced(tmp_path: Path) -> None:
