@@ -772,3 +772,80 @@ def test_live_seats_without_a_live_run_json_have_unknown_provenance() -> None:
     assert build_minority_report(data, replicates=20, run_mode="dry")["provenance"]["status"] == (
         "mixed"
     )
+
+
+def strip_protocol(path: Path) -> None:
+    """Rewrite a transcript's header as it was written before #37 (no protocol field)."""
+    lines = path.read_text("utf-8").splitlines()
+    header = json.loads(lines[0])
+    header["config"].pop("verification_protocol")
+    lines[0] = json.dumps(header, sort_keys=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_a_run_from_before_verification_protocols_is_still_the_planned_run(
+    off_run: Path, tmp_path: Path
+) -> None:
+    """Headers without ``verification_protocol`` were played under the optional protocol:
+    an old completed run, and one resumed across #37 (mixed headers), load in full."""
+    old = tmp_path / "old"
+    shutil.copytree(off_run, old, ignore=shutil.ignore_patterns("report"))
+    paths = sorted((old / "games").glob("*.jsonl"))
+    for path in paths:
+        strip_protocol(path)
+    data = load_minority_run(old)
+    assert data.mismatched == [] and len(data.games) == 84
+
+    mixed = tmp_path / "mixed"
+    shutil.copytree(off_run, mixed, ignore=shutil.ignore_patterns("report"))
+    for path in sorted((mixed / "games").glob("*.jsonl"))[::2]:
+        strip_protocol(path)
+    data = load_minority_run(mixed)
+    assert data.mismatched == [] and len(data.games) == 84
+
+    # A recorded protocol other than the planned one is still a different setup.
+    first = paths[0]
+    lines = first.read_text("utf-8").splitlines()
+    header = json.loads(lines[0])
+    header["config"]["verification_protocol"] = "mandatory"
+    lines[0] = json.dumps(header, sort_keys=True)
+    first.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    data = load_minority_run(old)
+    assert len(data.games) == 83
+    [left_out] = data.mismatched
+    assert "verification_protocol" in left_out["reason"]
+
+
+def test_a_missing_protocol_signs_like_optional_and_unlike_another() -> None:
+    manifest = make_minority_manifest(POOL, 3)
+    g = next(g for g in manifest["games"] if not g["style_mask"])
+    config, spec = game_setup(manifest, g, "dry")
+    played = new_game(config, spec)
+    played.run()
+    header = played.transcript.records[0]
+    assert header["config"]["verification_protocol"] == "optional"
+    old = copy.deepcopy(header)
+    old["config"].pop("verification_protocol")
+    assert setup_signature(old) == setup_signature(header)
+    other = copy.deepcopy(header)
+    other["config"]["verification_protocol"] = "none"
+    assert setup_signature(other) != setup_signature(header)
+
+
+def test_baseline_is_refused_for_a_minority_report(off_run: Path, tmp_path: Path) -> None:
+    out = tmp_path / "report"
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "report",
+                str(off_run),
+                "--baseline",
+                str(tmp_path / "missing"),
+                "--replicates",
+                "20",
+                "--out",
+                str(out),
+            ]
+        )
+    assert exc.value.code == 2
+    assert not out.exists()

@@ -5,6 +5,25 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Any
 
+# Verification Protocols (rules/verification.py): no audits, the seeded optional
+# audits of v1, or two independent checks before work counts.
+VERIFICATION_PROTOCOLS = ("none", "optional", "mandatory")
+# Version of the mandatory protocol's rules (rules/verification.py and its audit and
+# reassignment hooks). Recorded in a verification experiment's manifest; bump it
+# whenever those rules change, so a run is never resumed or reported across rules.
+VERIFICATION_RULES_VERSION = 1
+# Config fields added after earlier runs, with what a header without them meant:
+# before #37 every game was played under the optional Verification Protocol.
+HISTORICAL_CONFIG: dict[str, Any] = {"verification_protocol": "optional"}
+
+
+def with_historical_defaults(config: dict[str, Any]) -> dict[str, Any]:
+    """A transcript header's config with fields it predates filled as they were played.
+
+    Only absent fields are filled; a recorded value (e.g. ``"mandatory"``) is kept.
+    """
+    return {**HISTORICAL_CONFIG, **config}
+
 
 @dataclass(frozen=True)
 class LeaderConfig:
@@ -81,6 +100,11 @@ class GameConfig:
     # Optional Audit Tasks (rules/audit.py): maximum targets checked by two other
     # players at setup; these do not gate completion of the submitted work.
     audit_tasks: int = 4
+    # Verification Protocol (rules/verification.py), one of VERIFICATION_PROTOCOLS:
+    # "none" places no audits; "optional" places the ``audit_tasks`` optional audits;
+    # "mandatory" makes every auditable Task count only after two independent
+    # passing checks (``audit_tasks`` is then unused).
+    verification_protocol: str = "optional"
     # Sabotage (rules/sabotage.py): the chance that a solo step (real or fake) is a
     # Visual Task, whose real completion everyone else in its room sees. Impostors
     # get ``tasks_per_crewmate`` Fake Tasks each.
@@ -110,6 +134,10 @@ class GameConfig:
             or not 0 <= self.visual_task_chance <= 1
         ):
             raise ValueError("bad task settings")
+        if self.verification_protocol not in VERIFICATION_PROTOCOLS:
+            raise ValueError(
+                f"verification_protocol must be one of {', '.join(VERIFICATION_PROTOCOLS)}"
+            )
         if self.room_chat_budget_chars < 0:
             raise ValueError("room_chat_budget_chars must be at least 0")
         if self.impostor_seats is not None:

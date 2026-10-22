@@ -139,6 +139,10 @@ class _Facts:
         # Solo Tasks (``is_solo_kind``) by id, from the assignees' briefs. Only these
         # appear in ``task_done`` Claims; a Task with no brief seen is never one.
         self.solo_tasks: set[str] = set()
+        # Solo Tasks gated by mandatory checks (the brief's ``checks_required``): a
+        # correct grade only closes one, and when (or whether) its checks pass is
+        # never observed by anyone, so no ``task_done`` Claim is planted about it.
+        self.gated: set[str] = set()
         header = next((r for r in records if r.get("kind") == "header"), {})
         self.rooms: list[str] = list(header.get("map", {}).get("rooms", ()))
         for o in sorted(
@@ -156,9 +160,15 @@ class _Facts:
                     if d.get("correct"):
                         self.done.append((seat, d["task"], rnd, o["seq"]))
                 case "tasks.assigned":
-                    self.solo_tasks.update(t["task"] for t in d["tasks"] if is_solo_kind(t["kind"]))
+                    for t in d["tasks"]:
+                        if is_solo_kind(t["kind"]):
+                            self._brief(t)
                 case "tasks.reassigned" if is_solo_kind(d["task"]["kind"]):
-                    self.solo_tasks.add(d["task"]["task"])
+                    self._brief(d["task"])
+        self.solo_tasks -= self.gated
+
+    def _brief(self, task: dict[str, Any]) -> None:
+        (self.gated if task.get("checks_required") else self.solo_tasks).add(task["task"])
 
     def window(self, seat: int, k: int) -> tuple[_View, _View] | None:
         """``seat``'s own view at the start and the end of Round ``k`` (None if not alive)."""
