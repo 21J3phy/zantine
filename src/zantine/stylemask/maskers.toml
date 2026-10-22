@@ -1,0 +1,33 @@
+# Style Mask rewrite models (OpenAI-compatible endpoints).
+#
+# The masker must be one fixed-weight open-weight model for a whole experiment,
+# from a family outside the Model Pool (docs/model-pool.md, including the
+# open-weight families deferred to v2.x: DeepSeek, Qwen, Muse, Mistral), so it
+# can't make anyone sound like one of the players. It should also differ from
+# the Claim extractor's family, so the meaning check doesn't share its blind spots.
+#
+# Fields (same as audit/extractors.toml):
+#   family              model family
+#   base_url            OpenAI-compatible API root (…/v1); vLLM, Together, OpenRouter, ...
+#   model               model name sent to the endpoint
+#   revision            weights revision the endpoint serves (the Hugging Face commit
+#                       vLLM was started with). Required: an unpinned masker is refused.
+#   api_key_env         env var holding the key ("" for a local server without auth)
+#   input, output       USD per 1M tokens (0 for a self-hosted server)
+#   max_output_tokens   per-call output cap (a 500-character Talk Budget is ~150 tokens)
+#   status              "pinned" for the masker experiments use
+#   price_valid_until   optional; after this date the price is refused until re-checked
+
+# Microsoft Phi-4 (14B, MIT licence), self-hosted:
+#   vllm serve microsoft/phi-4 --revision 2db69c1c3e91a05d2c64a3185acfbaf36f744e25 --port 8001
+# Revision is the Hugging Face main commit as of 2026-10-20.
+[maskers."phi-4-vllm"]
+family = "Phi"
+base_url = "http://localhost:8001/v1"
+model = "microsoft/phi-4"
+revision = "2db69c1c3e91a05d2c64a3185acfbaf36f744e25"
+api_key_env = ""
+input = 0.0
+output = 0.0
+max_output_tokens = 400
+status = "pinned"

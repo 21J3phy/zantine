@@ -237,6 +237,7 @@ HISTORICAL_DEFAULTS: dict[str, Any] = {
     "splitkey_tasks": 0,  # #72: no split-key Tasks before them
     "visual_task_chance": 0,  # #74: no Visual Tasks before them
     "leader": None,  # #24: no Leader (every v1 game)
+    "style_mask": False,  # #36: messages were broadcast unmasked before it
 }
 # Rule modules left out of the comparison: ``verification`` (the protocol is the
 # treatment, compared separately) and modules that only record ground truth and change

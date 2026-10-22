@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zantine.config import GameConfig
 from zantine.meeting import run_meeting
@@ -26,6 +26,9 @@ from zantine.state import GameState, PlayerState
 from zantine.transcript import Transcript
 from zantine.vision import emit_room_snapshots
 
+if TYPE_CHECKING:
+    from zantine.stylemask import StyleMask
+
 
 class Game:
     def __init__(
@@ -36,9 +39,19 @@ class Game:
         rng: GameRng | None = None,
         rules: Rules | None = None,
         scenario: Scenario | None = None,
+        style_mask: StyleMask | None = None,
     ) -> None:
         if len(controllers) != config.num_seats:
             raise ValueError(f"need {config.num_seats} controllers, got {len(controllers)}")
+        if style_mask is not None and not config.style_mask:
+            raise ValueError("a Style Mask was given but config.style_mask is off")
+        if config.style_mask and style_mask is None:
+            from zantine.stylemask import dry_style_mask
+
+            style_mask = dry_style_mask()
+        # Rewrites every public message when the Style Mask condition is on.
+        self.style_mask = style_mask
+        self._mask_outcomes: dict[str, int] = {}
         self.config = config
         self.rng = rng or GameRng(config.seed)
         self.rules = rules or default_rules()
@@ -84,6 +97,75 @@ class Game:
     def observations_of(self, seat: int) -> tuple[Observation, ...]:
         return tuple(self._observations[seat])
 
+    def record_style_mask(self) -> dict[str, Any]:
+        """Write the Style Mask's final provenance as a ``style_mask.final`` event.
+
+        ``style_mask.setup`` is written before any call, so this one carries what
+        endpoints actually served (masker, extractor and judge ``served`` lists)
+        and the outcome counts. Called at game end, and by ``play_live`` when a
+        run aborts. Ground truth only; never observed by players.
+        """
+        assert self.style_mask is not None
+        final = {
+            **self.style_mask.info(),
+            "outcomes": dict(sorted(self._mask_outcomes.items())),
+        }
+        self.event("style_mask.final", **final)
+        return final
+
+    def public_message(
+        self,
+        channel: str,
+        speaker: int,
+        text: str,
+        earlier: Sequence[tuple[int, str]] = (),
+        max_chars: int | None = None,
+        **where: Any,
+    ) -> tuple[str, dict[str, Any]]:
+        """The text players see for a message one player broadcasts to others.
+
+        The single hook for public speech: Meeting statements now, Room Chat
+        later. Call it after the Talk Budget cut and before any ``observe``, then
+        record the returned fields on the message's ground-truth event. With the
+        Style Mask off it returns ``text`` unchanged and no fields. With it on,
+        the text is the checked rewrite (``stylemask.StyleMask.apply``), every
+        candidate is logged as a ``style_mask.check`` event, and the fields are
+        ``original``, ``masker`` (id) and ``mask`` (outcome). ``earlier`` is the
+        channel's previous messages as players saw them, ``(speaker, text)``;
+        ``where`` (e.g. meeting, pass_index, order) is copied into the events.
+        """
+        if self.style_mask is None:
+            return text, {}
+        from zantine.stylemask import MaskInput
+
+        state = self.state
+        item = MaskInput(
+            channel=channel,
+            text=text,
+            speaker=speaker,
+            roster=state.roster(),
+            living=tuple(p.seat for p in state.living()),
+            rooms=state.map.rooms,
+            round=state.round,
+            meeting=state.meetings_held,
+            max_chars=self.config.talk_budget(speaker) if max_chars is None else max_chars,
+            earlier=tuple((state.player(s).name, t) for s, t in earlier),
+        )
+        result = self.style_mask.apply(item)
+        expected = result.expected.to_dict() if result.expected else None
+        for attempt in result.attempts:
+            self.event(
+                "style_mask.check",
+                channel=channel,
+                speaker=speaker,
+                **where,
+                **attempt.to_dict(),
+                expected=expected,
+            )
+        self._mask_outcomes[result.outcome] = self._mask_outcomes.get(result.outcome, 0) + 1
+        fields = {"original": text, "masker": self.style_mask.masker_id, "mask": result.outcome}
+        return result.text, fields
+
     # Lifecycle ----------------------------------------------------------------
 
     def start(self) -> None:
@@ -107,6 +189,8 @@ class Game:
                 for p in state.players
             ],
         )
+        if self.style_mask is not None:
+            self.event("style_mask.setup", **self.style_mask.info())
         for module in self.rules.modules:
             module.on_setup(self)
         impostors = [p.seat for p in state.players if p.is_impostor]
@@ -195,6 +279,8 @@ class Game:
             data = module.result_extra(self)
             if data is not None:
                 extra[module.name] = data
+        if self.style_mask is not None:
+            extra["style_mask"] = self.record_style_mask()
         self.transcript.result(
             winner=state.winner.value,
             reason=state.win_reason,

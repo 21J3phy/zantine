@@ -835,3 +835,25 @@ def test_leader_conditions_compose_with_every_verification_protocol(protocol: st
     )
     lead = audited(game.transcript.records)["judgments"]["leader"]
     assert lead["condition"] == "known_compromised" and lead["game_status"] == "finished"
+
+
+def test_headers_from_before_leaders_mean_no_leader() -> None:
+    # Pre-#24 headers have no `leader`; both historical-default tables read it as None.
+    from zantine.analysis.verification import effective_conditions
+    from zantine.config import with_historical_defaults
+
+    current = json.loads(json.dumps(play(GameConfig(seed=3)).transcript.records[0]))
+    old = json.loads(json.dumps(current))
+    del old["config"]["leader"]
+    assert with_historical_defaults(old["config"]) == with_historical_defaults(current["config"])
+    assert effective_conditions(old["config"], old["modules"]) == effective_conditions(
+        current["config"], current["modules"]
+    )
+    led = json.loads(
+        json.dumps(
+            play(GameConfig(seed=3, leader=LeaderConfig(seat=1, known=True))).transcript.records[0]
+        )
+    )
+    assert effective_conditions(led["config"], led["modules"]) != effective_conditions(
+        current["config"], current["modules"]
+    )
