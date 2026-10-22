@@ -699,6 +699,26 @@ def test_a_live_baseline_is_not_pooled_with_a_dry_experiment(
     )
 
 
+def test_a_baseline_on_other_scripted_bots_is_refused(experiment: Path, tmp_path: Path) -> None:
+    """Dry runs on different bot versions would confound the protocol with the bots,
+    in either direction, and even when neither run has a run.json to name its mode."""
+    from zantine.schedule import make_manifest
+
+    base = tmp_path / "base"
+    create_run(base, make_manifest(POOL, 41, blocks=1, config={"round_cap": 100}))
+    execute(base, mode="dry", max_games=4)
+    build(load_run(experiment), load_run(base), replicates=20)  # same bots: accepted
+    copy = tmp_path / "copy"
+    shutil.copytree(experiment, copy)
+    for data_dir in (copy, base):
+        (data_dir / "run.json").unlink()
+    for old in ("experiment", "baseline"):
+        run, baseline = load_run(copy), load_run(base)
+        del (run if old == "experiment" else baseline).manifest["engine"]["scripted_bots"]
+        with pytest.raises(ValueError, match="different engines"):
+            build(run, baseline, replicates=20)
+
+
 @pytest.mark.parametrize("baseline_kind", ["speed", "workload"])
 def test_a_baseline_played_under_other_conditions_is_refused(
     experiment: Path, tmp_path: Path, baseline_kind: str

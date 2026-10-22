@@ -511,8 +511,10 @@ MODE_VERSIONS = {"live": "harness", "dry": "scripted_bots"}
 
 
 def pinned_versions(engine: dict[str, Any], mode: str | None) -> dict[str, Any]:
-    """The entries of ``engine`` (an ``engine_versions()`` dict) that games in ``mode`` use."""
-    other = {key for m, key in MODE_VERSIONS.items() if m != mode}
+    """The entries of ``engine`` (an ``engine_versions()`` dict) that games in ``mode`` use.
+
+    With the mode unknown (None) every entry is kept, so nothing is ignored by mistake."""
+    other = {key for m, key in MODE_VERSIONS.items() if mode is not None and m != mode}
     return {k: v for k, v in engine.items() if k not in other}
 
 

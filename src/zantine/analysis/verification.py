@@ -217,9 +217,14 @@ def _estimate(point: float, boot: np.ndarray, n_games: int) -> Estimate:
 
 
 def run_mode(data: RunData) -> str | None:
-    """``dry`` or ``live`` from the run's ``run.json``; None before its first game."""
+    """``dry`` or ``live`` from the run's ``run.json``, else from its transcripts' Seat
+    controllers; None before its first game, or if its games mix modes."""
     path = data.run_dir / runs.RUN
-    return json.loads(path.read_text("utf-8")).get("mode") if path.is_file() else None
+    if path.is_file():
+        return json.loads(path.read_text("utf-8")).get("mode")
+    kinds = [{s.controller for s in g.seats} for g in data.games]
+    modes = {k.pop() if len(k) == 1 else None for k in kinds}
+    return modes.pop() if len(modes) == 1 and modes <= set(runs.MODES) else None
 
 
 # Game settings that may differ between the games compared: each game's seed and
@@ -376,10 +381,15 @@ def check_baseline(run: RunData, baseline: RunData) -> None:
             f"the experiment run is {modes[0] or 'unplayed'} but the baseline is "
             f"{modes[1] or 'unplayed'}; only runs played in the same mode are comparable"
         )
-    engine = pinned_versions(run.manifest["engine"], modes[0])
     # Each run's own mandatory rules are checked against the current ones (check_rules).
-    engine.pop("verification_rules", None)
-    other = {k: baseline.manifest["engine"].get(k) for k in engine}
+    engine, other = (
+        {
+            k: v
+            for k, v in pinned_versions(d.manifest["engine"], modes[0]).items()
+            if k != "verification_rules"
+        }
+        for d in (run, baseline)
+    )
     if engine != other:
         raise ValueError(f"the runs were scheduled on different engines: {engine} vs {other}")
     same_dir = run.run_dir.resolve() == baseline.run_dir.resolve()
