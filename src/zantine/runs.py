@@ -12,6 +12,8 @@ Layout of ``runs/<run-id>/`` (other tools read it; see ``docs/architecture.md``)
     games/<game-id>.jsonl    the transcript of each complete game
     aborted/<game-id>.<attempt>.jsonl   transcripts of attempts stopped by the spend cap
                                         or a fatal API error (kept for the spend record)
+    commitment.json          the Seed Commitment, published before results (``repro.py``)
+    commitment.secret.json   its nonce; private until the version is retired
 
 A game is done when ``games/<game-id>.jsonl`` parses, has a ``result`` record
 and ends with a complete ``cost`` record. Transcripts are written to a temporary

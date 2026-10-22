@@ -339,16 +339,31 @@ function Reproduce() {
       <div className="cols three">
         <div>
           <h3>Public Seed Set</h3>
-          <p>A published set of game seeds anyone can run on the open engine. A rerun should land within the official error bars. Published with v1.</p>
+          <p>A full v1 schedule of 378 games on published seeds, from a separate seed domain that can never share a seed with an official run. Rerun it with your own API keys: each estimate is compared with the official 95% interval, and every miss says whether it is within both runs’ sampling noise.</p>
         </div>
         <div>
           <h3>Seed Commitment</h3>
-          <p>A SHA-256 hash of each official run’s seeds and transcripts, published before its results, so nobody can choose or change games afterwards.</p>
+          <p>Before any results, we publish a SHA-256 commitment to each official run’s seeds and transcripts. Its hashes are blinded with a secret nonce, so they reveal nothing, yet no game can be chosen or changed afterwards. Membership tags let anyone check that no Public Seed Set seed is an official one.</p>
         </div>
         <div>
           <h3>Retirement release</h3>
-          <p>When a version is retired, its official seeds and transcripts are published in full. Until then they stay private, so future models cannot memorize them.</p>
+          <p>When a version is retired, its official seeds, transcripts and nonce are published in full, and anyone can verify them against the earlier commitment. Dry-run games are replayed and must give byte-identical transcripts. Until then the seeds stay private, so future models cannot memorize them.</p>
         </div>
+      </div>
+      <div className="code-block">
+        <div className="code-head">Check the results yourself</div>
+        <pre>
+          <code>{`# Rerun the Public Seed Set and compare with the official error bars (paid; resumable)
+ZANTINE_LIVE=1 uv run zantine repro public --live --spend-cap 500 \\
+    --official metrics.public.json --commitment commitment.json
+uv run zantine repro public --dry-run --official metrics.public.json   # pipeline only, $0
+
+# Before release: no Public Seed Set seed is among the committed official seeds
+uv run zantine repro overlap --commitment commitment.json
+
+# After retirement: the released seeds and transcripts match the published commitment
+uv run zantine verify commitment.json release/v1 --expect <commitment_sha256>`}</code>
+        </pre>
       </div>
       <div className="code-block">
         <div className="code-head">Play and replay a game with scripted bots, no API keys needed</div>
@@ -359,6 +374,7 @@ uv run zantine replay runs/seed-7.jsonl   # static HTML replay with a role-revea
 uv run pytest`}</code>
         </pre>
       </div>
+      <p className="muted">Full guide, including what a commitment holds and how to read the comparison: docs/reproduce.md in the engine repository.</p>
     </div>
   );
 }
