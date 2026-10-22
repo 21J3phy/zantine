@@ -4,7 +4,9 @@ At setup every Crewmate is privately assigned solo steps (``zantine.tasks``).
 Working a Task is an action taken in the Task's room with an answer. The answer
 is graded automatically and privately: only the worker is told the result. A
 step whose prerequisites are not truly complete at the start of the Round is
-blocked, and the worker is told so. All counted Tasks done is a crew win.
+blocked, and the worker is told so. All counted Tasks done is a crew win. Under a
+mandatory Verification Protocol, correct work on a Task with ``checks_required``
+closes it and waits for its checks (``rules/verification.py``) before it is done.
 
 The rules implemented here are documented in ``docs/rules.md``; keep them in sync.
 """
@@ -54,6 +56,9 @@ class TaskBoard:
     views: dict[int, dict[str, dict[str, Any]]]
     # Tasks each seat has been told it completed.
     known_done: dict[int, set[str]]
+    # Set by a rule whose outcomes are private (the mandatory Verification Protocol):
+    # reassignment then weighs candidates by ``open_load``, never by hidden results.
+    outcome_blind_load: bool = False
 
     def view(self, task: Task, seat: int) -> dict[str, Any]:
         """A seat's private brief for one of its Tasks (never the answer key).
@@ -73,6 +78,9 @@ class TaskBoard:
         if len(task.assignees) > 1:
             # Everyone on a multi-player Task, in slot order.
             view["assignees"] = list(task.assignees)
+        if task.checks_required:
+            # The Verification Protocol's rule, not anyone's progress.
+            view["checks_required"] = task.checks_required
         return view
 
     def _ref(self, task_id: str) -> dict[str, Any]:
@@ -91,6 +99,25 @@ class TaskBoard:
         view = self.view(task, seat)
         self.views[seat][task.id] = view
         return view
+
+    def reassignment_load(self, seat: int) -> int:
+        """How much unfinished work ``seat`` holds, as reassignment weighs candidates.
+
+        By default (the v1 rule, unchanged): every Task it holds that is not done.
+        With ``outcome_blind_load``: ``open_load``."""
+        if self.outcome_blind_load:
+            return self.open_load(seat)
+        return sum(not t.done for t in self.graph.of(seat))
+
+    def open_load(self, seat: int) -> int:
+        """Required Tasks ``seat`` holds that are neither done nor closed. Optional work
+        (audits) is left out and closed work counts as finished, because whether it
+        passed its checks is private, so who is handed a Task never depends on it."""
+        return sum(
+            not (t.done or t.closed)
+            for t in self.graph.of(seat)
+            if task_kind(t.kind).required_for_completion
+        )
 
     def summary(self) -> dict[str, Any]:
         counted = self.graph.counted()
@@ -148,8 +175,14 @@ class WorkOnTask(Action):
         actions = task_kind(task.kind).work_actions
         if self.kind not in actions:
             return f"{task.id} is worked with {', '.join(actions)}, not {self.kind}"
+        if task.closed and task.checks_required:
+            # Before ``done``: the same answer before and after the checks pass, so
+            # the worker cannot probe whether its work has been verified.
+            return f"{task.id} was submitted correctly: no more work can be done on it"
         if task.done:
             return f"{task.id} is already done"
+        if task.closed:
+            return f"{task.id} is closed: no more work can be done on it"
         if actor.room != task.room:
             return f"{task.id} is in {task.room}, not {actor.room}"
         if not _answer_shape_ok(self.answer):
@@ -211,7 +244,7 @@ class TasksModule(GameModule):
                 options = [s for s in living_crew if s not in task.assignees]
                 if state.player(seat).alive or not options:
                     continue
-                load = {s: sum(not t.done for t in b.graph.of(s)) for s in options}
+                load = {s: b.reassignment_load(s) for s in options}
                 least = min(load.values())
                 new = rng.choice([s for s in options if load[s] == least])
                 task.assignees[slot] = new
@@ -267,6 +300,13 @@ def resolve_work(game: Game, rc: RoundContext) -> None:
         if not correct:
             if not task.fake:
                 stats.wrong += 1
+        elif task.checks_required:
+            # Verification Protocol: the work is in, but the Task is done (unlocks
+            # dependents, counts toward the win) only when its checks pass, which
+            # its module decides (rules/verification.py). The worker knows only
+            # that its answer was right.
+            task.closed = True
+            b.known_done[seat].add(task.id)
         elif not task.done:
             task.done, task.done_by, task.done_round = True, seat, rc.round
             if not task.fake:

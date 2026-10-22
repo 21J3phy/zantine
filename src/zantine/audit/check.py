@@ -513,11 +513,19 @@ class _Checker:
                 # The auditor is told the outcome of every check it makes, in the
                 # Audit's room.
                 results = self.own("audit.result", task=task)
-                passed = [o for o in results if o["data"].get("correct")]
+                passed = [o for o in results if _completes(self.rec, task, o["data"])]
                 if not passed:
                     return results or holding or None
                 return self.ruled_out(passed, lambda o: room, holding)
             if duty == "spec_holder":
+                if task in self.rec.required_audits:
+                    # A mandatory check's holder earns its credit only through a half
+                    # it shared, and is never told whether the check then passed: it
+                    # knows only that nothing could complete before its first share.
+                    shared = self.own("audit.shared", task=task)
+                    if not shared:
+                        return holding or None
+                    return self.before_all(shared, holding)
                 # The spec holder is told when its Audit closes; it shares the credit
                 # only for a spec it shared itself. Where it stood is not recorded.
                 closed = self.own("audit.closed", task=task)
@@ -546,8 +554,25 @@ class _Checker:
         passed = [o for o in graded if o["data"].get("correct")]
         if not passed:
             return graded or holding or None
+        if task in self.rec.gated:
+            # Mandatory checks: the worker knows its work went in, never whether or
+            # when the checks passed. It knows only that the Task could not be
+            # complete before its first correct submission.
+            return self.before_all(passed, holding)
         room = self.rec.task_rooms.get(task)
         return self.ruled_out(passed, lambda o: room, holding)
+
+    def before_all(
+        self, occasions: list[dict[str, Any]], context: list[dict[str, Any]]
+    ) -> list[dict[str, Any]] | None:
+        """Proof that the claimed Round(s) all precede the earliest of ``occasions``
+        (e.g. the first correct submission of gated work, or a holder's first
+        share), before which no completion was possible; None when a claimed Round
+        is at or after it, where the speaker cannot know."""
+        first = min(o["round"] for o in occasions)
+        if any(r >= first for r in self.rounds(since_meeting=False)):
+            return None
+        return sorted([*occasions, *context], key=lambda o: o["seq"]) or None
 
     def splitkey_shares(self, task: str) -> list[dict[str, Any]]:
         """The speaker's completion notices for split-key attempts it read itself."""
@@ -577,10 +602,19 @@ class _Checker:
         if self.c.subject != self.speaker:
             return None
         done = {(d.round, d.task) for d in matches}
-        for type in ("tasks.graded", "audit.result"):
-            for o in self.own(type):
-                if o["data"].get("correct") and (o["round"], o["data"]["task"]) in done:
-                    return [_cite(o)]
+        for o in self.own("tasks.graded"):
+            task = o["data"]["task"]
+            # A correct grade on gated work says nothing about when its checks pass.
+            if (
+                o["data"].get("correct")
+                and task not in self.rec.gated
+                and (o["round"], task) in done
+            ):
+                return [_cite(o)]
+        for o in self.own("audit.result"):
+            task = o["data"]["task"]
+            if _completes(self.rec, task, o["data"]) and (o["round"], task) in done:
+                return [_cite(o)]
         # A split-key holder who read the completed attempt is told it completed.
         for o in self.own("splitkey.completed"):
             task = o["data"]["task"]
@@ -634,3 +668,12 @@ def _rounds_text(rounds: range) -> str:
     if len(rounds) == 1:
         return f"Round {rounds[0]}"
     return f"Rounds {rounds[0]}-{rounds[-1]}"
+
+
+def _completes(rec: Any, task: str, result: dict[str, Any]) -> bool:
+    """Whether a check the auditor was told about completed its Audit: a correct
+    verdict does, except on a mandatory check, which completes only on a passing
+    approval (a correct rejection leaves it open)."""
+    if task in rec.required_audits:
+        return result.get("verdict") == "approve" and result.get("outcome") == "pass"
+    return bool(result.get("correct"))

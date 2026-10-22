@@ -37,8 +37,13 @@ class Task:
     # it done (``zantine.rules.sabotage``), which gives the doer an alibi.
     visual: bool = False
     # No more work can be done on it, whether or not it is done (e.g. a relay
-    # delivered with a tampered part). Closed Tasks are never reassigned.
+    # delivered with a tampered part, or correct work awaiting its checks).
+    # Closed Tasks are never reassigned.
     closed: bool = False
+    # Hook for Verification Protocols: correct work on this Task closes it but
+    # completes it only once this many independent checks pass (the protocol's
+    # module then sets ``done``). 0 = correct work completes it at once.
+    checks_required: int = 0
     done: bool = False
     done_by: int | None = None
     done_round: int | None = None

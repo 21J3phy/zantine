@@ -57,11 +57,15 @@ from zantine.schedule import (
     EFFORT,
     EFFORT_PER_LEVEL,
     MINORITY,
+    VERIFICATION,
+    VERIFICATION_BLOCKS,
+    VERIFICATION_NEW_PROTOCOLS,
     engine_versions,
     load_pool,
     make_effort_manifest,
     make_manifest,
     make_minority_manifest,
+    make_verification_manifest,
     seat_lineup,
     summary,
 )
@@ -499,14 +503,18 @@ def _recover(run_dir: Path, game: dict[str, Any], attempt: int, path: Path, mode
 
 
 def _check_versions(manifest: dict[str, Any], mode: str) -> None:
-    planned, current = manifest["engine"], engine_versions()
-    keys = planned.keys() if mode == "live" else planned.keys() - {"harness"}
-    changed = [k for k in sorted(keys) if planned[k] != current.get(k)]
+    planned, current = manifest["engine"], engine_versions(manifest.get("experiment"))
+    # A version the current engine pins but the manifest lacks counts as changed:
+    # the run was scheduled before those rules were versioned.
+    keys = planned.keys() | current.keys()
+    keys = keys if mode == "live" else keys - {"harness"}
+    changed = [k for k in sorted(keys) if planned.get(k) != current.get(k)]
     if changed:
+        was = {k: planned.get(k) for k in changed}
+        now = {k: current.get(k) for k in changed}
         raise ValueError(
             f"engine changed since this run was scheduled ({', '.join(changed)}): "
-            f"{ {k: planned[k] for k in changed} } -> { {k: current.get(k) for k in changed} }; "
-            "schedule a new run"
+            f"{was} -> {now}; schedule a new run"
         )
 
 
@@ -560,18 +568,19 @@ def add_commands(sub: Any) -> None:
     s = sub.add_parser("schedule", help="plan a run: Balanced Lobby blocks, Benign, Mirror")
     s.add_argument(
         "--experiment",
-        choices=("v1", speed.EXPERIMENT, EFFORT, MINORITY),
+        choices=("v1", speed.EXPERIMENT, EFFORT, MINORITY, VERIFICATION),
         default="v1",
         help="v1 (default); speed: random per-Seat Talk Budget tiers plus a realism check; "
         "effort: the v1.6 effort sweep, Mirror Matches at low and high effort; "
         "minority: v1.3 Lopsided Lobbies, 42 ordered pairs x 2 games x Style Mask off/on "
-        "(168 games)",
+        f"(168 games); {VERIFICATION}: the v1.1 Verification Protocol experiment "
+        "(docs/sample-size.md)",
     )
     s.add_argument(
         "--blocks",
         type=int,
         help=f"blocks of 28 games (default 12; {speed.TIER_BLOCKS} for --experiment speed; "
-        "not for minority)",
+        f"{VERIFICATION_BLOCKS} per protocol for --experiment {VERIFICATION}; not for minority)",
     )
     s.add_argument("--mirror", action="store_true", help="add 6 Mirror Matches per Model (v1)")
     s.add_argument(
@@ -585,6 +594,12 @@ def add_commands(sub: Any) -> None:
         default=speed.REALISM_GAMES,
         help=f"speed only: games whose budgets follow Model throughput "
         f"(default {speed.REALISM_GAMES})",
+    )
+    s.add_argument(
+        "--protocols",
+        help=f"comma-separated Verification Protocols to schedule with --experiment "
+        f"{VERIFICATION} (default {','.join(VERIFICATION_NEW_PROTOCOLS)}; the optional "
+        "baseline is the v1 run)",
     )
     s.add_argument(
         "--master-seed",
@@ -619,6 +634,8 @@ def _schedule(args: argparse.Namespace) -> int:
     config = {"round_cap": args.round_cap} if args.round_cap is not None else {}
     if args.per_level is not None and args.experiment != EFFORT:
         raise ValueError("--per-level is for --experiment effort")
+    if args.protocols and args.experiment != VERIFICATION:
+        raise ValueError(f"--protocols needs --experiment {VERIFICATION}")
     if args.experiment == EFFORT:
         if args.blocks is not None or args.mirror:
             raise ValueError("--blocks and --mirror are not for the effort sweep")
@@ -643,6 +660,22 @@ def _schedule(args: argparse.Namespace) -> int:
             config=config,
         )
         text = speed.summary(manifest)
+    elif args.experiment == VERIFICATION:
+        if args.mirror:
+            raise ValueError("the Verification Protocol experiment has no Mirror Matches")
+        protocols = (
+            [p.strip() for p in args.protocols.split(",") if p.strip()]
+            if args.protocols
+            else list(VERIFICATION_NEW_PROTOCOLS)
+        )
+        manifest = make_verification_manifest(
+            load_pool(),
+            master_seed,
+            blocks=VERIFICATION_BLOCKS if args.blocks is None else args.blocks,
+            protocols=protocols,
+            config=config,
+        )
+        text = summary(manifest)
     else:
         blocks = 12 if args.blocks is None else args.blocks
         manifest = make_manifest(

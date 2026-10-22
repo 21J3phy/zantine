@@ -34,6 +34,7 @@ from zantine.analysis.bootstrap import (
 )
 from zantine.analysis.metrics import GameRow, RunData, load_run
 from zantine.analysis.report import CI_NOTE, REPORT_DIR, model_info, run_mode, strip_private
+from zantine.config import with_historical_defaults
 from zantine.harness.pricing import EFFORT_LEVELS
 
 EFFORT_SCHEMA = 1
@@ -195,7 +196,11 @@ def setup(g: GameRow) -> dict[str, Any]:
     effective game config (but its seed), the engine versions, and each Seat's
     controller kind and Harness. Effort and the seed are the permitted differences."""
     return {
-        "config": {k: v for k, v in sorted(g.config.items()) if k not in PER_GAME_CONFIG},
+        "config": {
+            k: v
+            for k, v in sorted(with_historical_defaults(g.config).items())
+            if k not in PER_GAME_CONFIG
+        },
         "engine": {k: g.engine.get(k) for k in ENGINE_KEYS},
         "seats": sorted({f"{s.controller}/{s.harness}" for s in g.seats}),
     }
