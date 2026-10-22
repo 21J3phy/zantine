@@ -50,6 +50,10 @@ round, so a run stopped early still has every cell about equally filled.
 game's id (``game_seed``), so it differs per game, is reproducible, and is
 listed explicitly in the manifest (for Seed Commitments, ADR 0001). Names, seat
 order and the map are drawn from that seed, so they are re-shuffled every game.
+A manifest's ``seed_domain`` says which derivation it uses: ``run`` (official
+runs; absent in older manifests) gives seeds below 2**63, ``public`` (the Public
+Seed Set, ``repro.py``) hashes a different prefix and sets bit 63, so the two
+can never share a seed.
 
 **Experiments.** A manifest without an ``experiment`` field is the v1 plan
 above (the speed experiment, ``speed.py``, is v1 blocks plus Talk Budgets).
@@ -80,11 +84,18 @@ LOBBY_MODELS = 5
 SEATS_PER_MODEL = 2
 IMPOSTORS = 2
 MIRROR_PER_MODEL = 6
+# How a game seed is derived, per seed domain (``game_seed``).
+SEED_DERIVATIONS = {
+    "run": "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >> 1",
+    "public": "2**63 | int(sha256('zantine-public/<master_seed>/<game_id>')[:8], big) >> 1",
+}
+SEED_DERIVATION = SEED_DERIVATIONS["run"]
+# Official (``run``) seeds are below this; Public Seed Set seeds are at or above it.
+PUBLIC_SEED_BIT = 1 << 63
 EFFORT = "effort"  # manifest["experiment"] of an effort sweep
 # Effort sweep: Mirror Matches per Model at each swept level (medium comes from v1).
 EFFORT_PER_LEVEL = 10
 EFFORT_SWEEP_LEVELS = ("low", "high")
-SEED_DERIVATION = "int(sha256('zantine-run/<master_seed>/<game_id>')[:8], big) >> 1"
 
 # v1.1 Verification Protocol experiment (docs/sample-size.md): each new protocol
 # gets 63 Balanced Lobbies + 21 Benign Matches, i.e. 3 blocks; the optional
@@ -104,10 +115,23 @@ def load_pool() -> list[str]:
     return list(load_models())
 
 
-def game_seed(master_seed: int, game_id: str) -> int:
-    """A game's seed: a 63-bit hash of the master seed and the game id."""
-    digest = hashlib.sha256(f"zantine-run/{master_seed}/{game_id}".encode()).digest()
-    return int.from_bytes(digest[:8], "big") >> 1
+def game_seed(master_seed: int, game_id: str, domain: str = "run") -> int:
+    """A game's seed: a 63-bit hash of the master seed and the game id.
+
+    ``domain="public"`` (the Public Seed Set) hashes another prefix and sets bit
+    63, so its seeds are disjoint from every official seed by construction.
+    """
+    if domain not in SEED_DERIVATIONS:
+        raise ValueError(f"unknown seed domain {domain!r}")
+    prefix = "zantine-run" if domain == "run" else "zantine-public"
+    digest = hashlib.sha256(f"{prefix}/{master_seed}/{game_id}".encode()).digest()
+    seed = int.from_bytes(digest[:8], "big") >> 1
+    return seed if domain == "run" else PUBLIC_SEED_BIT | seed
+
+
+def seed_domain(manifest: dict[str, Any]) -> str:
+    """``run`` (official) or ``public``; manifests from before seed domains are ``run``."""
+    return manifest.get("seed_domain", "run")
 
 
 def lineups(pool: Sequence[str]) -> list[tuple[str, ...]]:
@@ -231,8 +255,13 @@ def make_manifest(
     blocks: int = 12,
     mirror: bool = False,
     config: dict[str, Any] | None = None,
+    domain: str = "run",
 ) -> dict[str, Any]:
-    """The full plan of a run: every game, in run order, with its seed."""
+    """The full plan of a run: every game, in run order, with its seed.
+
+    ``domain`` is the seed domain (``game_seed``); only the Public Seed Set uses
+    ``public``.
+    """
     if blocks < 0:
         raise ValueError("blocks must be >= 0")
     design = CyclicDesign(pool)
@@ -255,11 +284,11 @@ def make_manifest(
                         "config": {},
                     }
                 )
-    _number(games, master_seed)
+    _number(games, master_seed, domain)
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "master_seed": master_seed,
-        "seed_derivation": SEED_DERIVATION,
+        "seed_derivation": SEED_DERIVATIONS[domain],
         "pool": list(design.pool),
         "blocks": blocks,
         "block_size": len(design.lineups) + design.n,
@@ -270,6 +299,8 @@ def make_manifest(
         "config": dict(config or {}),
         "games": games,
     }
+    if domain != "run":  # official manifests keep their pre-domain format
+        manifest["seed_domain"] = domain
     problems = verify(manifest)
     if problems:
         raise AssertionError(f"scheduler produced an invalid plan: {problems[:5]}")
@@ -446,10 +477,10 @@ def _block_games(
     return planned
 
 
-def _number(games: list[dict[str, Any]], master_seed: int) -> None:
+def _number(games: list[dict[str, Any]], master_seed: int, domain: str = "run") -> None:
     for index, game in enumerate(games):
         game["index"] = index
-        game["seed"] = game_seed(master_seed, game["id"])
+        game["seed"] = game_seed(master_seed, game["id"], domain)
     if len({g["seed"] for g in games}) != len(games):  # astronomically unlikely
         raise ValueError("seed collision; choose another master seed")
 
@@ -542,8 +573,11 @@ def _verify_plan(manifest: dict[str, Any]) -> list[str]:
         out.append("duplicate game ids")
     if len({g["seed"] for g in games}) != len(games):
         out.append("duplicate seeds")
+    domain = seed_domain(manifest)
+    if domain not in SEED_DERIVATIONS:
+        return [f"unknown seed domain {domain!r}"]
     for g in games:
-        if g["seed"] != game_seed(manifest["master_seed"], g["id"]):
+        if g["seed"] != game_seed(manifest["master_seed"], g["id"], domain):
             out.append(f"{g['id']}: seed is not derived from the master seed")
         if not set(g["impostors"]) <= set(g["lineup"]):
             out.append(f"{g['id']}: an Impostor Model is not in the lineup")

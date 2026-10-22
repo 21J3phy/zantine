@@ -1,5 +1,5 @@
 """Command-line interface: ``zantine play ...``, ``replay``, ``schedule``, ``run``,
-``report``, ``calibrate``, ``audit``."""
+``report``, ``calibrate``, ``audit``, and ``repro`` / ``commit`` / ``verify`` / ``release``."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from zantine import runs
+from zantine import repro, runs
 from zantine.analysis import report
 from zantine.config import GameConfig
 from zantine.engine import Game
@@ -67,6 +67,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     r.add_argument("--out", type=Path, help="HTML file to write (default: <transcript>.html)")
     runs.add_commands(sub)  # `zantine schedule`, `zantine run`
     report.add_command(sub)  # `zantine report`
+    repro.add_commands(sub)  # `zantine repro`, `commit`, `verify`, `release`
     _add_calibrate_parser(sub)
     a = sub.add_parser("audit", help="run the Claim Audit over a transcript")
     a.add_argument("transcript", type=Path, help="JSONL transcript from `zantine play --out`")
@@ -137,6 +138,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return replay(parser, args.transcript, args.out)
     if args.command in ("schedule", "run"):
         return runs.command(parser, args)
+    if args.command in repro.COMMANDS:
+        return repro.command(parser, args)
     if args.command == "calibrate":
         return calibrate(parser, args)
     if args.command == "audit":

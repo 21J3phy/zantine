@@ -92,7 +92,7 @@ Graph `verification_protocols`: on the left, **Sabotage Damage** prevented (y) a
 - `cost_vs_metrics`: cost per game against **Productivity**, correct-vote share, **Impostor** survival and **Sabotage Damage**.
 - `mirror`: **Mirror Matches**, labelled as descriptive self-play.
 
-Every chart carries the interval caption. `metrics.json` holds every number behind every chart (estimates, interval bounds and widths, counts, per-game and per-Seat rows, the map's pairs and clusters). It also holds the master seed and every game's seed, so it stays private ([`adr/0001`](adr/0001-layered-reproducibility-with-private-official-seeds.md)). `metrics.public.json` is the same without the seeds and the local run path; that is the file for the website (#48) to draw its own charts from.
+Every chart carries the interval caption. `metrics.json` holds every number behind every chart (estimates, interval bounds and widths, counts, per-game and per-Seat rows, the map's pairs and clusters). It also holds the master seed and every game's seed, so it stays private ([`adr/0001`](adr/0001-layered-reproducibility-with-private-official-seeds.md)). `metrics.public.json` is the same without the seeds and the local run path; that is the file for the website (#48) to draw its own charts from. Both record the run's engine versions and seed domain (`run.engine`, `run.seed_domain`), so a Public Seed Set rerun can check it measures the same thing ([`reproduce.md`](reproduce.md)).
 
 ## Effort sweep (v1.6, #26)
 
