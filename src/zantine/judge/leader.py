@@ -64,7 +64,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from zantine.audit.record import GameRecord
-from zantine.config import condition_name
+from zantine.config import condition_name, with_historical_defaults
 from zantine.judge.batches import (
     CHAT_INSTRUCTION,
     CHAT_NOTE,
@@ -83,6 +83,8 @@ WINDOW_ROUNDS = 3
 WORK = "tasks.work"
 NONE, TASK, VOTE_SKIP = "none", "task", "vote_skip"
 KINDS = ("vote", "go", "task")
+# Experiment treatments that change play beyond the Leader condition (#37, #36).
+TREATMENTS = ("verification_protocol", "style_mask")
 
 
 def leader_of(rec: GameRecord) -> dict[str, Any] | None:
@@ -402,6 +404,11 @@ def leader_section(
     )
     cap = (rec.header.get("config") or {}).get("round_cap")
     status = game_status(records)
+    # The other treatments a game was played under: games that differ in them are
+    # not one Leader cohort. A header from before a setting existed means its
+    # documented historical default (config.HISTORICAL_CONFIG).
+    played = with_historical_defaults(rec.header.get("config") or {})
+    treatment = {k: played.get(k) for k in TREATMENTS}
     # A Leader still in play is censored at the cap only in a game that was played to
     # its end; in an aborted or truncated transcript its time to eject is unknown.
     if ejection is not None:
@@ -430,6 +437,7 @@ def leader_section(
         "eject_round": None if ejection is None else ejection["round"],
         "eject_meeting": None if ejection is None else ejection["data"]["meeting"],
         "game_status": status,
+        "treatment": treatment,
         "round_cap": cap,
         "time_to_eject": time_to_eject,
         "censored": censored,

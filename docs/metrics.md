@@ -228,6 +228,7 @@ An assignment is `unresolved`, and also left out, when a later statement's quest
 - Audits are keyed by `judgments.transcript_sha256`. The same transcript given twice (a repeated path or a renamed copy) counts once, and two audits of it that disagree are refused.
 - All audits must come from one judge and extractor (name, model, version, prompt). The result records that `provenance` and `scoring`. A dry run (keyword judge or regex extractor) has `scoring: false` and a `label`, which every graph prints.
 - Only finished games are pooled. Aborted and truncated ones are counted in `excluded_games`.
+- All games must share one treatment: `judgments.leader.treatment`, their Verification Protocol and Style Mask. A header from before a setting existed is read at its documented historical default (`config.HISTORICAL_CONFIG`). Mixing treatments would confound the Leader conditions with another experiment, so it is refused, as is an audit made before treatments were recorded. The result's `treatment`, and every figure's description, name it.
 - All games must share one round cap, the horizon for the censored mean and the in-play curve. Otherwise the report is refused.
 
 ### Leader Vote Pull vs ordinary Seats

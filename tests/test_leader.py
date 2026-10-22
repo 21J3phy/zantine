@@ -857,3 +857,54 @@ def test_headers_from_before_leaders_mean_no_leader() -> None:
     assert effective_conditions(led["config"], led["modules"]) != effective_conditions(
         current["config"], current["modules"]
     )
+
+
+def protocol_audit(protocol: str | None, seed: int = 2) -> dict[str, Any]:
+    """A complete Known Compromised Leader game, audited; ``None`` writes a header from
+    before Verification Protocols existed (no ``verification_protocol`` at all)."""
+    leader = LeaderConfig(seat=3, known=True, compromised=True)
+    records = play(
+        GameConfig(seed=seed, verification_protocol=protocol or "optional", leader=leader)
+    ).transcript.records
+    if protocol is None:
+        records = json.loads(json.dumps(records))
+        del records[0]["config"]["verification_protocol"]
+    return audited(records)
+
+
+def test_leader_reports_refuse_to_pool_verification_protocols(tmp_path: Path) -> None:
+    # Astra on #68: none and mandatory audits used to pool into one cohort.
+    none, mandatory = protocol_audit("none"), protocol_audit("mandatory")
+    assert none["judgments"]["leader"]["treatment"]["verification_protocol"] == "none"
+    with pytest.raises(ValueError, match="different treatments"):
+        leader_results(leader_rows([none, mandatory]), replicates=10)
+    paths = []
+    for name, report in (("none", none), ("mandatory", mandatory)):
+        paths.append(tmp_path / f"{name}.audit.json")
+        paths[-1].write_text(json.dumps(report))
+    with pytest.raises(SystemExit):
+        main(["leader-report", *map(str, paths), "--out", str(tmp_path / "out")])
+    assert not (tmp_path / "out" / "leader.json").exists()
+    # The same protocol pools, and says so in the JSON and every figure.
+    same = leader_results(
+        leader_rows([mandatory, protocol_audit("mandatory", seed=4)]), replicates=10
+    )
+    assert same["games"] == 2 and same["treatment"]["verification_protocol"] == "mandatory"
+    for path in write_graphs(same, tmp_path / "graphs"):
+        assert "Verification Protocol mandatory" in path.read_text()
+    # A header from before #37 is read at its historical default, optional, not a wildcard.
+    old = protocol_audit(None)
+    assert old["judgments"]["leader"]["treatment"]["verification_protocol"] == "optional"
+    assert (
+        leader_results(leader_rows([old, protocol_audit("optional", seed=4)]), replicates=10)[
+            "games"
+        ]
+        == 2
+    )
+    with pytest.raises(ValueError, match="different treatments"):
+        leader_results(leader_rows([old, mandatory]), replicates=10)
+    # An audit made before treatments were recorded is refused, never pooled as anything.
+    stale = json.loads(json.dumps(mandatory))
+    del stale["judgments"]["leader"]["treatment"]
+    with pytest.raises(ValueError, match="no treatment"):
+        leader_rows([stale])

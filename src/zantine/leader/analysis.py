@@ -26,6 +26,10 @@ Inputs are checked before pooling, since each game is one bootstrap cluster:
 - **Played games only.** A game whose transcript has no ``result`` (aborted by
   the spend cap or a provider error, or truncated) is left out and counted
   in ``excluded_games``.
+- **One treatment.** Games must share their Verification Protocol and Style
+  Mask (``judgments.leader.treatment``, with pre-existing headers read at their
+  historical defaults); mixing them would confound the Leader conditions with
+  another experiment, so it is refused.
 - **One round cap.** Time to eject is censored at the cap, so games with
   different caps have no common horizon and are refused.
 """
@@ -81,6 +85,11 @@ def leader_rows(reports: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         digest = judgments.get("transcript_sha256")
         if not digest:
             raise ValueError("an audit has no judgments.transcript_sha256; re-run zantine audit")
+        if "treatment" not in leader:
+            raise ValueError(
+                "an audit's Leader section has no treatment (Verification Protocol, Style "
+                "Mask); re-run zantine audit"
+            )
         row = {
             "transcript_sha256": digest,
             "seed": (report.get("game") or {}).get("seed"),
@@ -109,6 +118,13 @@ def leader_results(
         raise ValueError(
             "audits come from different judges or extractors; report each cohort separately"
         )
+    treatments = {json.dumps(r["treatment"], sort_keys=True) for r in rows}
+    if len(treatments) > 1:
+        raise ValueError(
+            "games were played under different treatments "
+            f"({', '.join(sorted(treatments))}; e.g. Verification Protocol or Style Mask); "
+            "report each separately"
+        )
     played = [r for r in rows if r.get("game_status") == "finished"]
     caps = {r["round_cap"] for r in played}
     if len(caps) > 1:
@@ -122,6 +138,7 @@ def leader_results(
         "scoring": scoring,
         "label": None if scoring else DRY_RUN_LABEL.format(judge=judge.get("name")),
         "provenance": {"judge": judge, "extractor": extractor},
+        "treatment": rows[0]["treatment"] if rows else None,
         "replicates": replicates,
         "bootstrap_seed": seed,
         "games": len(played),

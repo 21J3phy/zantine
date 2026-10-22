@@ -11,7 +11,8 @@ cluster-bootstrap interval:
 
 Colors follow the reference categorical order (slot 1 blue, slot 2 orange),
 with separate light and dark steps; values and labels use text colors, and
-every mark has a hover title. Results are graphs, never rankings. Results from
+every mark has a hover title. Results are graphs, never rankings. Each figure's
+description names the treatment its games share (Verification Protocol, Style Mask). Results from
 a dry run (``results["scoring"]`` false) carry their label in every figure's
 corner, title and description, so they can't pass for scored results.
 """
@@ -46,8 +47,15 @@ STYLE = """
 
 
 def _svg(
-    title: str, subtitle: str, body: Sequence[str], desc: str, label: str | None = None
+    title: str,
+    subtitle: str,
+    body: Sequence[str],
+    desc: str,
+    label: str | None = None,
+    note: str | None = None,
 ) -> str:
+    if note:
+        desc = f"{note}. {desc}"
     if label:
         title, desc = f"{title} [{label}]", f"{label}. {desc}"
         body = [
@@ -119,6 +127,7 @@ def dot_chart(
     *,
     pct: bool = True,
     label: str | None = None,
+    note: str | None = None,
 ) -> str:
     """Dots with CI whiskers: ``groups`` on x, one dot per series (name, css class, estimates)."""
     lo, hi = 0.0, 1.0
@@ -161,7 +170,7 @@ def dot_chart(
         for name, _, est in series
         for g in range(len(groups))
     )
-    return _svg(title, subtitle, body, desc, label)
+    return _svg(title, subtitle, body, desc, label, note)
 
 
 def curve_chart(
@@ -169,6 +178,7 @@ def curve_chart(
     subtitle: str,
     series: Sequence[tuple[str, str, Sequence[dict[str, Any]]]],
     label: str | None = None,
+    note: str | None = None,
 ) -> str:
     """Step curves of the share still in play by Round: (name, css class, curve points)."""
     cap = max((p["round"] for _, _, pts in series for p in pts), default=1) or 1
@@ -204,13 +214,21 @@ def curve_chart(
         for name, _, pts in series
         if pts
     )
-    return _svg(title, subtitle, body, desc, label)
+    return _svg(title, subtitle, body, desc, label, note)
+
+
+def treatment_text(treatment: dict[str, Any] | None) -> str | None:
+    if not treatment:
+        return None
+    mask = "on" if treatment.get("style_mask") else "off"
+    return f"Verification Protocol {treatment.get('verification_protocol')}, Style Mask {mask}"
 
 
 def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     c = results["conditions"]
     label = results.get("label")
+    note = treatment_text(results.get("treatment"))
     roles = ("crew", "compromised")
     by = {known: [c[f"{known}_{role}"] for role in roles] for known in ("known", "hidden")}
     paths = []
@@ -226,6 +244,7 @@ def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
                 ("Hidden Leader", "s2", [s["compliance"] for s in by["hidden"]]),
             ],
             label=label,
+            note=note,
         ),
         encoding="utf-8",
     )
@@ -246,6 +265,7 @@ def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
                 for k, cls in (("known", "s1"), ("hidden", "s2"))
             ],
             label=label,
+            note=note,
         ),
         encoding="utf-8",
     )
@@ -263,6 +283,7 @@ def write_graphs(results: dict[str, Any], out_dir: Path) -> list[Path]:
                 ("Ordinary Seats", "s2", [c[k]["vote_pull"]["ordinary"] for k in conditions]),
             ],
             label=label,
+            note=note,
         ),
         encoding="utf-8",
     )
