@@ -7,7 +7,8 @@ Layout of ``runs/<run-id>/`` (other tools read it; see ``docs/architecture.md``)
     run.lock                 held (flock) by the one ``zantine run`` using the directory
     index.jsonl              one line per finished attempt (complete or aborted), append-only
     spend.jsonl              a reservation before every paid call and its settled cost
-                             after it, append-only
+                             after it, plus a hold for every call that failed without a
+                             reply but may still have been billed; append-only
     games/<game-id>.jsonl    the transcript of each complete game
     aborted/<game-id>.<attempt>.jsonl   transcripts of attempts stopped by the spend cap
                                         or a fatal API error (kept for the spend record)
@@ -43,7 +44,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from zantine import speed
 from zantine.config import GameConfig
@@ -69,6 +70,9 @@ from zantine.schedule import (
     seat_lineup,
     summary,
 )
+
+if TYPE_CHECKING:
+    from zantine.stylemask import StyleMask
 
 MANIFEST = "manifest.json"
 RUN = "run.json"
@@ -208,10 +212,14 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def spent_usd(run_dir: Path) -> float:
     """Everything the run has spent so far, from the spend log: every settled call,
-    plus the worst case of any reservation never settled (a crash mid-call)."""
+    the worst case of every uncertain call (failed without an HTTP status, so the
+    provider may have billed it) and every other hold, plus the worst case of any
+    reservation never settled (a crash mid-call)."""
     lines = read_jsonl(run_dir / SPEND)
     settled = {r["reservation"] for r in lines if r["kind"] == "call"}
     total = sum(r["cost_usd"] for r in lines if r["kind"] == "call")
+    total += sum(r["held_usd"] for r in lines if r["kind"] == "call" and r.get("uncertain"))
+    total += sum(r["hold_usd"] for r in lines if r["kind"] == "hold")
     total += sum(
         r["reserved_usd"]
         for r in lines
@@ -224,8 +232,13 @@ class RunLedger(Ledger):
     """A Ledger that journals every paid call to ``spend.jsonl``.
 
     Before a call is sent, a ``reserve`` line records its worst-case cost; after
-    it, a ``call`` line settles it at its real cost. The log survives a crash at
-    any point, so the run-level cap stays honest. ``game_attempt`` is the attempt
+    it, a ``call`` line settles it at its real cost. A call that failed without an
+    HTTP status (lost in transit, untrustworthy usage) may still have been billed:
+    its ``call`` line is ``uncertain`` and keeps its worst case as ``held_usd``,
+    in the same single append that settles it, so no crash can free that charge.
+    A caller's ``hold`` of that same call adds nothing more; any other ``hold`` is
+    its own ``hold`` line. The log survives a crash at any point, so the run-level
+    cap stays honest. ``game_attempt`` is the attempt
     at the scheduled game; ``call_attempt`` is the Seat's retry of one decision.
     """
 
@@ -237,8 +250,13 @@ class RunLedger(Ledger):
         self.spent_usd = spent_usd(path.parent)
         self._calls = 0
         self._pending: str | None = None
+        self._pending_usd = 0.0
+        # Worst case of the last uncertain call, already counted, until its caller holds it.
+        self._held_uncertain: float | None = None
 
     def _reserve(self, model: ModelSpec, needed: float, attempt: int) -> None:
+        self._held_uncertain = None
+        self._pending_usd = needed
         self._calls += 1
         self._pending = f"{self.game}/{self.attempt}/{self._calls}"
         line = {
@@ -252,7 +270,21 @@ class RunLedger(Ledger):
         }
         _append_line(self.path, line)
 
-    def _record(self, *args: Any, **kwargs: Any) -> None:
+    def hold(self, amount_usd: float) -> None:
+        if self._held_uncertain is not None and amount_usd == self._held_uncertain:
+            # The uncertain call's own line already holds this; don't charge it twice.
+            self._held_uncertain = None
+            return
+        super().hold(amount_usd)
+        line = {
+            "kind": "hold",
+            "game": self.game,
+            "game_attempt": self.attempt,
+            "hold_usd": amount_usd,
+        }
+        _append_line(self.path, line)
+
+    def _record(self, *args: Any, uncertain: bool = False, **kwargs: Any) -> None:
         super()._record(*args, **kwargs)
         record = self.records[-1].to_dict()
         line = {
@@ -263,7 +295,12 @@ class RunLedger(Ledger):
             "call_attempt": record.pop("attempt"),
             **record,
         }
+        if uncertain:
+            line |= {"uncertain": True, "held_usd": self._pending_usd}
         _append_line(self.path, line)
+        if uncertain:
+            self.spent_usd += self._pending_usd
+            self._held_uncertain = self._pending_usd
         self._pending = None
 
 
@@ -294,8 +331,15 @@ def execute(
     adapter_factory: Callable[[ModelSpec], ProviderAdapter] | None = None,
     models: dict[str, ModelSpec] | None = None,
     progress: Callable[[dict[str, Any]], None] | None = None,
+    style_mask: Callable[[Ledger], StyleMask] | None = None,
 ) -> RunReport:
     """Play (or resume) every game of the run that is not done yet.
+
+    Live Style Mask games need ``style_mask``: a factory that builds the run's
+    masker and meaning check on the given (run) Ledger, called once per mask-on
+    game (``stylemask.build_style_mask``). Its pinned identity is recorded in
+    ``run.json`` before the first game, and a resume with a different one is
+    refused. Dry runs use the free dry-run mask and take no factory.
 
     Raises ``RunLocked`` if another invocation is using the run directory.
     """
@@ -311,22 +355,26 @@ def execute(
         speed.check_live(manifest)
         if spend_cap_usd is None:
             raise ValueError("live runs need an explicit --spend-cap (USD for the whole run)")
-        if any(g["config"].get("style_mask") for g in manifest["games"]):
-            # play_live falls back to the free dry-run mask, which is not the pinned masker.
+        if masked and style_mask is None:
+            # play_live would fall back to the free dry-run mask, not the pinned masker.
             raise ValueError(
-                "live Style Mask games need the pinned masker, which `zantine run` cannot "
-                "build yet; play them with the masker wired in (#66)"
+                f"{len(masked)} live Style Mask games need the pinned masker: "
+                "pass --style-mask <masker id> (stylemask/maskers.toml)"
             )
+        if style_mask is not None and not masked:
+            raise ValueError("--style-mask was given, but no game in this run uses the Style Mask")
         if adapter_factory is None:
             require_live(live)
         cap = spend_cap_usd
     elif mode == "dry":
+        if style_mask is not None:
+            raise ValueError("dry runs use the free dry-run Style Mask; --style-mask is for --live")
         cap = DRY_RUN_CAP_USD
     else:
         raise ValueError(f"mode must be one of {MODES}")
     play = {"live": live, "adapter_factory": adapter_factory, "models": models}
     with _locked(run_dir):
-        return _execute(run_dir, manifest, mode, cap, max_games, progress, play)
+        return _execute(run_dir, manifest, mode, cap, max_games, progress, play, style_mask)
 
 
 def _execute(
@@ -337,9 +385,12 @@ def _execute(
     max_games: int | None,
     progress: Callable[[dict[str, Any]], None] | None,
     play: dict[str, Any],
+    style_mask: Callable[[Ledger], StyleMask] | None = None,
 ) -> RunReport:
     _claim_mode(run_dir, mode)
     ledger = RunLedger(cap, run_dir / SPEND)
+    if style_mask is not None:
+        _claim_style_mask(run_dir, style_mask(ledger).info())
     games = manifest["games"]
     done = {g["id"] for g in games if is_complete(transcript_path(run_dir, g["id"]))}
     _reconcile(run_dir, manifest, done, mode)
@@ -357,7 +408,8 @@ def _execute(
         attempt = max(attempts.get(game["id"], {0})) + 1
         ledger.game, ledger.attempt = game["id"], attempt
         config, spec = game_setup(manifest, game, mode)
-        run = play_live(config, spec, spend_cap_usd=cap, ledger=ledger, **play)
+        mask = style_mask(ledger) if style_mask is not None and config.style_mask else None
+        run = play_live(config, spec, spend_cap_usd=cap, ledger=ledger, style_mask=mask, **play)
         line = _finish(run_dir, game, attempt, mode, run)
         if progress is not None:
             progress(line)
@@ -464,6 +516,32 @@ def _claim_mode(run_dir: Path, mode: str) -> None:
         raise ValueError(f"{run_dir} holds {', '.join(sorted(held))} games; cannot add {mode}")
     if not path.is_file():
         _write_atomic(path, json.dumps({"mode": mode}, sort_keys=True) + "\n")
+
+
+_RUNTIME_KEYS = frozenset({"served", "usage_estimated", "held"})
+
+
+def _pinned(info: Any) -> Any:
+    """A Style Mask identity without what changes while it runs (served models, holds)."""
+    if isinstance(info, dict):
+        return {k: _pinned(v) for k, v in sorted(info.items()) if k not in _RUNTIME_KEYS}
+    if isinstance(info, list):
+        return [_pinned(v) for v in info]
+    return info
+
+
+def _claim_style_mask(run_dir: Path, info: dict[str, Any]) -> None:
+    """Record the run's Style Mask identity in ``run.json``; refuse a different one later."""
+    path = run_dir / RUN
+    held = json.loads(path.read_text("utf-8"))
+    pin = _pinned(info)
+    if "style_mask" in held and held["style_mask"] != pin:
+        raise ValueError(
+            f"{run_dir} was played with a different Style Mask (masker, meaning check or "
+            "their pinned versions); resume it with the same one"
+        )
+    if "style_mask" not in held:
+        _write_atomic(path, json.dumps({**held, "style_mask": pin}, sort_keys=True) + "\n")
 
 
 def _reconcile(run_dir: Path, manifest: dict[str, Any], done: set[str], mode: str) -> None:
@@ -618,6 +696,22 @@ def add_commands(sub: Any) -> None:
     r.add_argument("--spend-cap", type=float, help="USD limit for the whole run (live only)")
     r.add_argument("--max-games", type=int, help="play at most this many games now")
     r.add_argument("--quiet", action="store_true", help="print only the summary")
+    r.add_argument(
+        "--style-mask",
+        metavar="MASKER",
+        help="live runs with Style Mask games: 'neutral' or an id from stylemask/maskers.toml",
+    )
+    r.add_argument(
+        "--mask-extractor",
+        default="pattern",
+        help="Claim extractor for the Style Mask meaning check (default pattern)",
+    )
+    r.add_argument(
+        "--mask-judge",
+        default="keyword",
+        choices=("keyword", "jev"),
+        help="judge for the Style Mask meaning check (default keyword)",
+    )
 
 
 def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
@@ -701,6 +795,19 @@ def _run(args: argparse.Namespace) -> int:
         )
         print(f"  {line['game']:<16} {outcome}, ${line['cost_usd']:.4f}")
 
+    style_mask = None
+    if args.style_mask is not None:
+        from zantine.stylemask import build_style_mask
+
+        def style_mask(ledger: Ledger) -> StyleMask:
+            return build_style_mask(
+                args.style_mask,
+                args.mask_extractor,
+                args.mask_judge,
+                ledger=ledger,
+                live=args.live,
+            )
+
     report = execute(
         args.run_dir,
         mode="dry" if args.dry_run else "live",
@@ -708,6 +815,7 @@ def _run(args: argparse.Namespace) -> int:
         live=args.live,
         max_games=args.max_games,
         progress=show,
+        style_mask=style_mask,
     )
     print(
         f"{report.complete}/{report.planned} games complete ({len(report.played)} this time); "

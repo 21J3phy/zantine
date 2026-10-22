@@ -121,7 +121,9 @@ class Ledger:
         try:
             response = adapter.send(request)
         except ProviderError as exc:
-            self._record(model, meta, attempt, None, error=str(exc))
+            # No HTTP status: the request may have been processed and billed (a reply
+            # lost in transit or without trustworthy usage), so the outcome is uncertain.
+            self._record(model, meta, attempt, None, error=str(exc), uncertain=exc.status is None)
             raise
         self._record(model, meta, attempt, response, error=None)
         return response
@@ -143,7 +145,10 @@ class Ledger:
         attempt: int,
         response: ProviderResponse | None,
         error: str | None,
+        uncertain: bool = False,
     ) -> None:
+        """Price and keep one call. ``uncertain`` (a failure without an HTTP status)
+        is for journaling ledgers; callers that may have been billed ``hold``."""
         usage = response.usage if response else None
         cost = model.cost(usage) if usage is not None else 0.0
         self.spent_usd += cost

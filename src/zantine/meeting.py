@@ -65,6 +65,17 @@ def run_meeting(game: Game, request: MeetingRequest) -> None:
             budget = config.talk_budget(seat)
             truncated = len(text) > budget
             text = text[:budget]
+            # Style Mask (if on): players only ever see the checked rewrite.
+            text, masking = game.public_message(
+                "meeting",
+                seat,
+                text,
+                earlier=[(s.speaker, s.text) for s in statements],
+                max_chars=budget,
+                meeting=meeting,
+                pass_index=pass_index,
+                order=position,
+            )
             stmt = Statement(meeting, pass_index, position, seat, text)
             statements.append(stmt)
             game.event(
@@ -75,6 +86,7 @@ def run_meeting(game: Game, request: MeetingRequest) -> None:
                 speaker=seat,
                 text=text,
                 truncated=truncated,
+                **masking,
             )
             for listener in living:
                 game.observe(

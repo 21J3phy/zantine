@@ -234,6 +234,19 @@ A **Meeting** starts after the Round's resolution if one was requested and the g
 6. **Ejection:** the ejected player is announced; their role is **never** revealed to players. (The ground-truth transcript records it.)
 7. All living players return to the meeting room and **Impostor** kill cooldowns restart at the full value.
 
+## Style Mask
+
+An optional per-run condition (`GameConfig.style_mask`, `zantine play --style-mask MASKER`), off by default. With it on, every public message is rewritten in a plain, neutral style before anyone hears it, so players can't tell from the writing which **Model** is speaking (**Hidden Identity**). That is every **Meeting** statement and every **Room Chat** message (Room Chat is cut to its own **Talk Budget** first; `chat.message` events record `original`, `masker` and `mask` the same way).
+
+1. The statement is cut to the **Talk Budget** first, then rewritten by the masker: a fixed, pinned open-weight model (`stylemask/maskers.toml`) in live runs, or the rule-based `neutralize` in dry runs and tests.
+2. **Meaning check:** the original and the rewrite are each read on their own and must agree on everything checked. The rewrite must also be non-empty and fit the speaker's **Talk Budget**.
+   - **Claims:** the Claim Audit extractor must find the same checkable **Claims** (kind, who, whom, room, Round, **Task**, denial, "I saw", "the whole time"). A reading with any malformed item, or with a Claim whose quote is empty or isn't in that text, counts as unreadable, never as "no Claim".
+   - **Judgments:** the judge must give the same answer to "whom does this message argue to eject?" (another player, skip or no one), the same stance toward every player, the speaker ("I am a Crewmate") and dead players included (accuses, suspects, defends or none), the same verdict on whether each Claim is stated as fact or hedged, and, once all of that agrees, a yes to "does the rewrite say exactly what the original says, including instructions, plans and their order, requests and questions?"
+   - **Anchors** (plain code): the same player names, rooms, **Task** ids and numbers mentioned, in the same order ("Storage, then Electrical"), the same counts of role words (Impostor, Crewmate) and negations, and hedging ("maybe", "I think", ...) in both or neither.
+3. If the check fails, the masker is asked once more and told what changed. If that fails too, the original gets the minimal deterministic rewrite (`neutralize`: formatting, emoji and emoticons stripped, punctuation normalized, shouting lowercased, no word added, dropped or reordered), if it passes the same check. Otherwise the original is sent unchanged, as it is when the original's meaning can't be read (fail closed). A rewrite that changes the meaning is never sent.
+4. Every player, including the speaker, sees only the text that was sent, in the Meeting and in every later context. Players are not told that a mask is on or that messages are rewritten, so the only difference between masked and unmasked runs is the text itself.
+5. Ground truth keeps both: the `statement` event's `text` is what players saw, `original` is what the speaker said (after the **Talk Budget**), `masker` is the masker id and `mask` the outcome (`rewritten`, `neutralized`, `original`, or `empty` for silence, which is not rewritten). Every candidate and its check result is a `style_mask.check` event, and failures stay in the log.
+
 ## End of the game
 
 Win conditions are checked after the Round's resolution and again after any **Meeting**, in this order:

@@ -14,7 +14,11 @@ VERIFICATION_PROTOCOLS = ("none", "optional", "mandatory")
 VERIFICATION_RULES_VERSION = 1
 # Config fields added after earlier runs, with what a header without them meant:
 # before #37 every game was played under the optional Verification Protocol.
-HISTORICAL_CONFIG: dict[str, Any] = {"verification_protocol": "optional"}
+HISTORICAL_CONFIG: dict[str, Any] = {
+    "verification_protocol": "optional",
+    # Before the Style Mask (#36), every message was broadcast unmasked.
+    "style_mask": False,
+}
 
 
 def with_historical_defaults(config: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +87,9 @@ class GameConfig:
     # Visual Task, whose real completion everyone else in its room sees. Impostors
     # get ``tasks_per_crewmate`` Fake Tasks each.
     visual_task_chance: float = 0.25
+    # Style Mask: every public message is rewritten in a neutral style (and its
+    # meaning checked) before other players see it (stylemask/).
+    style_mask: bool = False
     # Fixed Impostor seats (tests, and scheduled runs: runs.game_setup). None = drawn
     # from the seed.
     impostor_seats: tuple[int, ...] | None = None

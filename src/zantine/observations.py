@@ -14,7 +14,8 @@ Observation ``type`` values used by the core engine (``data`` keys in brackets):
 - ``killed`` [room, killers]: you were killed
 - ``invalid_action`` [what, attempt, reason, forfeited]: ``what`` is action or vote
 - ``meeting_called`` [meeting, reason, caller, body_victim, body_room, dead]
-- ``statement`` [meeting, pass, order, speaker, text]
+- ``statement`` [meeting, pass, order, speaker, text]: under the Style Mask, ``text``
+  is the checked rewrite; the original is ground truth only
 - ``vote_result`` [meeting, counts, skips, ejected]: anonymous tally
 - ``ejected`` [meeting, seat]: never includes the role
 - ``returned_to_meeting_room`` [room]

@@ -9,6 +9,11 @@ Round, the speaker included: the same set of players its end-of-Round room
 snapshot shows. A speaker killed that Round says nothing, and a forfeited Round
 (two Invalid Actions) says nothing.
 
+Under the Style Mask (``GameConfig.style_mask``) each message goes through
+``Game.public_message("room_chat", ...)`` after the Talk Budget cut, like a
+Meeting statement: listeners get only the checked rewrite, and the
+``chat.message`` event adds ``original``, ``masker`` and ``mask``.
+
 Room Chat observations are private (room-scoped): they never go in the
 summarizer's ``PUBLIC_TYPES``.
 
@@ -74,6 +79,8 @@ class ChatModule(GameModule):
 def deliver(game: Game, rc: RoundContext) -> None:
     state = game.state
     log: ChatLog = state.ext[NAME]
+    # Messages already delivered this Round, per room, as listeners heard them.
+    heard: dict[str, list[tuple[int, str]]] = {}
     for seat in sorted(rc.speech):
         raw = rc.speech[seat]
         if not raw.strip():
@@ -90,8 +97,13 @@ def deliver(game: Game, rc: RoundContext) -> None:
         room = state.player(seat).room
         listeners = [p.seat for p in state.living_in(room)]
         log.messages[seat] += 1
-        log.chars[seat] += len(text)
+        log.chars[seat] += len(text)  # what the speaker said, mask or not
         log.truncated[seat] += int(truncated)
+        # Style Mask (if on): listeners only ever hear the checked rewrite.
+        text, masking = game.public_message(
+            "room_chat", seat, text, earlier=heard.get(room, []), max_chars=budget, room=room
+        )
+        heard.setdefault(room, []).append((seat, text))
         game.event(
             "chat.message",
             speaker=seat,
@@ -99,6 +111,7 @@ def deliver(game: Game, rc: RoundContext) -> None:
             text=text,
             truncated=truncated,
             listeners=listeners,
+            **masking,
         )
         for listener in listeners:
             game.observe(listener, "chat.message", speaker=seat, room=room, text=text)
