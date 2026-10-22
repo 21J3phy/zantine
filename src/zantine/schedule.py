@@ -76,6 +76,7 @@ from zantine.harness import neutral
 from zantine.harness.pricing import EFFORT_LEVELS, load_models
 from zantine.rng import GameRng
 from zantine.scenario import SCENARIO_VERSION
+from zantine.seats.bots import SCRIPTED_BOT_VERSION
 from zantine.transcript import SCHEMA_VERSION
 
 MANIFEST_VERSION = 1
@@ -497,10 +498,24 @@ def engine_versions(experiment: str | None = None) -> dict[str, Any]:
         "scenario_version": SCENARIO_VERSION,
         "transcript_schema": SCHEMA_VERSION,
         "harness": f"{neutral.HARNESS_NAME}-v{neutral.HARNESS_VERSION}",
+        "scripted_bots": SCRIPTED_BOT_VERSION,
     }
     if experiment == VERIFICATION:
         versions["verification_rules"] = VERIFICATION_RULES_VERSION
     return versions
+
+
+# Versions only one mode's games depend on: live Seats play through the Harness,
+# dry Seats play as the scripted bots.
+MODE_VERSIONS = {"live": "harness", "dry": "scripted_bots"}
+
+
+def pinned_versions(engine: dict[str, Any], mode: str | None) -> dict[str, Any]:
+    """The entries of ``engine`` (an ``engine_versions()`` dict) that games in ``mode`` use.
+
+    With the mode unknown (None) every entry is kept, so nothing is ignored by mistake."""
+    other = {key for m, key in MODE_VERSIONS.items() if mode is not None and m != mode}
+    return {k: v for k, v in engine.items() if k not in other}
 
 
 def seat_lineup(game: dict[str, Any]) -> tuple[list[str], set[int]]:

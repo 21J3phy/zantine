@@ -76,6 +76,7 @@ from zantine.judge.batches import (
     spoken,
 )
 from zantine.judge.questions import CHOICE, NOUL, Answer, Batch, Question
+from zantine.seats.bots import scripted_bot_versions
 from zantine.tasks import task_kind
 
 WINDOW_ROUNDS = 3
@@ -423,6 +424,11 @@ def leader_section(
             None,
         )
         treatment["style_mask_pin"] = None if setup is None else pinned_identity(setup["data"])
+    # Scripted and dry Seats play the scripted bots: games on different bot versions
+    # (a header from before they were versioned has null) are not one cohort either.
+    bots = scripted_bot_versions(rec.header.get("seats") or [])
+    if bots:
+        treatment["scripted_bots"] = bots
     # A Leader still in play is censored at the cap only in a game that was played to
     # its end; in an aborted or truncated transcript its time to eject is unknown.
     if ejection is not None:

@@ -16,7 +16,7 @@ from typing import Any
 from zantine.harness.pricing import load_models, split_effort
 from zantine.rng import GameRng
 from zantine.seats.base import SeatController
-from zantine.seats.bots import ScriptedBot
+from zantine.seats.bots import SCRIPTED_BOT_VERSION, ScriptedBot
 from zantine.seats.registry import register_controller
 
 
@@ -39,7 +39,7 @@ class DryRunSeat(ScriptedBot):
         out: dict[str, Any] = {"kind": self.kind, "model": self.model}
         if self.effort is not None:
             out |= {"effort": self.effort, "effort_setting": self.effort_setting}
-        return out | {"plays_as": ScriptedBot.kind}
+        return out | {"plays_as": ScriptedBot.kind, "plays_as_version": SCRIPTED_BOT_VERSION}
 
 
 @register_controller("dry")

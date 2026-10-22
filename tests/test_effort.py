@@ -29,7 +29,9 @@ from zantine.runs import (
     read_jsonl,
     transcript_path,
 )
+from zantine.scenario import SCENARIO_VERSION
 from zantine.schedule import load_pool, make_effort_manifest, make_manifest, verify
+from zantine.seats.bots import SCRIPTED_BOT_VERSION
 from zantine.seats.registry import make_controller
 
 POOL = load_pool()
@@ -166,6 +168,7 @@ def test_dry_seats_record_the_effort_they_stand_in_for() -> None:
         "effort": "high",
         "effort_setting": MODELS["grok-4.7"].efforts["high"],
         "plays_as": "scripted",
+        "plays_as_version": SCRIPTED_BOT_VERSION,
     }
     assert "effort" not in make_controller("dry:grok-4.7", rng).describe()
     with pytest.raises(ValueError):
@@ -520,6 +523,13 @@ def test_a_medium_game_under_another_harness_or_engine_is_refused(tmp_path: Path
     manifest["engine"]["scenario_version"] = -1
     (v1_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match=r"engine\.scenario_version"):
+        load_effort(sweep_dir, [v1_dir])
+
+    # A medium run from before the bots were versioned played other scripted bots.
+    manifest["engine"]["scenario_version"] = SCENARIO_VERSION
+    del manifest["engine"]["scripted_bots"]
+    (v1_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match=r"engine\.scripted_bots"):
         load_effort(sweep_dir, [v1_dir])
 
 
