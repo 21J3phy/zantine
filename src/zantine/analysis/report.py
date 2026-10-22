@@ -462,6 +462,10 @@ def run_summary(data: RunData) -> dict[str, Any]:
         "run_dir": data.run_dir.as_posix(),
         "master_seed": data.manifest.get("master_seed"),
         "pool": data.pool,
+        # Versions and seed domain, so a Public Seed Set rerun can check it measures
+        # the same thing (repro.comparability).
+        "engine": data.manifest.get("engine"),
+        "seed_domain": data.manifest.get("seed_domain", "run"),
         "games_planned": len(planned),
         "games_complete": len(done),
         "transcripts_not_complete": list(data.not_complete),
