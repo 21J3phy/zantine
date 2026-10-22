@@ -31,6 +31,7 @@ from zantine.runs import (
 )
 from zantine.scenario import SCENARIO_VERSION
 from zantine.schedule import load_pool, make_effort_manifest, make_manifest, verify
+from zantine.seats.bots import SCRIPTED_BOT_VERSION
 from zantine.seats.registry import make_controller
 
 POOL = load_pool()
@@ -167,6 +168,7 @@ def test_dry_seats_record_the_effort_they_stand_in_for() -> None:
         "effort": "high",
         "effort_setting": MODELS["grok-4.7"].efforts["high"],
         "plays_as": "scripted",
+        "plays_as_version": SCRIPTED_BOT_VERSION,
     }
     assert "effort" not in make_controller("dry:grok-4.7", rng).describe()
     with pytest.raises(ValueError):

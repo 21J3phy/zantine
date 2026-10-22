@@ -87,6 +87,18 @@ KINDS = ("vote", "go", "task")
 TREATMENTS = ("verification_protocol", "style_mask")
 
 
+def scripted_bot_versions(seats: list[dict[str, Any]]) -> list[int | None]:
+    """The scripted-bot versions a game's Seats played as (None: unversioned bots)."""
+    found = set()
+    for seat in seats:
+        c = seat.get("controller") or {}
+        if c.get("kind") == "scripted":
+            found.add(c.get("version"))
+        elif c.get("kind") == "dry":
+            found.add(c.get("plays_as_version"))
+    return sorted(found, key=lambda v: (v is not None, v or 0))
+
+
 def leader_of(rec: GameRecord) -> dict[str, Any] | None:
     """The game's Leader condition from the header config (``seat``, ``known``, ...)."""
     leader = (rec.header.get("config") or {}).get("leader")
@@ -423,6 +435,11 @@ def leader_section(
             None,
         )
         treatment["style_mask_pin"] = None if setup is None else pinned_identity(setup["data"])
+    # Scripted and dry Seats play the scripted bots: games on different bot versions
+    # (a header from before they were versioned has null) are not one cohort either.
+    bots = scripted_bot_versions(rec.header.get("seats") or [])
+    if bots:
+        treatment["scripted_bots"] = bots
     # A Leader still in play is censored at the cap only in a game that was played to
     # its end; in an aborted or truncated transcript its time to eject is unknown.
     if ejection is not None:

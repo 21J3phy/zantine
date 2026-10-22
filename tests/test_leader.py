@@ -31,7 +31,7 @@ from zantine.runs import check_seating, execute, game_setup, load_manifest
 from zantine.scenario import build_scenario
 from zantine.schedule import load_pool, seat_lineup
 from zantine.seats.base import SeatController
-from zantine.seats.bots import PlaybookBot, ScriptedBot
+from zantine.seats.bots import SCRIPTED_BOT_VERSION, PlaybookBot, ScriptedBot
 
 RED, BLUE, GREEN, PINK, ORANGE, YELLOW, BLACK, WHITE, PURPLE, BROWN = range(10)
 LOG_HEADERS = {"Your log (everything you have observed, oldest first):", "Your log, continued:"}
@@ -870,6 +870,26 @@ def protocol_audit(protocol: str | None, seed: int = 2) -> dict[str, Any]:
         records = json.loads(json.dumps(records))
         del records[0]["config"]["verification_protocol"]
     return audited(records)
+
+
+def test_leader_reports_refuse_to_pool_scripted_bot_versions() -> None:
+    """Games played by other (or unversioned, pre-#80) scripted bots are another cohort."""
+    current = protocol_audit("optional")
+    assert current["judgments"]["leader"]["treatment"]["scripted_bots"] == [SCRIPTED_BOT_VERSION]
+    leader = LeaderConfig(seat=3, known=True, compromised=True)
+    records = json.loads(
+        json.dumps(
+            play(
+                GameConfig(seed=4, verification_protocol="optional", leader=leader)
+            ).transcript.records
+        )
+    )
+    for seat in records[0]["seats"]:
+        del seat["controller"]["version"]  # as written before the bots were versioned
+    legacy = audited(records)
+    assert legacy["judgments"]["leader"]["treatment"]["scripted_bots"] == [None]
+    with pytest.raises(ValueError, match="different treatments"):
+        leader_results(leader_rows([current, legacy]), replicates=10)
 
 
 def test_leader_reports_refuse_to_pool_verification_protocols(tmp_path: Path) -> None:

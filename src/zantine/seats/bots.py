@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from typing import Any
 
 from zantine.observations import ActionContext, MeetingContext, Observation
 from zantine.rng import GameRng
@@ -145,6 +146,11 @@ class ScriptedBot(SeatController):
     # read_every, ... (see next_read_round).
     read_first = 4
     read_every = 6
+
+    def describe(self) -> dict[str, Any]:
+        # The version goes in the transcript header, so analyses that read games
+        # (not run manifests) can refuse to pool games played by different bots.
+        return {"kind": self.kind, "version": SCRIPTED_BOT_VERSION}
 
     def __init__(
         self,
