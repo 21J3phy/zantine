@@ -594,6 +594,16 @@ def test_schedule_matches_the_sample_size_doc(manifest: dict[str, Any]) -> None:
     assert manifest == make_leader_manifest(load_pool(), 20261020)  # deterministic
 
 
+def test_schedule_verify_checks_leader_manifests(manifest: dict[str, Any]) -> None:
+    # What `zantine commit` (repro.py) runs: the Leader checks, not the v1 block checks.
+    from zantine import schedule
+
+    assert schedule.verify(manifest) == []
+    broken = json.loads(json.dumps(manifest))
+    broken["games"].pop()
+    assert any("games per Leader Model" in p for p in schedule.verify(broken))
+
+
 def test_schedule_problems_are_caught(manifest: dict[str, Any]) -> None:
     broken = json.loads(json.dumps(manifest))
     game = next(g for g in broken["games"] if g["leader"]["compromised"])
