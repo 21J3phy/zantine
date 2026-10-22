@@ -1186,3 +1186,90 @@ def test_verification_compares_the_style_mask_as_a_condition() -> None:
     old = {k: v for k, v in off.items() if k != "style_mask"}  # a header from before #36
     assert effective_conditions(old) == effective_conditions(off)
     assert effective_conditions(on) != effective_conditions(off)
+
+
+# Round 5: run-wide masking and cross-run pins ---------------------------------------------
+
+
+def run_wide_masked_run(tmp_path: Path, override_false: bool = False) -> Path:
+    from zantine.runs import create_run
+    from zantine.schedule import load_pool, make_manifest
+
+    plan = make_manifest(load_pool(), 42, blocks=1, config={"round_cap": 1, "style_mask": True})
+    if override_false:  # every game opts out: the run-wide setting no longer applies
+        for g in plan["games"]:
+            g["config"] = {**g["config"], "style_mask": False}
+    run_dir = tmp_path / ("off" if override_false else "on")
+    create_run(run_dir, plan)
+    return run_dir
+
+
+def test_a_run_wide_style_mask_needs_and_takes_the_pinned_masker(tmp_path: Path) -> None:
+    from fake_providers import fake_adapter
+    from zantine.harness.pricing import load_models
+    from zantine.runs import execute, read_jsonl
+
+    models = {k: dataclasses.replace(v, price_valid_until=None) for k, v in load_models().items()}
+    live = {"mode": "live", "spend_cap_usd": 50.0, "adapter_factory": fake_adapter}
+    run_dir = run_wide_masked_run(tmp_path)
+    with pytest.raises(ValueError, match="pinned masker"):
+        execute(run_dir, models=models, max_games=1, **live)
+    report = execute(
+        run_dir, models=models, max_games=1, style_mask=masker_factory(FakeRewriter()), **live
+    )
+    assert report.played
+    (path,) = sorted((run_dir / "games").glob("*.jsonl"))
+    records = read_jsonl(path)
+    assert records[0]["config"]["style_mask"] is True
+    (setup,) = [r for r in records if r.get("type") == "style_mask.setup"]
+    assert setup["data"]["masker"]["id"] == "test-masker"
+    assert json.loads((run_dir / "run.json").read_text())["style_mask"]["masker"]["id"] == (
+        "test-masker"
+    )
+    # A resume must keep the same pin.
+    with pytest.raises(ValueError, match="different Style Mask"):
+        other = masker_factory(FakeRewriter(), masker_id="another-masker")
+        execute(run_dir, models=models, max_games=1, style_mask=other, **live)
+
+
+def test_per_game_false_overrides_a_run_wide_style_mask(tmp_path: Path) -> None:
+    from zantine.runs import execute
+
+    run_dir = run_wide_masked_run(tmp_path, override_false=True)
+    with pytest.raises(ValueError, match="no game in this run uses the Style Mask"):
+        execute(
+            run_dir,
+            mode="live",
+            spend_cap_usd=1.0,
+            adapter_factory=lambda m: None,
+            style_mask=masker_factory(FakeRewriter()),
+        )
+
+
+def masked_transcript(path: Path, masker_id: str, served: str) -> None:
+    """A short masked game whose Style Mask has ``masker_id`` (endpoint said ``served``)."""
+    spec = dataclasses.replace(SPEC, id=masker_id)
+    ledger = Ledger(5.0)
+    masker = LLMMasker(spec, ledger, OpenAICompatAdapter(spec, FakeRewriter(), "sk"))
+    masker.served.append({"model": served, "system_fingerprint": None})
+    game, _ = masked_game(masker)
+    game.transcript.write(path)
+
+
+def test_verification_compares_runs_by_their_style_mask_pin(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from zantine.analysis.verification import check_conditions, conditions
+
+    (tmp_path / "games").mkdir()
+    masked_transcript(tmp_path / "games" / "a.jsonl", "mask-a", "served-1")
+    masked_transcript(tmp_path / "games" / "b.jsonl", "mask-a", "served-2")
+    masked_transcript(tmp_path / "games" / "c.jsonl", "mask-b", "served-1")
+    data = SimpleNamespace(run_dir=tmp_path)
+    pin = conditions(data, "a")["style_mask_pin"]
+    assert pin["masker"]["id"] == "mask-a" and "served" not in pin["masker"]
+    # What the endpoint served is runtime metadata: the same pin, comparable.
+    check_conditions([(data, SimpleNamespace(id="a")), (data, SimpleNamespace(id="b"))])
+    # A different masker is a different treatment.
+    with pytest.raises(ValueError, match="style_mask_pin"):
+        check_conditions([(data, SimpleNamespace(id="a")), (data, SimpleNamespace(id="c"))])
