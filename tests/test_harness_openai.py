@@ -147,3 +147,15 @@ def test_real_client_needs_live_env_and_key_from_env(monkeypatch: pytest.MonkeyP
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     adapter = OpenAIAdapter.from_env(ASTRA)  # builds a client; makes no request
     assert isinstance(adapter.client, openai.OpenAI)
+
+
+def test_a_failed_response_is_a_provider_error_not_a_free_call() -> None:
+    """A reply with status "failed" carries no trustworthy usage; it must not be
+    recorded as a successful $0 call."""
+    reply = openai_reply(("wait", {}))
+    reply.status = "failed"
+    reply.error = openai.types.responses.ResponseError(code="server_error", message="boom")
+    reply.usage = None
+    with pytest.raises(ProviderError, match="server_error: boom") as info:
+        OpenAIAdapter(SOL, OpenAIFake(lambda p: reply)).send(REQUEST)
+    assert info.value.status is None and not info.value.fatal

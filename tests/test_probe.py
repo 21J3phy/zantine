@@ -35,31 +35,28 @@ def usage(inp: int, out: int, total: int, cached: int = 0, reasoning: int | None
     }
 
 
-def answers(acc: probe.Accounting) -> tuple[bool | None, bool | None]:
-    return acc.hidden_inside, acc.cache_inside
+def readings(u: dict, gemini: bool = False) -> tuple[bool | None, bool | None]:
+    counts = probe.gemini_counts(u) if gemini else probe.responses_counts(u)
+    return probe.decide(counts.fits())
 
 
 def test_reasoning_accounting_reads_the_total() -> None:
-    acc = probe.responses_accounting
-    assert answers(acc(usage(1000, 300, 1300))) == (True, None)  # nothing cached: no answer
-    assert answers(acc(usage(1000, 300, 1400))) == (False, None)
-    assert answers(acc(usage(1000, 300, 1999))) == (None, None)  # no reading fits
-    assert answers(acc(usage(1000, 300, 1300, reasoning=0))) == (None, None)
-    assert acc(usage(1000, 300, 1400)).generated == 400
-    assert acc(usage(1000, 300, 1300)).generated == 300
+    assert readings(usage(1000, 300, 1300)) == (True, None)  # nothing cached: no answer
+    assert readings(usage(1000, 300, 1400)) == (False, None)
+    assert readings(usage(1000, 300, 1999)) == (None, None)  # no reading fits
+    assert readings(usage(1000, 300, 1300, reasoning=0)) == (None, None)
 
 
 def test_cache_and_reasoning_are_decided_together() -> None:
-    acc = probe.responses_accounting
-    assert answers(acc(usage(1000, 300, 1300, cached=800))) == (True, True)
-    assert answers(acc(usage(200, 300, 1300, cached=800))) == (True, False)
+    assert readings(usage(1000, 300, 1300, cached=800)) == (True, True)
+    assert readings(usage(200, 300, 1300, cached=800)) == (True, False)
     # 1000 + 300 + 100 fits cache-inside/reasoning-on-top and cache-outside/reasoning-inside.
-    ambiguous = usage(1000, 300, 1400, cached=100, reasoning=100)
-    assert answers(acc(ambiguous)) == (None, None)
-    assert acc(ambiguous).generated is None
-    # Knowing one answer (from another call) settles the other.
-    assert answers(acc(ambiguous, hidden_inside=False)) == (False, True)
-    assert answers(acc(ambiguous, cache_inside=False)) == (True, False)
+    ambiguous = probe.responses_counts(usage(1000, 300, 1400, cached=100, reasoning=100))
+    assert probe.decide(ambiguous.fits()) == (None, None)
+    assert probe.generated(ambiguous, ambiguous.fits()) is None
+    # A second call that settles one question settles the other too.
+    other = probe.responses_counts(usage(1000, 300, 1300))  # reasoning inside
+    assert probe.decide(ambiguous.fits() & other.fits()) == (True, False)
 
 
 def test_gemini_thoughts_and_cache_accounting() -> None:
@@ -70,12 +67,11 @@ def test_gemini_thoughts_and_cache_accounting() -> None:
         "thoughts_token_count": 200,
         "total_token_count": 1250,
     }
-    acc = probe.gemini_accounting
-    assert answers(acc(u)) == (False, True)
-    assert answers(acc(u | {"total_token_count": 1050})) == (True, True)
+    assert readings(u, gemini=True) == (False, True)
+    assert readings(u | {"total_token_count": 1050}, gemini=True) == (True, True)
     # Cached tokens on top of the prompt count: 1000 + 600 + 50 + 200.
-    assert answers(acc(u | {"total_token_count": 1850})) == (False, False)
-    assert answers(acc(u | {"total_token_count": 1251})) == (None, None)
+    assert readings(u | {"total_token_count": 1850}, gemini=True) == (False, False)
+    assert readings(u | {"total_token_count": 1251}, gemini=True) == (None, None)
 
 
 def test_judge() -> None:
@@ -84,21 +80,29 @@ def test_judge() -> None:
     assert probe.judge(None, True) == UNSURE
 
 
+def split(u: dict) -> tuple[int, int] | None:
+    counts = probe.responses_counts(u)
+    return probe.generated(counts, counts.fits())
+
+
 def test_output_cap_scope_counts_from_resolved_raw_usage() -> None:
     cap = 256
-    on_top = probe.responses_accounting(usage(5000, 256, 5456, reasoning=200))
+    on_top = split(usage(5000, 256, 5456, reasoning=200))
+    assert on_top == (256, 200)
     # Visible output hit the cap and reasoning came on top: the cap excludes reasoning.
     assert probe.output_cap_scope(on_top, "max_tokens", cap, False)[0] == OK
     assert probe.output_cap_scope(on_top, "max_tokens", cap, True)[0] == NO
     # Reasoning inside output (total = input + output): 256 generated, stopped at the cap.
-    inside = probe.responses_accounting(usage(5000, 256, 5256, reasoning=200))
+    inside = split(usage(5000, 256, 5256, reasoning=200))
+    assert inside == (56, 200)
     assert probe.output_cap_scope(inside, "max_tokens", cap, True)[0] == OK
-    assert probe.output_cap_scope(inside, "max_tokens", cap, False)[0] == NO
     # The reviewer's case: xAI actually counting reasoning inside must not confirm "excludes".
-    assert probe.output_cap_scope(inside, "max_tokens", cap, False)[0] != OK
-    unresolved = probe.responses_accounting(usage(5000, 256, 9999, reasoning=200))
-    assert probe.output_cap_scope(unresolved, "max_tokens", cap, False)[0] == UNSURE
-    under = probe.responses_accounting(usage(5000, 120, 5120, reasoning=100))
+    assert probe.output_cap_scope(inside, "max_tokens", cap, False)[0] == NO
+    assert (
+        probe.output_cap_scope(split(usage(5000, 256, 9999, reasoning=200)), "x", cap, False)[0]
+        == UNSURE
+    )
+    under = split(usage(5000, 120, 5120, reasoning=100))
     assert probe.output_cap_scope(under, "tool_use", cap, True)[0] == UNSURE
 
 
@@ -280,3 +284,57 @@ def test_reaching_the_spend_cap_keeps_what_was_found() -> None:
         ("serves_request", OK),
         ("spend_cap", probe.FAILED),
     ]
+
+
+def test_probe_calls_never_use_the_sdks_own_retries() -> None:
+    """A real SDK client retries timeouts twice by default: three billed requests
+    behind one metered call. The probe turns retries off, so each request is metered."""
+    import httpx2
+    import openai
+
+    sent: list[str] = []
+
+    def timeout(request: httpx2.Request) -> httpx2.Response:
+        sent.append(str(request.url))
+        raise httpx2.ReadTimeout("slow", request=request)
+
+    client = openai.OpenAI(
+        api_key="sk-test", http_client=httpx2.Client(transport=httpx2.MockTransport(timeout))
+    )
+    ledger = Ledger(5)
+    findings = probe.probe_model(OpenAIAdapter(model_spec("gpt-6.1-sol"), client), ledger)
+    assert [(f.check, f.verdict) for f in findings] == [("serves_request", probe.FAILED)]
+    assert len(sent) == 1  # no hidden retries
+    assert ledger.spent_usd > 0  # the lost call's worst case is held
+
+
+def test_the_cap_probe_reserves_the_models_full_cap() -> None:
+    """Only the cap sent shrinks: a lab whose cap leaves out reasoning can bill more."""
+    grok = model_spec("grok-4.7")
+    fake = OpenAIFake(reply=xai_reply)
+    adapter, _ = probe._variant(XAIAdapter(grok, fake), max_output_tokens=probe.CAP_PROBE_TOKENS)
+    assert adapter.model == grok
+    assert adapter.build_params(probe.probe_request())["max_output_tokens"] == 256
+
+
+def test_calls_that_disagree_decide_nothing() -> None:
+    """Total 1300 says reasoning inside; with 800 cached, total 1400 says on top. The
+    readings both calls admit are intersected, so neither order confirms anything."""
+    a = probe.responses_counts(usage(1000, 300, 1300))
+    b = probe.responses_counts(usage(1000, 300, 1400, cached=800))
+    assert not a.fits() & b.fits()
+    assert probe.decide(a.fits() & b.fits()) == (None, None)
+
+
+def test_a_missing_counter_is_unknown_not_zero() -> None:
+    # Reasoning not reported: total 1400 also fits cache inside with 100 reasoning on top.
+    u = usage(1000, 300, 1400, cached=100, reasoning=None)
+    del u["output_tokens_details"]
+    assert probe.decide(probe.responses_counts(u).fits()) == (None, None)
+    g = {"prompt_token_count": 1000, "candidates_token_count": 50, "total_token_count": 1250}
+    assert probe.decide(probe.gemini_counts(g).fits())[0] is None
+
+
+def test_visible_output_over_the_cap_proves_nothing_about_reasoning() -> None:
+    assert probe.output_cap_scope((512, 0), "max_tokens", 256, False)[0] == UNSURE
+    assert probe.output_cap_scope((300, 200), "max_tokens", 256, False)[0] == UNSURE
