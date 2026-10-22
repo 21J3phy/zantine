@@ -1246,6 +1246,130 @@ def test_per_game_false_overrides_a_run_wide_style_mask(tmp_path: Path) -> None:
         )
 
 
+def twin_run(tmp_path: Path) -> tuple[Path, list[str]]:
+    """A minority run cut to one setup's two games: the same seed, mask off then on."""
+    import copy
+
+    from zantine.runs import create_run
+    from zantine.schedule import load_pool, make_minority_manifest
+
+    plan = copy.deepcopy(make_minority_manifest(load_pool(), 20261020))
+    setup = plan["games"][0]["setup"]
+    twins = sorted((g for g in plan["games"] if g["setup"] == setup), key=lambda g: g["style_mask"])
+    for g in twins:
+        g["config"] = {**g["config"], "round_cap": 4}
+    plan["games"] = twins
+    run_dir = tmp_path / "twins"
+    create_run(run_dir, plan)
+    return run_dir, [g["id"] for g in twins]
+
+
+def test_a_live_twin_pair_masks_only_its_mask_on_game(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fake_providers
+    from fake_providers import fake_adapter
+    from zantine.harness.pricing import load_models
+    from zantine.runs import RunLedger, execute, read_jsonl, spent_usd, transcript_path
+
+    # Each game's first action calls a Meeting, so both twins have statements.
+    polite, called = fake_providers.polite_call, []
+
+    def meeting_first(tail: str) -> Any:
+        name, args = polite(tail)
+        if name == "wait" and not called:
+            called.append(True)
+            return ("call_meeting", {})
+        return name, args
+
+    monkeypatch.setattr(fake_providers, "polite_call", meeting_first)
+
+    endpoint = FakeRewriter()
+    pinned, built = masker_factory(endpoint), []
+
+    def factory(ledger: Ledger) -> StyleMask:
+        built.append(ledger)
+        return pinned(ledger)
+
+    models = {k: dataclasses.replace(v, price_valid_until=None) for k, v in load_models().items()}
+    run_dir, (off_id, mask_id) = twin_run(tmp_path)
+    report = execute(
+        run_dir,
+        mode="live",
+        spend_cap_usd=50.0,
+        adapter_factory=fake_adapter,
+        models=models,
+        style_mask=factory,
+        progress=lambda line: called.clear(),
+    )
+    assert report.finished and report.played == [off_id, mask_id]
+    # Built once to pin run.json and once for the mask-on game, always on the run's Ledger.
+    assert len(built) == 2 and isinstance(built[0], RunLedger)
+    assert all(ledger is built[0] for ledger in built)
+
+    off, mask = (read_jsonl(transcript_path(run_dir, g)) for g in (off_id, mask_id))
+    assert not off[0]["config"].get("style_mask") and mask[0]["config"]["style_mask"] is True
+    assert off[0]["seed"] == mask[0]["seed"]
+
+    def statements(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            r["data"]
+            for r in records
+            if r["kind"] == "event" and r["type"] == "statement" and r["data"]["text"]
+        ]
+
+    assert statements(off) and not any("masker" in s for s in statements(off))
+    assert not [r for r in off if r.get("type") == "style_mask.setup"]
+    assert statements(mask) and all(s["masker"] == "test-masker" for s in statements(mask))
+    # Masking calls go through the run's spend log, all of them in the mask-on game.
+    calls = [r for r in read_jsonl(run_dir / "spend.jsonl") if r["kind"] == "call"]
+    masking = [r for r in calls if r["purpose"] == "style_mask"]
+    assert len(masking) == len(endpoint.calls) and {r["game"] for r in masking} == {mask_id}
+    assert {r["game"] for r in calls} == {off_id, mask_id}
+    assert report.spent_usd == pytest.approx(spent_usd(run_dir))
+
+
+def test_zantine_run_builds_the_pinned_masker_only_behind_the_live_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from zantine import runs, stylemask
+
+    run_dir = one_masked_game_run(tmp_path)
+    run = ["run", str(run_dir), "--quiet"]
+    monkeypatch.delenv("ZANTINE_LIVE", raising=False)
+    refused = {
+        "ZANTINE_LIVE=1": ["--live", "--spend-cap", "1", "--style-mask", "phi-4-vllm"],
+        "--spend-cap": ["--live", "--style-mask", "phi-4-vllm"],
+        "--style-mask is for --live": ["--dry-run", "--style-mask", "neutral"],
+        "need --style-mask": ["--live", "--spend-cap", "1", "--mask-judge", "jev"],
+    }
+    for reason, flags in refused.items():
+        with pytest.raises(SystemExit):
+            main([*run, *flags])
+        assert reason in capsys.readouterr().err
+    assert not list((run_dir / "games").glob("*.jsonl"))
+
+    # With the gates passed, the flags reach build_style_mask with the run's Ledger.
+    seen: dict[str, Any] = {}
+    ledger = runs.RunLedger(2.0, tmp_path / "spend.jsonl")
+
+    def fake_execute(run_dir: Path, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        kwargs["style_mask"](ledger)
+        return runs.RunReport(planned=1, complete=0)
+
+    def fake_build(*args: Any, **kwargs: Any) -> Any:
+        seen["build"] = (args, kwargs)
+        return None
+
+    monkeypatch.setattr(runs, "execute", fake_execute)
+    monkeypatch.setattr(stylemask, "build_style_mask", fake_build)
+    flags = ["--style-mask", "phi-4-vllm", "--mask-extractor", "x", "--mask-judge", "jev"]
+    assert main([*run, "--live", "--spend-cap", "2", *flags]) == 0
+    assert seen["mode"] == "live" and seen["live"] is True and seen["spend_cap_usd"] == 2.0
+    assert seen["build"] == (("phi-4-vllm", "x", "jev"), {"ledger": ledger, "live": True})
+
+
 def masked_transcript(path: Path, masker_id: str, served: str) -> None:
     """A short masked game whose Style Mask has ``masker_id`` (endpoint said ``served``)."""
     spec = dataclasses.replace(SPEC, id=masker_id)
