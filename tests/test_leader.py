@@ -817,3 +817,21 @@ def test_a_split_key_reader_leader_keeps_true_completions_out_of_lie_survival() 
         c["speaker"] == reader and c["verdict"]["lie"] for c in audit["claims"]
     )
     assert me["lie_survival"] == 1.0  # the denial, unchallenged; the true completion is not a Lie
+
+
+@pytest.mark.parametrize("protocol", ["none", "optional", "mandatory"])
+def test_leader_conditions_compose_with_every_verification_protocol(protocol: str) -> None:
+    # #69 x #24: a Leader game under each Verification Protocol plays, keeps the
+    # Leader's forced role and prompt lines, and is audited with a Leader section.
+    leader = LeaderConfig(seat=3, known=True, compromised=True)
+    game = play(GameConfig(seed=2, verification_protocol=protocol, leader=leader))
+    header = game.transcript.records[0]
+    assert header["config"]["verification_protocol"] == protocol
+    assert header["seats"][3]["role"] == "impostor"
+    assert all(
+        [o.data for o in game.observations_of(s) if o.type == "leader_assigned"]
+        == [{"leader": 3, "known": True}]
+        for s in range(10)
+    )
+    lead = audited(game.transcript.records)["judgments"]["leader"]
+    assert lead["condition"] == "known_compromised" and lead["game_status"] == "finished"
