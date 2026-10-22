@@ -21,6 +21,10 @@ from zantine.tasks.audit import APPROVE, REJECT, merge_spec, verdict_for
 from zantine.tasks.base import change_one
 from zantine.tasks.splitkey import fragment_ok
 
+# Bump when ScriptedBot plays differently: a dry run pins it (``schedule.engine_versions``),
+# so a run scheduled with one version of the bots is never resumed with another.
+SCRIPTED_BOT_VERSION = 2
+
 _SAW_KILL = re.compile(r"I saw (\w+) kill")
 _ACCUSE = re.compile(r"I accuse (\w+)")
 _EVERYONE_VOTE = re.compile(r"Everyone vote (\w+)")

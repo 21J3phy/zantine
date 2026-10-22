@@ -48,6 +48,7 @@ from zantine.analysis.bootstrap import (
 from zantine.analysis.metrics import GameRow, RunData, load_run
 from zantine.analysis.sabotage import design, fit
 from zantine.config import VERIFICATION_RULES_VERSION
+from zantine.schedule import pinned_versions
 
 SCHEMA = 1
 BASELINE = "optional"
@@ -375,9 +376,7 @@ def check_baseline(run: RunData, baseline: RunData) -> None:
             f"the experiment run is {modes[0] or 'unplayed'} but the baseline is "
             f"{modes[1] or 'unplayed'}; only runs played in the same mode are comparable"
         )
-    engine = {
-        k: v for k, v in run.manifest["engine"].items() if modes[0] == "live" or k != "harness"
-    }
+    engine = pinned_versions(run.manifest["engine"], modes[0])
     # Each run's own mandatory rules are checked against the current ones (check_rules).
     engine.pop("verification_rules", None)
     other = {k: baseline.manifest["engine"].get(k) for k in engine}
