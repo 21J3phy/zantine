@@ -429,3 +429,26 @@ def test_a_cut_off_flag_off_reply_confirms_nothing() -> None:
     )
     assert findings["parallel_tool_calls"].verdict == UNSURE
     assert not any(c["parallel_tool_calls"] for c in fake.responses.calls)  # no control sent
+
+
+def test_long_xai_reasoning_is_stopped_after_the_first_call_that_shows_it() -> None:
+    """xAI's cap may leave reasoning out, so no reservation bounds it in advance;
+    each later call must fit the largest charge seen, so the cap holds after one call."""
+    grok = model_spec("grok-4.7")
+
+    def respond(params: dict[str, Any]) -> Any:
+        reply = xai_reply(
+            ("wait", {}), input_tokens=6000, cached=5000, output_tokens=40, reasoning_tokens=62_000
+        )
+        u = reply.usage
+        u.total_tokens = u.input_tokens + u.output_tokens + u.output_tokens_details.reasoning_tokens
+        cost = PER_TOKEN * (1000 * grok.input + 5000 * grok.cached_input + 62_040 * grok.output)
+        u.cost_in_usd_ticks = round(cost * 1e10)
+        return reply
+
+    fake = OpenAIFake(respond)
+    ledger = Ledger(2)
+    findings = probe.probe_model(XAIAdapter(grok, fake), ledger)
+    assert ledger.spent_usd <= ledger.spend_cap_usd
+    assert findings[-1].check == "spend_cap"
+    assert len(fake.responses.calls) == int(2 // ledger.records[0].cost_usd)
