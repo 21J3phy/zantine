@@ -160,87 +160,109 @@ def _n(d: dict[str, Any], *path: str) -> int | None:
 # Pure functions over the provider's own numbers, so they can be tested offline.
 
 
-def reasoning_accounting(usage: dict[str, Any], reasoning_in_output: bool) -> tuple[str, str]:
-    """Responses API: is ``reasoning_tokens`` inside ``output_tokens`` or on top of it?"""
-    inp, out = _n(usage, "input_tokens"), _n(usage, "output_tokens")
-    total = _n(usage, "total_tokens")
-    reasoning = _n(usage, "output_tokens_details", "reasoning_tokens")
-    if None in (inp, out, total):
-        return INCONCLUSIVE, "usage has no input/output/total token counts"
-    if not reasoning:
-        return INCONCLUSIVE, "no reasoning tokens reported on this call"
-    inside, outside = total == inp + out, total == inp + out + reasoning
-    nums = f"input {inp} + output {out} (reasoning {reasoning}) vs total {total}"
-    if inside == outside:
-        return INCONCLUSIVE, f"total matches neither reading: {nums}"
-    if inside == reasoning_in_output:
-        return CONFIRMED, nums
-    return CONTRADICTED, nums
+@dataclass(frozen=True)
+class Accounting:
+    """What one call's raw counts say about two yes/no questions (None = can't tell).
+
+    ``hidden_inside``: reasoning (thought) tokens are counted inside the output count.
+    ``cache_inside``: cached tokens are counted inside the input count. Both are
+    decided together from the reported total, so a total that two different
+    combinations explain decides nothing. ``generated`` is everything the model
+    produced (visible output plus reasoning), when ``hidden_inside`` is known.
+    """
+
+    hidden_inside: bool | None
+    cache_inside: bool | None
+    generated: int | None
+    hidden: int
+    detail: str
 
 
-def cached_in_input(usage: dict[str, Any]) -> tuple[str, str]:
-    """Responses API: is ``cached_tokens`` part of ``input_tokens``?"""
-    inp, out = _n(usage, "input_tokens"), _n(usage, "output_tokens")
-    total = _n(usage, "total_tokens")
-    cached = _n(usage, "input_tokens_details", "cached_tokens")
-    reasoning = _n(usage, "output_tokens_details", "reasoning_tokens") or 0
-    if not cached:
-        return INCONCLUSIVE, "no cached tokens on the repeated call"
-    if None in (inp, out, total):
-        return INCONCLUSIVE, "usage has no input/output/total token counts"
-    nums = f"input {inp}, cached {cached}, output {out}, reasoning {reasoning}, total {total}"
-    in_totals = {inp + out, inp + out + reasoning}
-    out_totals = {inp + cached + out, inp + cached + out + reasoning}
-    if cached > inp or (total in out_totals and total not in in_totals):
-        return CONTRADICTED, nums
-    if total in in_totals:
-        return CONFIRMED, nums
-    return INCONCLUSIVE, f"total matches neither reading: {nums}"
+def resolve(
+    inp: int,
+    cached: int,
+    out: int,
+    hidden: int,
+    total: int | None,
+    *,
+    hidden_inside: bool | None = None,
+    cache_inside: bool | None = None,
+) -> Accounting:
+    """Which (hidden_inside, cache_inside) pairs reproduce ``total``; known answers narrow it."""
+    nums = f"input {inp}, cached {cached}, output {out}, reasoning {hidden}, total {total}"
+    fits = [
+        (h, c)
+        for h in (True, False)
+        for c in (True, False)
+        if hidden_inside in (None, h)
+        and cache_inside in (None, c)
+        and total == inp + (0 if c else cached) + out + (0 if h else hidden)
+    ]
+
+    def decided(i: int, count: int) -> bool | None:
+        values = {f[i] for f in fits}
+        return values.pop() if len(values) == 1 and count else None
+
+    h, c = decided(0, hidden), decided(1, cached)
+    if total is None:
+        detail = f"no total to check against: {nums}"
+    elif not fits:
+        detail = f"no reading reproduces the total: {nums}"
+    else:
+        detail = nums
+    if not hidden:  # nothing hidden: the output count is everything generated
+        generated: int | None = out
+    elif h is None:
+        generated = None
+    else:
+        generated = out + (0 if h else hidden)
+    return Accounting(h, c, generated, hidden, detail)
 
 
-def gemini_thoughts_accounting(usage: dict[str, Any]) -> tuple[str, str]:
-    """Gemini: is ``thoughts_token_count`` outside ``candidates_token_count``?"""
-    prompt, cand = _n(usage, "prompt_token_count"), _n(usage, "candidates_token_count") or 0
-    thoughts = _n(usage, "thoughts_token_count") or 0
-    tool = _n(usage, "tool_use_prompt_token_count") or 0
-    total = _n(usage, "total_token_count")
-    if prompt is None or total is None:
-        return INCONCLUSIVE, "usage has no prompt/total token counts"
-    if not thoughts:
-        return INCONCLUSIVE, "no thought tokens reported on this call"
-    nums = f"prompt {prompt} + tool {tool} + candidates {cand} + thoughts {thoughts} vs {total}"
-    if total == prompt + tool + cand + thoughts:
-        return CONFIRMED, nums
-    if total == prompt + tool + cand:
-        return CONTRADICTED, nums
-    return INCONCLUSIVE, f"total matches neither reading: {nums}"
+def responses_accounting(usage: dict[str, Any], **known: bool | None) -> Accounting:
+    """Responses API usage (OpenAI, xAI, Meta)."""
+    return resolve(
+        _n(usage, "input_tokens") or 0,
+        _n(usage, "input_tokens_details", "cached_tokens") or 0,
+        _n(usage, "output_tokens") or 0,
+        _n(usage, "output_tokens_details", "reasoning_tokens") or 0,
+        _n(usage, "total_tokens"),
+        **known,
+    )
 
 
-def gemini_cached_in_prompt(usage: dict[str, Any]) -> tuple[str, str]:
-    prompt, cached = _n(usage, "prompt_token_count"), _n(usage, "cached_content_token_count")
-    if not cached:
-        return INCONCLUSIVE, "no cached tokens on the repeated call"
-    if prompt is None:
-        return INCONCLUSIVE, "usage has no prompt token count"
-    nums = f"prompt {prompt}, cached {cached}"
-    return (CONFIRMED if cached <= prompt else CONTRADICTED), nums
+def gemini_accounting(usage: dict[str, Any], **known: bool | None) -> Accounting:
+    """Gemini ``usage_metadata``: tool-use prompt tokens count as input."""
+    return resolve(
+        (_n(usage, "prompt_token_count") or 0) + (_n(usage, "tool_use_prompt_token_count") or 0),
+        _n(usage, "cached_content_token_count") or 0,
+        _n(usage, "candidates_token_count") or 0,
+        _n(usage, "thoughts_token_count") or 0,
+        _n(usage, "total_token_count"),
+        **known,
+    )
+
+
+def judge(found: bool | None, assumed: bool) -> str:
+    if found is None:
+        return INCONCLUSIVE
+    return CONFIRMED if found == assumed else CONTRADICTED
 
 
 def output_cap_scope(
-    response: ProviderResponse, cap: int, cap_includes_reasoning: bool
+    acc: Accounting, stop: str | None, cap: int, cap_includes_reasoning: bool
 ) -> tuple[str, str]:
-    """Did a call with ``max_output_tokens=cap`` spend more than ``cap`` on reasoning + output?"""
-    total = response.usage.output_tokens  # normalized: visible output + thinking
-    thinking = response.usage.thinking_tokens or 0
-    stop = response.stop_reason
-    nums = f"cap {cap}, output incl. reasoning {total} (reasoning {thinking}), stop {stop}"
-    if total > cap:
+    """Did a call with ``max_output_tokens=cap`` generate more than ``cap`` tokens?"""
+    nums = f"cap {cap}, generated {acc.generated} (reasoning {acc.hidden}), stop {stop}"
+    if acc.generated is None:
+        return INCONCLUSIVE, f"how reasoning is counted is unresolved: {acc.detail}"
+    if acc.generated > cap:
         includes = False
-    elif response.stop_reason == "max_tokens" and thinking:
+    elif stop == "max_tokens" and acc.hidden:
         includes = True
     else:
         return INCONCLUSIVE, f"the call stayed under the cap: {nums}"
-    return (CONFIRMED if includes == cap_includes_reasoning else CONTRADICTED), nums
+    return judge(includes, cap_includes_reasoning), nums
 
 
 def provider_cost_match(ours: float, theirs: float | None, alternative: float) -> tuple[str, str]:
@@ -257,8 +279,8 @@ def provider_cost_match(ours: float, theirs: float | None, alternative: float) -
     if close(ours):
         return CONFIRMED, nums
     if close(alternative):
-        return CONTRADICTED, nums
-    return INCONCLUSIVE, f"neither reading matches the bill (check prices in models.toml): {nums}"
+        return CONTRADICTED, f"reasoning is inside output_tokens: {nums}"
+    return CONTRADICTED, f"neither reading matches the bill (check models.toml prices): {nums}"
 
 
 # The probe -------------------------------------------------------------------------
@@ -272,6 +294,10 @@ class _Probe:
         self.provider = adapter.provider
         self.model = adapter.model.id
         self.findings: list[Finding] = []
+        # What the raw counts settle, carried from call to call (None = unresolved).
+        self.hidden_inside: bool | None = None
+        self.cache_inside: bool | None = None
+        self.first: tuple[ProviderResponse, dict[str, Any]] | None = None
 
     def add(self, check: str, assumption: str, verdict: str, detail: str, **evidence: Any) -> None:
         self.findings.append(Finding(self.model, check, assumption, verdict, detail, evidence))
@@ -281,29 +307,52 @@ class _Probe:
     ) -> tuple[ProviderResponse, dict[str, Any], Any]:
         """One metered call; returns the normalized response, raw usage and raw reply."""
         adapter, tap = _variant(self.adapter, **variant)
-        response = self.ledger.send(adapter, request or self.request, purpose="probe", phase=phase)
+        reserved: list[float] = []
+        try:
+            response = self.ledger.send(
+                adapter,
+                request or self.request,
+                purpose="probe",
+                phase=phase,
+                on_start=reserved.append,
+            )
+        except ProviderError as exc:
+            # No HTTP status: the call may still have been billed; keep its worst case.
+            if exc.status is None and reserved:
+                self.ledger.hold(reserved[0])
+            raise
         return response, _usage(tap.reply, self.provider), tap.reply
 
+    def accounting(self, usage: dict[str, Any]) -> Accounting:
+        known = {"hidden_inside": self.hidden_inside, "cache_inside": self.cache_inside}
+        if self.provider == "google":
+            return gemini_accounting(usage, **known)
+        return responses_accounting(usage, **known)
+
     def run(self) -> list[Finding]:
-        try:
-            first = self._serves()
-        except ProviderError as exc:
-            self.add("serves_request", self._serves_assumption(), FAILED, str(exc))
-            return self.findings
-        self._accounting(first)
-        steps = [self._cache]
+        steps = [self._serves_request, self._cache_read]
         if self.provider != "anthropic":
-            steps.append(self._output_cap)
+            steps.append(self._output_cap_scope)
         if self.provider in RESPONSES_API:
             steps += [self._default_effort, self._parallel_tool_calls]
         if self.provider == "google":
             steps.append(self._validated_mode)
         for step in steps:
+            name = step.__name__.lstrip("_")
             try:
                 step()
+            except SpendCapReached as exc:
+                self.add("spend_cap", "", FAILED, str(exc))
+                break
             except ProviderError as exc:
-                name = step.__name__.lstrip("_")
-                self.add(name, "", FAILED, str(exc))
+                self.add(
+                    name,
+                    self._serves_assumption() if step == self._serves_request else "",
+                    FAILED,
+                    str(exc),
+                )
+                if step == self._serves_request:
+                    break
         return self.findings
 
     def _serves_assumption(self) -> str:
@@ -314,8 +363,8 @@ class _Probe:
             "(store=false, strict tools, tool_choice auto)",
         }.get(self.provider, "the API accepts our Neutral Harness request for this Model")
 
-    def _serves(self) -> tuple[ProviderResponse, dict[str, Any], Any]:
-        response, usage, reply = self.call("serves_request")
+    def _serves_request(self) -> None:
+        response, usage, _ = self.call("serves_request")
         tools = [c.name for c in response.tool_calls]
         known = {t.name for t in self.request.tools}
         detail = f"{len(tools)} tool call(s) {tools}, stop {response.stop_reason}"
@@ -323,30 +372,7 @@ class _Probe:
         if not tools:
             detail += "; accepted, but the model made no tool call"
         self.add("serves_request", self._serves_assumption(), verdict, detail, usage=usage)
-        return response, usage, reply
-
-    def _accounting(self, first: tuple[ProviderResponse, dict[str, Any], Any]) -> None:
-        response, usage, _ = first
-        if self.provider in RESPONSES_API:
-            inside = self.adapter.reasoning_in_output  # type: ignore[attr-defined]
-            where = "inside" if inside else "on top of"
-            verdict, detail = reasoning_accounting(usage, inside)
-            self.add(
-                "reasoning_accounting",
-                f"reasoning_tokens are {where} output_tokens",
-                verdict,
-                detail,
-                usage=usage,
-            )
-        if self.provider == "google":
-            verdict, detail = gemini_thoughts_accounting(usage)
-            self.add(
-                "thoughts_accounting",
-                "candidates_token_count excludes thoughts_token_count",
-                verdict,
-                detail,
-                usage=usage,
-            )
+        self.first = (response, usage)
         if self.provider == "xai":
             self._xai_cost(response, usage)
 
@@ -365,7 +391,7 @@ class _Probe:
             usage=usage,
         )
 
-    def _cache(self) -> None:
+    def _cache_read(self) -> None:
         # The first call wrote (or warmed) the prefix; an identical call should read it.
         response, usage, _ = self.call("cache_read")
         cached = response.usage.cached_input_tokens
@@ -382,40 +408,65 @@ class _Probe:
             usage=usage,
             prompt_tokens=size,
         )
-        if self.provider in RESPONSES_API:
-            verdict, detail = cached_in_input(usage)
-            self.add(
-                "cached_in_input",
-                "input_tokens includes input_tokens_details.cached_tokens",
-                verdict,
-                detail,
-                usage=usage,
-            )
-            written = _n(usage, "input_tokens_details", "cache_write_tokens")
-            if self.provider == "meta":
-                self.add(
-                    "cache_write_field",
-                    "Meta reports no cache-write tokens (no write charge)",
-                    OBSERVED,
-                    f"cache_write_tokens = {written}",
-                    usage=usage,
-                )
-        if self.provider == "google":
-            verdict, detail = gemini_cached_in_prompt(usage)
-            self.add(
-                "cached_in_prompt",
-                "prompt_token_count includes cached_content_token_count",
-                verdict,
-                detail,
-                usage=usage,
-            )
         if self.provider == "xai":
             self._xai_cost(response, usage)
+        if self.first is not None and (self.provider in RESPONSES_API or self.provider == "google"):
+            self._settle_accounting(self.first[1], usage)
+        if self.provider == "meta":
+            written = _n(usage, "input_tokens_details", "cache_write_tokens")
+            self.add(
+                "cache_write_field",
+                "Meta reports no cache-write tokens (no write charge)",
+                OBSERVED,
+                f"cache_write_tokens = {written}",
+                usage=usage,
+            )
 
-    def _output_cap(self) -> None:
+    def _settle_accounting(self, first: dict[str, Any], second: dict[str, Any]) -> None:
+        """Decide both questions from the two identical calls, each narrowing the other."""
+        for _ in range(2):  # an answer from one call can settle the other call's question
+            for usage in (first, second):
+                acc = self.accounting(usage)
+                self.hidden_inside = (
+                    self.hidden_inside if acc.hidden_inside is None else acc.hidden_inside
+                )
+                self.cache_inside = (
+                    self.cache_inside if acc.cache_inside is None else acc.cache_inside
+                )
+        details = (
+            f"first call: {self.accounting(first).detail}; repeat: {self.accounting(second).detail}"
+        )
+        if self.provider == "google":
+            hidden = (
+                "thoughts_accounting",
+                "candidates_token_count excludes thoughts_token_count",
+                False,
+            )
+            cache = (
+                "cached_in_prompt",
+                "prompt_token_count includes cached_content_token_count",
+                True,
+            )
+        else:
+            inside = self.adapter.reasoning_in_output  # type: ignore[attr-defined]
+            where = "inside" if inside else "on top of"
+            hidden = ("reasoning_accounting", f"reasoning_tokens are {where} output_tokens", inside)
+            cache = (
+                "cached_in_input",
+                "input_tokens includes input_tokens_details.cached_tokens",
+                True,
+            )
+        for (check, assumption, assumed), found in (
+            (hidden, self.hidden_inside),
+            (cache, self.cache_inside),
+        ):
+            self.add(check, assumption, judge(found, assumed), details, first=first, repeat=second)
+
+    def _output_cap_scope(self) -> None:
         includes = self.provider != "xai"
         response, usage, _ = self.call("output_cap", max_output_tokens=CAP_PROBE_TOKENS)
-        verdict, detail = output_cap_scope(response, CAP_PROBE_TOKENS, includes)
+        acc = self.accounting(usage)
+        verdict, detail = output_cap_scope(acc, response.stop_reason, CAP_PROBE_TOKENS, includes)
         what = "includes" if includes else "excludes"
         self.add(
             "output_cap_scope",
@@ -450,19 +501,27 @@ class _Probe:
         )
 
     def _parallel_tool_calls(self) -> None:
+        """Ask outright for two calls with the flag off; if it holds, check the model would
+        otherwise have made two (a positive control with the flag on)."""
         request = replace(self.request, tail=f"{self.request.tail}\n\n{PARALLEL_ASK}")
-        response, usage, reply = self.call("parallel_tool_calls", request=request)
-        n = len(response.tool_calls)
-        echoed = (dump(reply) or {}).get("parallel_tool_calls")
-        detail = f"asked for two calls, got {n}; reply echoes parallel_tool_calls={echoed}"
-        verdict = CONTRADICTED if n > 1 else (CONFIRMED if n == 1 else INCONCLUSIVE)
-        self.add(
-            "parallel_tool_calls",
-            "parallel_tool_calls=false limits a reply to one tool call",
-            verdict,
-            detail,
-            usage=usage,
-        )
+
+        def parallel(on: bool) -> Callable[[dict[str, Any]], dict[str, Any]]:
+            return lambda params: {**params, "parallel_tool_calls": on}
+
+        off, usage, _ = self.call("parallel_tool_calls", request=request)
+        n_off = len(off.tool_calls)
+        assumption = "parallel_tool_calls=false limits a reply to one tool call"
+        if n_off > 1:
+            detail = f"asked for two calls with the flag off, got {n_off}"
+            self.add("parallel_tool_calls", assumption, CONTRADICTED, detail, usage=usage)
+            return
+        on, control, _ = self.call("parallel_control", request=request, edit=parallel(True))
+        n_on = len(on.tool_calls)
+        detail = f"asked for two calls: {n_off} with the flag off, {n_on} with it on"
+        verdict = CONFIRMED if n_on > 1 else INCONCLUSIVE
+        if verdict == INCONCLUSIVE:
+            detail += " (the model made one call even when allowed more)"
+        self.add("parallel_tool_calls", assumption, verdict, detail, usage=usage, control=control)
 
     def _validated_mode(self) -> None:
         def validated(params: dict[str, Any]) -> dict[str, Any]:
@@ -539,10 +598,7 @@ def command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> int:
             print(f"{model_id}: skipped ({exc})")
             continue
         ledger = Ledger(args.spend_cap)
-        try:
-            found = probe_model(adapter, ledger, request)
-        except SpendCapReached as exc:
-            found = [Finding(model_id, "spend_cap", "", FAILED, str(exc))]
+        found = probe_model(adapter, ledger, request)
         findings += found
         spent[model_id] = round(ledger.spent_usd, 6)
         print(f"\n{model_id} (${ledger.spent_usd:.4f})")

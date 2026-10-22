@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -19,7 +20,6 @@ from zantine.harness.ledger import Ledger
 from zantine.harness.meta_adapter import MetaAdapter
 from zantine.harness.openai_adapter import OpenAIAdapter
 from zantine.harness.pricing import PER_TOKEN, model_spec
-from zantine.harness.provider import ProviderResponse, Usage
 from zantine.harness.xai_adapter import XAIAdapter
 
 OK, NO, SEEN, UNSURE = probe.CONFIRMED, probe.CONTRADICTED, probe.OBSERVED, probe.INCONCLUSIVE
@@ -35,21 +35,31 @@ def usage(inp: int, out: int, total: int, cached: int = 0, reasoning: int | None
     }
 
 
+def answers(acc: probe.Accounting) -> tuple[bool | None, bool | None]:
+    return acc.hidden_inside, acc.cache_inside
+
+
 def test_reasoning_accounting_reads_the_total() -> None:
-    inside = usage(1000, 300, 1300)
-    outside = usage(1000, 300, 1400)
-    assert probe.reasoning_accounting(inside, reasoning_in_output=True)[0] == OK
-    assert probe.reasoning_accounting(outside, reasoning_in_output=False)[0] == OK
-    assert probe.reasoning_accounting(inside, reasoning_in_output=False)[0] == NO
-    assert probe.reasoning_accounting(outside, reasoning_in_output=True)[0] == NO
-    assert probe.reasoning_accounting(usage(1000, 300, 1999), True)[0] == UNSURE
-    assert probe.reasoning_accounting(usage(1000, 300, 1300, reasoning=0), True)[0] == UNSURE
+    acc = probe.responses_accounting
+    assert answers(acc(usage(1000, 300, 1300))) == (True, None)  # nothing cached: no answer
+    assert answers(acc(usage(1000, 300, 1400))) == (False, None)
+    assert answers(acc(usage(1000, 300, 1999))) == (None, None)  # no reading fits
+    assert answers(acc(usage(1000, 300, 1300, reasoning=0))) == (None, None)
+    assert acc(usage(1000, 300, 1400)).generated == 400
+    assert acc(usage(1000, 300, 1300)).generated == 300
 
 
-def test_cached_tokens_inside_or_outside_input() -> None:
-    assert probe.cached_in_input(usage(1000, 300, 1300, cached=800))[0] == OK
-    assert probe.cached_in_input(usage(200, 300, 1300, cached=800))[0] == NO
-    assert probe.cached_in_input(usage(1000, 300, 1300, cached=0))[0] == UNSURE
+def test_cache_and_reasoning_are_decided_together() -> None:
+    acc = probe.responses_accounting
+    assert answers(acc(usage(1000, 300, 1300, cached=800))) == (True, True)
+    assert answers(acc(usage(200, 300, 1300, cached=800))) == (True, False)
+    # 1000 + 300 + 100 fits cache-inside/reasoning-on-top and cache-outside/reasoning-inside.
+    ambiguous = usage(1000, 300, 1400, cached=100, reasoning=100)
+    assert answers(acc(ambiguous)) == (None, None)
+    assert acc(ambiguous).generated is None
+    # Knowing one answer (from another call) settles the other.
+    assert answers(acc(ambiguous, hidden_inside=False)) == (False, True)
+    assert answers(acc(ambiguous, cache_inside=False)) == (True, False)
 
 
 def test_gemini_thoughts_and_cache_accounting() -> None:
@@ -60,29 +70,43 @@ def test_gemini_thoughts_and_cache_accounting() -> None:
         "thoughts_token_count": 200,
         "total_token_count": 1250,
     }
-    assert probe.gemini_thoughts_accounting(u)[0] == OK
-    assert probe.gemini_thoughts_accounting(u | {"total_token_count": 1050})[0] == NO
-    assert probe.gemini_cached_in_prompt(u)[0] == OK
-    assert probe.gemini_cached_in_prompt(u | {"cached_content_token_count": 1200})[0] == NO
+    acc = probe.gemini_accounting
+    assert answers(acc(u)) == (False, True)
+    assert answers(acc(u | {"total_token_count": 1050})) == (True, True)
+    # Cached tokens on top of the prompt count: 1000 + 600 + 50 + 200.
+    assert answers(acc(u | {"total_token_count": 1850})) == (False, False)
+    assert answers(acc(u | {"total_token_count": 1251})) == (None, None)
 
 
-def response(output: int, thinking: int, stop: str) -> ProviderResponse:
-    return ProviderResponse((), "", stop, Usage(output_tokens=output, thinking_tokens=thinking))
+def test_judge() -> None:
+    assert probe.judge(True, True) == OK
+    assert probe.judge(False, True) == NO
+    assert probe.judge(None, True) == UNSURE
 
 
-def test_output_cap_scope() -> None:
-    # Spent past the cap: the cap did not count reasoning.
-    assert probe.output_cap_scope(response(900, 850, "max_tokens"), 256, False)[0] == OK
-    assert probe.output_cap_scope(response(900, 850, "max_tokens"), 256, True)[0] == NO
-    # Stopped at the cap with reasoning inside it.
-    assert probe.output_cap_scope(response(256, 256, "max_tokens"), 256, True)[0] == OK
-    assert probe.output_cap_scope(response(120, 100, "tool_use"), 256, True)[0] == UNSURE
+def test_output_cap_scope_counts_from_resolved_raw_usage() -> None:
+    cap = 256
+    on_top = probe.responses_accounting(usage(5000, 256, 5456, reasoning=200))
+    # Visible output hit the cap and reasoning came on top: the cap excludes reasoning.
+    assert probe.output_cap_scope(on_top, "max_tokens", cap, False)[0] == OK
+    assert probe.output_cap_scope(on_top, "max_tokens", cap, True)[0] == NO
+    # Reasoning inside output (total = input + output): 256 generated, stopped at the cap.
+    inside = probe.responses_accounting(usage(5000, 256, 5256, reasoning=200))
+    assert probe.output_cap_scope(inside, "max_tokens", cap, True)[0] == OK
+    assert probe.output_cap_scope(inside, "max_tokens", cap, False)[0] == NO
+    # The reviewer's case: xAI actually counting reasoning inside must not confirm "excludes".
+    assert probe.output_cap_scope(inside, "max_tokens", cap, False)[0] != OK
+    unresolved = probe.responses_accounting(usage(5000, 256, 9999, reasoning=200))
+    assert probe.output_cap_scope(unresolved, "max_tokens", cap, False)[0] == UNSURE
+    under = probe.responses_accounting(usage(5000, 120, 5120, reasoning=100))
+    assert probe.output_cap_scope(under, "tool_use", cap, True)[0] == UNSURE
 
 
 def test_xai_bill_against_our_prices() -> None:
     assert probe.provider_cost_match(0.0100, 0.0101, 0.008)[0] == OK
     assert probe.provider_cost_match(0.0100, 0.0080, 0.008)[0] == NO
-    assert probe.provider_cost_match(0.0100, 0.0300, 0.008)[0] == UNSURE
+    # A trustworthy bill neither reading reproduces disproves the assumption.
+    assert probe.provider_cost_match(0.0100, 0.0300, 0.008)[0] == NO
     assert probe.provider_cost_match(0.0100, None, 0.008)[0] == UNSURE
 
 
@@ -203,3 +227,56 @@ def test_probe_needs_the_live_flag_and_env(monkeypatch: pytest.MonkeyPatch, caps
     assert "ZANTINE_LIVE=1" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         main(["probe", "--models", "nope", "--live"])
+
+
+def test_parallel_flag_needs_a_positive_control() -> None:
+    """One call with the flag off proves nothing unless the model makes two when allowed."""
+
+    def obeys_flag(params: dict[str, Any]) -> Any:
+        two = params["parallel_tool_calls"] and "Probe instruction" in str(params["input"])
+        return (
+            openai_reply(("wait", {}), ("move", {"room": "Medbay"}))
+            if two
+            else openai_reply(("wait", {}))
+        )
+
+    def always_one(params: dict[str, Any]) -> Any:
+        return openai_reply(("wait", {}))
+
+    sol = model_spec("gpt-6.1-sol")
+    held = by_check(probe.probe_model(OpenAIAdapter(sol, OpenAIFake(obeys_flag)), Ledger(2)))
+    assert held["parallel_tool_calls"].verdict == OK
+    one = by_check(probe.probe_model(OpenAIAdapter(sol, OpenAIFake(always_one)), Ledger(2)))
+    assert one["parallel_tool_calls"].verdict == UNSURE
+
+
+def test_a_call_lost_in_transit_keeps_its_worst_case_against_the_cap() -> None:
+    import httpx
+    import openai
+
+    def first_then_timeouts(params: dict[str, Any]) -> Any:
+        if fake.responses.calls[:-1]:
+            return openai.APITimeoutError(request=httpx.Request("POST", "https://example.test"))
+        return openai_reply(("wait", {}))
+
+    fake = OpenAIFake(first_then_timeouts)
+    ledger = Ledger(5)
+    findings = probe.probe_model(OpenAIAdapter(model_spec("gpt-6.1-sol"), fake), ledger)
+    failed = [f for f in findings if f.verdict == probe.FAILED]
+    assert len(failed) == len(fake.responses.calls) - 1 >= 3
+    billed = sum(r.cost_usd for r in ledger.records)
+    # Each lost call holds its own worst case; the smallest is the 256-token cap probe's.
+    size = probe.probe_request().text_size()
+    least = replace(model_spec("gpt-6.1-sol"), max_output_tokens=probe.CAP_PROBE_TOKENS)
+    assert ledger.spent_usd - billed >= len(failed) * least.worst_case_cost(size)
+
+
+def test_reaching_the_spend_cap_keeps_what_was_found() -> None:
+    sol = model_spec("gpt-6.1-sol")
+    needed = sol.worst_case_cost(probe.probe_request().text_size())
+    ledger = Ledger(needed * 1.01)  # room for the first call only
+    findings = probe.probe_model(OpenAIAdapter(sol, OpenAIFake()), ledger)
+    assert [(f.check, f.verdict) for f in findings] == [
+        ("serves_request", OK),
+        ("spend_cap", probe.FAILED),
+    ]

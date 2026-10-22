@@ -13,6 +13,8 @@ Request shape, per the current API:
 - Caching is implicit: a repeated prefix is discounted automatically, with no
   write charge. Explicit caches are not used (they bill storage per hour).
 - Each call is single-turn, so thought signatures never need to be sent back.
+- ``automatic_continuation`` is off: one ``send`` is exactly one billed request,
+  and a ``CONTINUATION`` finish (the per-request token limit) is ``max_tokens``.
 
 Usage: ``prompt_token_count`` *includes* ``cached_content_token_count``, so the
 cached part is subtracted; ``candidates_token_count`` *excludes*
@@ -87,6 +89,9 @@ class GoogleAdapter(ProviderAdapter):
                 "thinking_config": {"thinking_level": self.model.effort_setting},
                 "max_output_tokens": self.model.max_output_tokens,
                 "automatic_function_calling": {"disable": True},
+                # The SDK would otherwise follow a CONTINUATION reply with more billed
+                # requests inside this one call, past the Ledger's per-call reservation.
+                "automatic_continuation": False,
             },
         }
 
